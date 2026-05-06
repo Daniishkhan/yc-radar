@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("data"), validation_alias="DATA_DIR")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", validation_alias="OPENAI_MODEL")
+    firecrawl_api_key: str | None = Field(default=None, validation_alias="FIRECRAWL_API_KEY")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

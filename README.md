@@ -12,11 +12,9 @@ The first version is intentionally grounded and boring in the right places:
 ## Quick Start
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev
 cp .env.example .env
-uvicorn yc_radar.main:app --reload
+uv run uvicorn yc_radar.main:app --reload
 ```
 
 Open:
@@ -28,7 +26,7 @@ Open:
 ## Refresh YC Data
 
 ```bash
-python extract_yc_companies.py
+uv run python extract_yc_companies.py
 ```
 
 The extractor queries the same public Algolia index used by `ycombinator.com/companies`, splits by batch to avoid the 1,000-result cap, and writes JSON/CSV outputs into `data/`.
@@ -38,7 +36,7 @@ The extractor queries the same public Algolia index used by `ycombinator.com/com
 Put the resume PDF at `data/resume/resume.pdf`, then run:
 
 ```bash
-python scripts/ingest_resume.py
+uv run python scripts/ingest_resume.py
 ```
 
 This writes:
@@ -48,6 +46,31 @@ This writes:
 
 Those files are intentionally ignored by git because they contain personal information.
 They are local inputs for future agent scripts and should not be exposed through the API.
+
+## Weekly Candidate Fit Engine
+
+Generate a local target list from the YC export and your private candidate profile:
+
+```bash
+uv run python scripts/generate_weekly_targets.py --limit 40 --candidate-pool 100
+```
+
+The script writes ignored, local run artifacts into `data/runs/YYYY-MM-DD/`:
+
+- `weekly_targets.json`
+- `weekly_targets.csv`
+- `hiring_verifications.json`
+
+Hiring verification treats YC's `isHiring` as `yc_is_hiring`, then optionally checks live pages with Firecrawl. The v1 verifier is free-plan-safe: it scrapes the company homepage, detects likely careers/jobs links, scrapes at most two more exact pages per company, caps concurrency at `2`, and caches results so reruns do not spend duplicate credits. It does not use wildcard crawls or broad domain extraction.
+
+Useful dry runs:
+
+```bash
+uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
+uv run python scripts/generate_weekly_targets.py --verify-hiring --no-llm --limit 5 --candidate-pool 10
+```
+
+Use the first command when you want zero API spend. Use the second for a tiny live Firecrawl smoke test.
 
 ## Useful Endpoints
 

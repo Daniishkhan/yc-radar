@@ -7,22 +7,21 @@ This is a Python 3.11 FastAPI project using a `src` package layout. Application 
 ## Build, Test, and Development Commands
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
-Set up an editable install with dev tools.
+Set up the local project environment with dev tools.
 
 ```bash
-uvicorn yc_radar.main:app --reload
-pytest
-ruff check src tests extract_yc_companies.py
-python extract_yc_companies.py
+uv run uvicorn yc_radar.main:app --reload
+uv run pytest
+uv run ruff check src tests scripts extract_yc_companies.py
+uv run python extract_yc_companies.py
+uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
 docker compose up --build
 ```
 
-Use `uvicorn` for local API development, `pytest` for the test suite, `ruff check` for linting, the extractor to refresh `data/`, and Docker Compose for a containerized run.
+Use `uv run uvicorn` for local API development, `uv run pytest` for the test suite, `uv run ruff check` for linting, the extractor to refresh `data/`, the weekly target script for local candidate-fit runs, and Docker Compose for a containerized run.
 
 ## Coding Style & Naming Conventions
 
@@ -30,7 +29,7 @@ Use 4-space indentation, type hints on public functions, and Python 3.11 syntax.
 
 ## Testing Guidelines
 
-Tests use `pytest` and should be named `tests/test_*.py` with functions named `test_*`. Use `fastapi.testclient.TestClient` for API behavior and service-level tests for repository/data loading. Keep tests deterministic and local; avoid network calls in tests. Run `pytest` before opening a PR.
+Tests use `pytest` and should be named `tests/test_*.py` with functions named `test_*`. Use `fastapi.testclient.TestClient` for API behavior and service-level tests for repository/data loading. Keep tests deterministic and local; avoid network calls in tests. Run `uv run pytest` before opening a PR.
 
 ## Commit & Pull Request Guidelines
 
@@ -40,4 +39,4 @@ Pull requests should include a brief summary, test commands run, linked issue or
 
 ## Security & Configuration Tips
 
-Copy `.env.example` to `.env` for local settings. Do not commit secrets. `OPENAI_API_KEY` is optional and should only be required for LLM-refined outreach paths.
+Copy `.env.example` to `.env` for local settings. Do not commit secrets. `OPENAI_API_KEY` is optional and should only be required for LLM-refined outreach paths. `FIRECRAWL_API_KEY` is optional for live hiring checks; keep runs free-plan-safe by using exact-page scraping, at most three pages per company, and no wildcard crawls.

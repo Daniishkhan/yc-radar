@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import unescape
+from html.parser import HTMLParser
 import json
 import subprocess
 import time
@@ -23,6 +26,7 @@ API_KEY = (
 INDEX_NAME = "YCCompany_production"
 ENDPOINT = f"https://{APP_ID.lower()}-dsn.algolia.net/1/indexes/*/queries"
 OUT_DIR = Path("data")
+COMPANY_PAGE_CONCURRENCY = 8
 
 
 CSV_FIELDS = [
@@ -43,6 +47,33 @@ CSV_FIELDS = [
     "subindustry",
     "industries",
     "tags",
+    "job_count",
+]
+
+JOB_CSV_FIELDS = [
+    "id",
+    "company_id",
+    "company_slug",
+    "company_name",
+    "company_yc_url",
+    "title",
+    "url",
+    "absolute_url",
+    "apply_url",
+    "location",
+    "type",
+    "role",
+    "role_specific_type",
+    "pretty_role",
+    "salary_range",
+    "equity_range",
+    "min_experience",
+    "min_school_year",
+    "visa",
+    "skills",
+    "is_incomplete",
+    "created_at",
+    "last_active",
 ]
 
 
@@ -102,6 +133,94 @@ def strip_search_metadata(company: dict[str, Any]) -> dict[str, Any]:
     return company
 
 
+class DataPageParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.data_pages: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        data_page = attrs_dict.get("data-page")
+        if data_page:
+            self.data_pages.append(data_page)
+
+
+def fetch_company_page(slug: str) -> str:
+    result = subprocess.run(
+        [
+            "curl",
+            "-L",
+            "-sS",
+            "--compressed",
+            f"https://www.ycombinator.com/companies/{slug}",
+            "-H",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "-H",
+            "User-Agent: Mozilla/5.0 yc-radar-export/0.1",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def extract_page_props(html: str) -> dict[str, Any]:
+    parser = DataPageParser()
+    parser.feed(html)
+    if not parser.data_pages:
+        return {}
+    page = json.loads(unescape(parser.data_pages[0]))
+    props = page.get("props")
+    return props if isinstance(props, dict) else {}
+
+
+def extract_company_job_postings(company: dict[str, Any]) -> list[dict[str, Any]]:
+    html = fetch_company_page(str(company["slug"]))
+    props = extract_page_props(html)
+    job_postings = props.get("jobPostings") or []
+    if not isinstance(job_postings, list):
+        return []
+
+    jobs: list[dict[str, Any]] = []
+    for job in job_postings:
+        if not isinstance(job, dict):
+            continue
+        job = dict(job)
+        job["company_id"] = company.get("id")
+        job["company_slug"] = company.get("slug")
+        job["company_name"] = company.get("name")
+        job["company_yc_url"] = f"https://www.ycombinator.com/companies/{company.get('slug', '')}"
+        jobs.append(job)
+    return jobs
+
+
+def extract_all_job_postings(companies: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    hiring_companies = [company for company in companies if company.get("isHiring")]
+    jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
+    errors: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=COMPANY_PAGE_CONCURRENCY) as executor:
+        future_to_company = {
+            executor.submit(extract_company_job_postings, company): company
+            for company in hiring_companies
+        }
+        completed = 0
+        for future in as_completed(future_to_company):
+            company = future_to_company[future]
+            completed += 1
+            try:
+                jobs_by_slug[str(company["slug"])] = future.result()
+            except Exception as exc:
+                errors.append(f"{company.get('slug')}: {exc}")
+                jobs_by_slug[str(company["slug"])] = []
+
+            if completed % 100 == 0:
+                print(f"Fetched job postings for {completed} / {len(hiring_companies)} hiring companies.")
+
+    return jobs_by_slug, errors
+
+
 def as_joined(value: Any) -> str:
     if value is None:
         return ""
@@ -129,6 +248,37 @@ def csv_row(company: dict[str, Any]) -> dict[str, Any]:
         "subindustry": company.get("subindustry", ""),
         "industries": as_joined(company.get("industries")),
         "tags": as_joined(company.get("tags")),
+        "job_count": len(company.get("jobPostings") or []),
+    }
+
+
+def job_csv_row(job: dict[str, Any]) -> dict[str, Any]:
+    relative_url = job.get("url") or ""
+    absolute_url = urllib.parse.urljoin("https://www.ycombinator.com", relative_url)
+    return {
+        "id": job.get("id", ""),
+        "company_id": job.get("company_id", ""),
+        "company_slug": job.get("company_slug", ""),
+        "company_name": job.get("company_name", ""),
+        "company_yc_url": job.get("company_yc_url", ""),
+        "title": job.get("title", ""),
+        "url": relative_url,
+        "absolute_url": absolute_url,
+        "apply_url": job.get("applyUrl", ""),
+        "location": job.get("location", ""),
+        "type": job.get("type", ""),
+        "role": job.get("role", ""),
+        "role_specific_type": job.get("roleSpecificType", ""),
+        "pretty_role": job.get("prettyRole", ""),
+        "salary_range": job.get("salaryRange", ""),
+        "equity_range": job.get("equityRange", ""),
+        "min_experience": job.get("minExperience", ""),
+        "min_school_year": job.get("minSchoolYear", ""),
+        "visa": job.get("visa", ""),
+        "skills": as_joined(job.get("skills")),
+        "is_incomplete": job.get("isIncomplete", ""),
+        "created_at": job.get("createdAt", ""),
+        "last_active": job.get("lastActive", ""),
     }
 
 
@@ -213,14 +363,18 @@ def prototype_score(company: dict[str, Any]) -> int:
 
 
 def write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as file:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+    tmp_path.replace(path)
 
 
 def main() -> None:
@@ -244,6 +398,13 @@ def main() -> None:
             time.sleep(0.15)
 
     companies = sorted(by_object_id.values(), key=lambda company: str(company.get("id", "")))
+    jobs_by_slug, job_errors = extract_all_job_postings(companies)
+    for company in companies:
+        company["jobPostings"] = jobs_by_slug.get(str(company.get("slug")), [])
+
+    job_postings = [
+        job for company in companies for job in company.get("jobPostings", []) if isinstance(job, dict)
+    ]
 
     ranked_rows = []
     for company in companies:
@@ -267,11 +428,22 @@ def main() -> None:
         ranked_rows,
         ["prototype_score", "prototype_angle", *CSV_FIELDS],
     )
+    write_json(OUT_DIR / "yc_job_postings_raw.json", job_postings)
+    write_csv(
+        OUT_DIR / "yc_job_postings.csv",
+        [job_csv_row(job) for job in job_postings],
+        JOB_CSV_FIELDS,
+    )
 
     print(f"Fetched {len(companies)} / {nb_hits} companies across {len(batch_counts)} YC batches.")
+    print(f"Fetched {len(job_postings)} job postings from {sum(1 for c in companies if c.get('isHiring'))} hiring companies.")
+    if job_errors:
+        print(f"Job posting page errors: {len(job_errors)}")
     print(f"Wrote {OUT_DIR / 'yc_companies_raw.json'}")
     print(f"Wrote {OUT_DIR / 'yc_companies.csv'}")
     print(f"Wrote {OUT_DIR / 'yc_companies_prototype_targets.csv'}")
+    print(f"Wrote {OUT_DIR / 'yc_job_postings_raw.json'}")
+    print(f"Wrote {OUT_DIR / 'yc_job_postings.csv'}")
 
 
 if __name__ == "__main__":
