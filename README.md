@@ -1,14 +1,48 @@
 # YC Radar
 
-YC Radar is a FastAPI workbench for turning the YC company directory into practical senior-engineer entry points: target lists, prototype missions, open-source PR ideas, founder outreach briefs, and eventually autonomous scouting agents.
+YC Radar is a local workbench for turning YC company data into senior-engineer entry
+points: companies to target, jobs worth filtering for, career pages to scrape, prototype
+ideas to build, and eventually founder outreach that is backed by something concrete.
 
-The first version is intentionally grounded and boring in the right places:
+The goal is not to build another job board. The goal is to find small, sharp openings where
+an AI/backend/data engineer can get noticed by shipping something useful before sending the
+email.
 
-- `data/yc_companies_raw.json` keeps the public YC/Algolia export.
-- `data/yc_radar.db` is the local SQLite source of truth for companies, YC jobs, and career surfaces.
-- `data/yc_companies_prototype_targets.csv` ranks companies for prototype outreach.
-- The API reads local data first, so it works before we wire in databases or queues.
-- Playbooks are deterministic by default, then can be refined by an LLM when `OPENAI_API_KEY` is set.
+## Stack
+
+- Python 3.11+
+- FastAPI and Uvicorn for the local API
+- Pydantic v2 for settings and response models
+- SQLAlchemy with SQLite for local persistence
+- httpx for deterministic HTTP fetching
+- OpenAI SDK for optional LLM-refined briefs
+- Firecrawl SDK for optional live hiring verification
+- pypdf for one-time resume ingestion
+- uv for dependency management and scripts
+- pytest and Ruff for tests and linting
+- Docker Compose for a containerized local run
+
+## Data Model
+
+`data/yc_radar.db` is the primary local database.
+
+Core tables:
+
+- `companies`: YC company profile data, prototype score, prototype angle, and raw payload.
+- `yc_job_postings`: YC job postings extracted from company page props, including title,
+  location, salary, equity, visa, skills, and raw payload.
+- `career_surfaces`: discovered job/career URLs from YC jobs, homepage links, sitemaps,
+  and capped common-path probes.
+
+CSV and JSON files in `data/` are snapshots for inspection and debugging. They are useful,
+but the app should read from SQLite first.
+
+Ignored local data:
+
+- `data/profile/`: candidate profile extracted from the resume.
+- `data/resume/`: private resume PDFs.
+- `data/runs/`: weekly target outputs.
+- `data/cache/`: HTTP cache for deterministic discovery.
 
 ## Quick Start
 
@@ -30,22 +64,69 @@ Open:
 uv run python extract_yc_companies.py
 ```
 
-The extractor queries the same public Algolia index used by `ycombinator.com/companies`, splits by batch to avoid the 1,000-result cap, enriches hiring companies with YC page-prop job postings, writes SQLite tables, and exports JSON/CSV snapshots into `data/`.
+This script queries the public Algolia index used by `ycombinator.com/companies`, splits by
+YC batch to avoid the 1,000-result cap, then fetches YC company pages for hiring companies
+to extract structured job postings from page props.
+
+It writes:
+
+- `data/yc_radar.db`
+- `data/yc_companies_raw.json`
+- `data/yc_companies.csv`
+- `data/yc_companies_prototype_targets.csv`
+- `data/yc_job_postings_raw.json`
+- `data/yc_job_postings.csv`
+
+The current checked-in snapshot has 5,880 companies and 4,833 YC job postings.
 
 ## Discover Career URLs
 
 ```bash
-uv run python scripts/discover_career_urls.py --limit 20
+uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 ```
 
-This deterministic resolver reads companies and YC jobs from SQLite, then finds career surfaces using YC job URLs, homepage links, `robots.txt` sitemaps, one-level sitemap indexes, and capped common-path probes. It does not use Firecrawl or browser automation. Results are written to SQLite and exported to:
+This script reads from SQLite and finds career surfaces without Firecrawl or browser
+automation. It uses a deterministic, cheap path:
+
+- Seed from known YC job posting URLs.
+- Fetch each company homepage once and extract career/jobs/ATS links.
+- Fetch `robots.txt` and sitemap files with one-level sitemap index expansion.
+- If nothing useful is found, probe a small fixed set like `/careers`, `/jobs`, `/join-us`,
+  `/join`, `/work-with-us`, and `/open-positions`.
+
+It writes to the `career_surfaces` table and exports:
 
 - `data/yc_career_surfaces_raw.json`
 - `data/yc_career_surfaces.csv`
 
-The HTTP cache lives in ignored `data/cache/career_url_discovery.json`.
+The current checked-in career surface sample was run against 100 companies and found 127
+surfaces, including 34 external career/job/ATS URLs.
 
-## One-Time Candidate Knowledge Base
+Inspect external career URLs:
+
+```bash
+uv run python - <<'PY'
+import sqlite3
+
+conn = sqlite3.connect("data/yc_radar.db")
+for row in conn.execute("""
+    SELECT company_slug, company_name, url, source, confidence, http_status
+    FROM career_surfaces
+    WHERE url NOT LIKE 'https://www.ycombinator.com/%'
+    ORDER BY confidence DESC, company_slug
+"""):
+    print(row)
+conn.close()
+PY
+```
+
+Run the full directory when you are ready to spend the time and requests:
+
+```bash
+uv run python scripts/discover_career_urls.py --concurrency 10
+```
+
+## Candidate Knowledge Base
 
 Put the resume PDF at `data/resume/resume.pdf`, then run:
 
@@ -58,35 +139,31 @@ This writes:
 - `data/profile/resume_text.txt`
 - `data/profile/candidate_profile.json`
 
-Those files are intentionally ignored by git because they contain personal information.
-They are local inputs for future agent scripts and should not be exposed through the API.
+Those files are ignored by git because they contain private candidate information. Future
+agents should use them as local context, not expose them through the API.
 
 ## Weekly Candidate Fit Engine
 
-Generate a local target list from the YC export and your private candidate profile:
+Generate a local shortlist:
 
 ```bash
 uv run python scripts/generate_weekly_targets.py --limit 40 --candidate-pool 100
 ```
 
-The script writes ignored, local run artifacts into `data/runs/YYYY-MM-DD/`:
-
-- `weekly_targets.json`
-- `weekly_targets.csv`
-- `hiring_verifications.json`
-
-Hiring verification treats YC's `isHiring` as `yc_is_hiring`, then optionally checks live pages with Firecrawl. The v1 verifier is free-plan-safe: it scrapes the company homepage, detects likely careers/jobs links, scrapes at most two more exact pages per company, caps concurrency at `2`, and caches results so reruns do not spend duplicate credits. It does not use wildcard crawls or broad domain extraction.
-
-Useful dry runs:
+Useful smoke tests:
 
 ```bash
 uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
 uv run python scripts/generate_weekly_targets.py --verify-hiring --no-llm --limit 5 --candidate-pool 10
 ```
 
-Use the first command when you want zero API spend. Use the second for a tiny live Firecrawl smoke test.
+The first command uses no paid APIs. The second performs a tiny Firecrawl-backed live hiring
+check. Firecrawl usage is intentionally free-plan-safe: exact pages only, no wildcard domain
+crawls, at most three pages per company, and cached results in `data/runs/YYYY-MM-DD/`.
 
-## Useful Endpoints
+## API
+
+Useful endpoints:
 
 - `GET /health`
 - `GET /companies?query=agent&hiring=true&max_team_size=10`
@@ -95,6 +172,9 @@ Use the first command when you want zero API spend. Use the second for a tiny li
 - `GET /missions/{slug}`
 - `POST /missions/{slug}/brief`
 
+The API uses `CompanyRepository`, which reads from SQLite when `data/yc_radar.db` has company
+rows and falls back to CSV snapshots only when the database is empty.
+
 ## Docker
 
 ```bash
@@ -102,12 +182,17 @@ cp .env.example .env
 docker compose up --build
 ```
 
-## Direction
+## Where This Is Going
 
-The app is meant to grow into a set of agents:
+Near-term useful agents:
 
-- **Scout Agent:** enriches companies with founders, CTOs, GitHub repos, docs, and careers pages.
-- **Prototype Agent:** proposes narrow demos that can be built in a few hours.
-- **PR Agent:** finds open-source issues and creates contribution plans.
-- **Outreach Agent:** writes concise founder emails with a repo/Loom angle.
-- **Portfolio Agent:** tracks shipped artifacts and follow-ups.
+- Scout: enrich companies with founders, CTOs, GitHub repos, docs, career pages, and hiring
+  signals.
+- Fit: rank companies and jobs against the candidate profile, including visa/location
+  eligibility.
+- Prototype: propose a small demo that can be built in a few hours for a specific company.
+- PR: find open-source contribution angles where the company has public repos.
+- Outreach: draft concise founder/CTO emails tied to the prototype or PR.
+
+The bias should stay practical: deterministic data first, LLMs second, and every output should
+make it easier to take a real shot at one company.

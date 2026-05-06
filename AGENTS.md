@@ -1,43 +1,101 @@
-# Repository Guidelines
+# YC Radar Agent Notes
 
-## Project Structure & Module Organization
+This repo is a local intelligence workbench for YC outreach. Treat it as a practical system,
+not a generic FastAPI template. The useful loop is:
 
-This is a Python 3.11 FastAPI project using a `src` package layout. Application code lives in `src/yc_radar/`: `main.py` creates the FastAPI app, `api/routes.py` defines endpoints, `domain/models.py` holds Pydantic models, `services/` loads SQLite-backed company data, `playbooks/` builds deterministic mission output, `agents/` contains LLM-assisted refinements, and `core/config.py` handles settings. Tests live in `tests/`. Local YC exports, ranked target CSVs, and the SQLite DB live in `data/`. `extract_yc_companies.py` refreshes YC company/job data, and `scripts/discover_career_urls.py` finds deterministic career surfaces.
+1. Ingest YC companies and jobs.
+2. Store the structured data in SQLite.
+3. Discover career surfaces cheaply and deterministically.
+4. Rank companies/jobs against the candidate profile.
+5. Generate prototype, PR, or founder outreach plays.
 
-## Build, Test, and Development Commands
+## Project Shape
+
+- `src/yc_radar/main.py`: FastAPI app entrypoint.
+- `src/yc_radar/api/routes.py`: API endpoints.
+- `src/yc_radar/domain/models.py`: Pydantic API/domain models.
+- `src/yc_radar/services/`: data access, candidate fit, profile loading, hiring verification.
+- `src/yc_radar/playbooks/`: deterministic mission and outreach playbook logic.
+- `src/yc_radar/agents/`: OpenAI-assisted refinements; keep LLM usage optional.
+- `extract_yc_companies.py`: refreshes YC company and job data into SQLite plus snapshots.
+- `scripts/discover_career_urls.py`: finds career/job/ATS URLs without Firecrawl or browser automation.
+- `scripts/generate_weekly_targets.py`: creates local candidate-fit target runs.
+- `scripts/ingest_resume.py`: converts the private resume PDF into local structured profile data.
+- `tests/`: deterministic tests; no network calls.
+
+## Source Of Truth
+
+`data/yc_radar.db` is primary. CSV/JSON files in `data/` are inspection snapshots and debug
+artifacts.
+
+Important tables:
+
+- `companies`
+- `yc_job_postings`
+- `career_surfaces`
+
+Personal candidate data is ignored and should stay local:
+
+- `data/resume/`
+- `data/profile/`
+- `data/runs/`
+- `data/cache/`
+
+Do not expose resume/profile contents through the API unless the user explicitly asks for that.
+
+## Commands
 
 ```bash
 uv sync --extra dev
-```
-
-Set up the local project environment with dev tools.
-
-```bash
 uv run uvicorn yc_radar.main:app --reload
 uv run pytest
 uv run ruff check src tests scripts extract_yc_companies.py
 uv run python extract_yc_companies.py
+uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
-uv run python scripts/discover_career_urls.py --limit 20
 docker compose up --build
 ```
 
-Use `uv run uvicorn` for local API development, `uv run pytest` for the test suite, `uv run ruff check` for linting, the extractor to refresh SQLite plus JSON/CSV snapshots, the weekly target script for local candidate-fit runs, the career discovery script for URL surfaces, and Docker Compose for a containerized run.
+Use `uv`; do not add pip workflows back into the docs.
 
-## Coding Style & Naming Conventions
+## Implementation Preferences
 
-Use 4-space indentation, type hints on public functions, and Python 3.11 syntax. Ruff is configured for a 100-character line length. Prefer `snake_case` for modules, functions, variables, and route handlers; use `PascalCase` for classes and Pydantic models. Keep deterministic business logic in `playbooks/` and data access in `services/`; only put OpenAI-dependent behavior in `agents/`.
+- Keep deterministic logic in services/scripts/playbooks.
+- Keep OpenAI-dependent behavior in `agents/` and behind explicit flags like `use_llm`.
+- Use SQLAlchemy for DB writes/reads; avoid ad hoc SQLite string work in app code.
+- Preserve API response shapes when changing persistence.
+- Keep network-heavy scripts resumable or cached where possible.
+- Tests should mock network behavior.
+- Generated YC snapshots and `data/yc_radar.db` can be committed when the user asks to refresh
+  or inspect data.
 
-## Testing Guidelines
+## Scraping And Enrichment Rules
 
-Tests use `pytest` and should be named `tests/test_*.py` with functions named `test_*`. Use `fastapi.testclient.TestClient` for API behavior and service-level tests for repository/data loading. Keep tests deterministic and local; avoid network calls in tests. Run `uv run pytest` before opening a PR.
+Career URL discovery should stay cheap:
 
-## Commit & Pull Request Guidelines
+- No Firecrawl.
+- No dynamic browser scraping.
+- No broad domain crawls.
+- Fetch homepage, `robots.txt`, capped sitemaps, and a small fixed probe list.
+- Cache HTTP responses in `data/cache/career_url_discovery.json`.
 
-There are no commits in the current repository history, so no local convention is established yet. Until one exists, use short imperative commit subjects such as `Add target filtering tests` or a Conventional Commits style like `feat: add outreach brief endpoint`.
+Firecrawl belongs in live hiring verification, not bulk discovery. Keep it free-plan-safe:
+exact pages only, at most three pages per company, low concurrency, and cached results.
 
-Pull requests should include a brief summary, test commands run, linked issue or motivation, and sample API output or screenshots when endpoint behavior changes. Call out intentional changes to files under `data/`.
+## Commit Style
 
-## Security & Configuration Tips
+Use short Conventional Commit-style subjects when possible:
 
-Copy `.env.example` to `.env` for local settings. Do not commit secrets. `DATABASE_URL` defaults to the local SQLite DB at `data/yc_radar.db`. `OPENAI_API_KEY` is optional and should only be required for LLM-refined outreach paths. `FIRECRAWL_API_KEY` is optional for live hiring checks; keep runs free-plan-safe by using exact-page scraping, at most three pages per company, and no wildcard crawls.
+- `feat: add sqlite persistence and career surface discovery`
+- `docs: refresh project guide`
+- `fix: preserve visa fields in yc job ingestion`
+
+Before committing code changes, run:
+
+```bash
+uv run pytest
+uv run ruff check src tests scripts extract_yc_companies.py
+```
+
+For docs-only changes, a pytest smoke run is usually enough, but lint/test is still preferred
+when generated data or scripts changed.
