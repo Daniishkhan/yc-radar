@@ -53,7 +53,7 @@ def extract_pdf_text(path: Path) -> tuple[str, int]:
 def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any]:
     return {
         "name": "Danish Khan",
-        "headline": "Senior Software Engineer | AI, Backend, Data Engineering, Full Stack",
+        "headline": "Senior Backend / Senior Software Engineer | AI and Data Systems",
         "contact": {
             "email": "danishafzalkhan@gmail.com",
             "phone": "+92 3369009019",
@@ -61,19 +61,25 @@ def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any
             "linkedin": "https://www.linkedin.com/in/danishafzalkhan",
         },
         "summary": (
-            "Senior software engineer with 6+ years of experience building full-stack "
-            "applications, backend systems, data pipelines, and LLM-powered products. "
+            "Senior backend/software engineer with 6+ years of experience building backend "
+            "systems, full-stack applications, data pipelines, and LLM-powered products. "
             "Recent work includes autonomous coding harnesses, local inference infrastructure, "
             "LLM evaluation benchmarks, high-volume ETL, and integrations for downstream model "
             "quality."
         ),
         "target_roles": [
-            "Senior AI Engineer",
             "Senior Backend Engineer",
-            "Senior Full-Stack Engineer",
-            "AI Infrastructure Engineer",
-            "Data Engineering Lead",
-            "Founding Engineer",
+            "Senior Software Engineer",
+            "Backend Platform Engineer",
+            "Infrastructure Engineer",
+            "Backend-heavy Founding Engineer",
+            "Backend-heavy Full Stack Engineer",
+        ],
+        "supporting_strengths": [
+            "AI engineering",
+            "Large language models",
+            "Data engineering",
+            "Full-stack product delivery",
         ],
         "core_expertise": [
             "Large language models",
@@ -201,24 +207,25 @@ def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any
         ],
         "positioning": {
             "short": (
-                "Senior AI/backend engineer who can build LLM systems, data pipelines, "
-                "and full-stack prototypes fast enough for early-stage YC teams."
+                "Senior backend/software engineer who can build reliable APIs, data systems, "
+                "LLM-powered backend workflows, and pragmatic demos for early-stage teams."
             ),
             "best_fit_companies": [
-                "AI infrastructure",
                 "Developer tools",
+                "AI infrastructure",
+                "Backend-heavy B2B SaaS",
                 "Agent platforms",
                 "Data-heavy B2B SaaS",
                 "Workflow automation",
                 "Recruiting and talent systems",
             ],
             "prototype_advantage": (
-                "Can turn a startup's one-liner into a working backend, agent, data pipeline, "
-                "or demo workflow with credible production instincts."
+                "Can turn a startup's one-liner into a working backend, API, integration, "
+                "data pipeline, or demo workflow with credible production instincts."
             ),
         },
         "outreach_proof_points": [
-            "6+ years building full-stack applications and backend systems.",
+            "6+ years building backend systems and full-stack applications.",
             "Hands-on LLM work: fine-tuning, evaluation benchmarks, local inference, LangChain, OpenAI, Azure.",
             "Data engineering lead experience with high-volume ETL and ingestion pipelines.",
             "Founding-engineer style experience building backend and AI infrastructure from scratch.",

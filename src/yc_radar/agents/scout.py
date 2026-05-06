@@ -16,7 +16,8 @@ class ScoutAgent:
     async def refine_outreach(self, company: Company, mission: PrototypeMission) -> OutreachBrief:
         base = outreach_for(company, mission)
         system = (
-            "You are helping a senior AI engineer get noticed by a small YC company. "
+            "You are helping a senior backend/software engineer get noticed by a small company. "
+            "Use AI and data systems experience as supporting proof, not as the primary role lane. "
             "Write concise, specific outreach. Do not sound like a recruiter or a mass email. "
             "Never claim the prototype is complete unless the user provides repo and demo URLs."
         )
@@ -42,4 +43,3 @@ class ScoutAgent:
             mission=mission,
             llm_used=True,
         )
-

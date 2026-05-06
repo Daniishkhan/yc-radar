@@ -1,54 +1,100 @@
 # YC Radar
 
-YC Radar is a local workbench for turning YC company data into senior-engineer entry
-points: companies to target, jobs worth filtering for, career pages to scrape, prototype
-ideas to build, and eventually founder outreach that is backed by something concrete.
+YC Radar is my personal tool for finding high-signal companies where I should take a real shot
+at getting hired as a senior backend or senior software engineer.
 
-The goal is not to build another job board. The goal is to find small, sharp openings where
-an AI/backend/data engineer can get noticed by shipping something useful before sending the
-email.
+Right now the system is YC-first. The plan is to make the full workflow work end to end on YC
+data, then add more sources such as Apollo, Bright Data, company lists, and other enrichment
+feeds.
+
+The goal is simple:
+
+1. Find companies that are hiring, quietly hiring, or worth approaching even if they do not have
+   an obvious job post.
+2. Filter for roles that fit my profile, especially remote/global opportunities and visa/location
+   constraints.
+3. Surface a small list of high-signal companies.
+4. For each target, build a small useful demo, feature, search tool, workflow, or PR.
+5. Send that demo to a founder, CTO, or small team as the actual application.
+
+This is not meant to be a generic job board. The playbook is to find companies where a shipped
+artifact can get attention faster than a normal application.
+
+## What It Does Today
+
+The current implementation uses YC as the first data source:
+
+- Pulls YC company data from the same public source used by `ycombinator.com/companies`.
+- Extracts structured YC job postings, including salary, equity, skills, location, and visa fields.
+- Stores the data in a local SQLite database for inspection in TablePlus.
+- Discovers external career pages, jobs pages, and ATS pages from company websites.
+- Keeps raw discovery evidence separate from clean deduped career page results.
+- Ingests my resume into a private local profile file.
+- Generates early candidate-fit target lists from YC data and my profile.
+- Runs a local FastAPI API for browsing companies, targets, and prototype missions.
+
+## Where It Is Going
+
+The next version should turn YC data into a practical weekly shortlist. After that, the same
+workflow should support non-YC sources.
+
+- Search all YC companies, not only the ones YC marks as hiring.
+- Verify live career pages and hidden jobs.
+- Use AI/browser automation to inspect company websites, products, docs, GitHub repos, and job pages.
+- Score companies against my profile: senior backend/SWE fit, backend-heavy full-stack fit,
+  LLM/data systems proof points, remote/global eligibility, and team size.
+- Return roughly 50 to 100 companies worth actioning.
+- For each company, suggest a demo or contribution I can ship in a few hours.
+- Help draft founder/CTO outreach tied to the actual artifact.
+- Add additional source feeds, such as Apollo or Bright Data, without mixing them into the raw YC
+  tables.
+
+The output should answer: "Which companies should I build something for this week?"
 
 ## Stack
 
 - Python 3.11+
-- FastAPI and Uvicorn for the local API
-- Pydantic v2 for settings and response models
-- SQLAlchemy with SQLite for local persistence
-- httpx for deterministic HTTP fetching
-- OpenAI SDK for optional LLM-refined briefs
+- FastAPI and Uvicorn
+- SQLite with SQLAlchemy
+- Pydantic v2
+- httpx for deterministic website checks
+- OpenAI SDK for LLM-assisted ranking and outreach
 - Firecrawl SDK for optional live hiring verification
-- pypdf for one-time resume ingestion
-- uv for dependency management and scripts
-- pytest and Ruff for tests and linting
-- Docker Compose for a containerized local run
+- pypdf for resume ingestion
+- uv for dependency management
+- pytest and Ruff
+- Docker Compose
 
-## Data Model
+## Database
 
-`data/yc_radar.db` is the primary local database.
+The main database is:
 
-Core tables:
+```text
+data/yc_radar.db
+```
 
-- `companies`: YC company profile data, prototype score, prototype angle, and raw payload.
-- `yc_job_postings`: YC job postings extracted from company page props, including title,
-  location, salary, equity, visa, skills, and raw payload.
-- `career_page_discovery_events`: raw, non-lossy evidence from YC job URLs, homepage links,
-  sitemaps, and capped common-path probes.
-- `company_career_pages`: clean, deduped external career/jobs/ATS URLs for each company.
+Important tables:
+
+- `companies`: YC company profiles and raw YC payloads.
+- `yc_job_postings`: YC job posts with title, URL, salary, equity, location, visa, skills, and
+  raw payloads.
+- `career_page_discovery_events`: raw evidence from YC job URLs, homepage links, sitemaps, and
+  common path probes.
+- `company_career_pages`: clean deduped external career/jobs/ATS URLs.
 
 Useful view:
 
-- `company_primary_career_pages`: one best external career URL per company for quick TablePlus
-  inspection.
+- `company_primary_career_pages`: one best external career URL per company.
 
-CSV and JSON files in `data/` are snapshots for inspection and debugging. They are useful,
-but the app should read from SQLite first.
+CSV and JSON files in `data/` are snapshots for quick inspection. The application should read
+from SQLite first.
 
-Ignored local data:
+Private local data is ignored by git:
 
-- `data/profile/`: candidate profile extracted from the resume.
-- `data/resume/`: private resume PDFs.
-- `data/runs/`: weekly target outputs.
-- `data/cache/`: HTTP cache for deterministic discovery.
+- `data/resume/`
+- `data/profile/`
+- `data/runs/`
+- `data/cache/`
 
 ## Quick Start
 
@@ -70,11 +116,7 @@ Open:
 uv run python extract_yc_companies.py
 ```
 
-This script queries the public Algolia index used by `ycombinator.com/companies`, splits by
-YC batch to avoid the 1,000-result cap, then fetches YC company pages for hiring companies
-to extract structured job postings from page props.
-
-It writes:
+This refreshes companies and YC job postings, then writes SQLite plus snapshot files:
 
 - `data/yc_radar.db`
 - `data/yc_companies_raw.json`
@@ -83,40 +125,40 @@ It writes:
 - `data/yc_job_postings_raw.json`
 - `data/yc_job_postings.csv`
 
-The current checked-in snapshot has 5,880 companies and 4,833 YC job postings.
+Current checked-in snapshot:
 
-## Discover Career URLs
+- 5,880 YC companies
+- 4,833 YC job postings
+
+## Discover Career Pages
 
 ```bash
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 ```
 
-This script reads from SQLite and finds career pages without Firecrawl or browser
-automation. It uses a deterministic, cheap path:
+This finds external career/jobs/ATS pages without Firecrawl or browser automation. It checks:
 
-- Seed from known YC job posting URLs.
-- Fetch each company homepage once and extract career/jobs/ATS links.
-- Fetch `robots.txt` and sitemap files with one-level sitemap index expansion.
-- If nothing useful is found, probe a small fixed set like `/careers`, `/jobs`, `/join-us`,
-  `/join`, `/work-with-us`, and `/open-positions`.
+- YC job posting URLs as raw evidence.
+- Homepage links.
+- `robots.txt` sitemap declarations.
+- Common sitemap files.
+- A small fixed path list like `/careers`, `/jobs`, `/join-us`, and `/work-with-us`.
 
-It writes raw observations and clean canonical pages separately:
+It writes:
 
-- `career_page_discovery_events`: raw evidence, including YC job URLs.
-- `company_career_pages`: deduped external career/jobs/ATS URLs.
-- `company_primary_career_pages`: view with one best URL per company.
-
-It exports:
-
-- `data/company_career_pages_raw.json`
+- `career_page_discovery_events`
+- `company_career_pages`
+- `company_primary_career_pages`
 - `data/company_career_pages.csv`
-- `data/career_page_discovery_events_raw.json`
 - `data/career_page_discovery_events.csv`
 
-The current checked-in sample was run against 100 companies and found 34 canonical external
-career/job/ATS URLs from 160 raw discovery events.
+Current checked-in sample:
 
-Inspect external career URLs:
+- 100 companies checked
+- 160 raw discovery events
+- 34 clean external career/job/ATS URLs
+
+Inspect clean career pages:
 
 ```bash
 uv run python - <<'PY'
@@ -150,46 +192,59 @@ conn.close()
 PY
 ```
 
-Run the full directory when you are ready to spend the time and requests:
+Run the full YC directory:
 
 ```bash
 uv run python scripts/discover_career_urls.py --concurrency 10
 ```
 
-## Candidate Knowledge Base
+## Candidate Profile
 
-Put the resume PDF at `data/resume/resume.pdf`, then run:
+Put the resume PDF here:
+
+```text
+data/resume/resume.pdf
+```
+
+Then run:
 
 ```bash
 uv run python scripts/ingest_resume.py
 ```
 
-This writes:
+This writes private local files:
 
 - `data/profile/resume_text.txt`
 - `data/profile/candidate_profile.json`
 
-Those files are ignored by git because they contain private candidate information. Future
-agents should use them as local context, not expose them through the API.
+These files should stay local because they contain personal information.
 
-## Weekly Candidate Fit Engine
+## Candidate Fit
 
-Generate a local shortlist:
+Generate a shortlist:
 
 ```bash
 uv run python scripts/generate_weekly_targets.py --limit 40 --candidate-pool 100
 ```
 
-Useful smoke tests:
+Cheap smoke test with no paid API calls:
 
 ```bash
 uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
+```
+
+Small Firecrawl-backed hiring verification test:
+
+```bash
 uv run python scripts/generate_weekly_targets.py --verify-hiring --no-llm --limit 5 --candidate-pool 10
 ```
 
-The first command uses no paid APIs. The second performs a tiny Firecrawl-backed live hiring
-check. Firecrawl usage is intentionally free-plan-safe: exact pages only, no wildcard domain
-crawls, at most three pages per company, and cached results in `data/runs/YYYY-MM-DD/`.
+Firecrawl should stay free-plan-safe for now: exact pages only, no wildcard crawls, at most
+three pages per company, low concurrency, and cached results.
+
+The shortlist is intentionally backend/SWE-focused. AI, LLM, data engineering, and full-stack
+experience are supporting proof points; they should not turn the list into generic AI engineer,
+frontend, research, sales, or marketing roles.
 
 ## API
 
@@ -202,9 +257,6 @@ Useful endpoints:
 - `GET /missions/{slug}`
 - `POST /missions/{slug}/brief`
 
-The API uses `CompanyRepository`, which reads from SQLite when `data/yc_radar.db` has company
-rows and falls back to CSV snapshots only when the database is empty.
-
 ## Docker
 
 ```bash
@@ -212,17 +264,21 @@ cp .env.example .env
 docker compose up --build
 ```
 
-## Where This Is Going
+## Product Direction
 
-Near-term useful agents:
+Build toward one concrete workflow, starting with YC and expanding to other company sources later:
 
-- Scout: enrich companies with founders, CTOs, GitHub repos, docs, career pages, and hiring
-  signals.
-- Fit: rank companies and jobs against the candidate profile, including visa/location
-  eligibility.
-- Prototype: propose a small demo that can be built in a few hours for a specific company.
-- PR: find open-source contribution angles where the company has public repos.
-- Outreach: draft concise founder/CTO emails tied to the prototype or PR.
+```text
+company source -> live company/job verification -> profile fit score -> shortlist -> demo idea -> outreach
+```
 
-The bias should stay practical: deterministic data first, LLMs second, and every output should
-make it easier to take a real shot at one company.
+The final product should help me decide:
+
+- Which companies are worth applying to directly?
+- Which companies are worth approaching even without a public job?
+- Which ones are global/remote-friendly enough for me?
+- What should I build for each company to stand out?
+- Who should I send it to?
+
+The best result is not a bigger database. The best result is a short list of companies where I
+can ship something useful and start a real conversation.

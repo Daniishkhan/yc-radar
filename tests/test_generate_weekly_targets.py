@@ -75,6 +75,12 @@ def test_output_json_and_csv_include_yc_and_verified_hiring_fields(tmp_path) -> 
         "verified_hiring_status": "hiring",
         "career_page_url": "https://example.com/careers/",
         "verified_roles": ["Senior Backend Engineer"],
+        "target_role_lane": "Senior Backend / Senior Software",
+        "matching_job_titles": ["Senior Backend Engineer"],
+        "role_match_status": "strong",
+        "role_match_reasons": ["Backend/platform role matches primary target lane"],
+        "application_angle": "Apply directly as a senior backend/SWE candidate.",
+        "proof_points_to_emphasize": ["Senior backend/API ownership"],
         "role_fit": "strong",
         "verification_source_url": "https://example.com/careers/",
         "verification_checked_at": "2026-05-06T00:00:00+00:00",
@@ -94,3 +100,5 @@ def test_output_json_and_csv_include_yc_and_verified_hiring_fields(tmp_path) -> 
     assert "yc_is_hiring" in csv_text
     assert "verified_hiring_status" in csv_text
     assert "Senior Backend Engineer" in csv_text
+    assert "target_role_lane" in csv_text
+    assert "role_match_status" in csv_text

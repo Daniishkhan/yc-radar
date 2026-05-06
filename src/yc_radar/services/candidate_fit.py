@@ -11,28 +11,34 @@ from yc_radar.domain.models import Company
 
 
 DEFAULT_CANDIDATE_PROFILE: dict[str, Any] = {
-    "headline": "Senior Software Engineer | AI, Backend, Data Engineering, Full Stack",
+    "headline": "Senior Backend / Senior Software Engineer | AI and Data Systems",
     "summary": (
-        "Senior AI/backend/data engineer with experience building LLM-powered products, "
-        "backend systems, data pipelines, and full-stack software."
+        "Senior backend/software engineer with experience building backend systems, "
+        "data pipelines, LLM-powered products, and full-stack software."
     ),
     "target_roles": [
-        "Senior AI Engineer",
         "Senior Backend Engineer",
-        "Senior Full-Stack Engineer",
-        "AI Infrastructure Engineer",
-        "Data Engineering Lead",
-        "Founding Engineer",
+        "Senior Software Engineer",
+        "Backend Platform Engineer",
+        "Infrastructure Engineer",
+        "Backend-heavy Founding Engineer",
+        "Backend-heavy Full Stack Engineer",
+    ],
+    "supporting_strengths": [
+        "AI engineering",
+        "Large language models",
+        "Data engineering",
+        "Full-stack product delivery",
     ],
     "core_expertise": [
+        "Backend systems",
+        "Distributed systems",
+        "Data engineering",
+        "ETL and high-volume ingestion",
         "Large language models",
         "AI engineering",
-        "Backend systems",
-        "Data engineering",
-        "Full-stack product engineering",
-        "Distributed systems",
-        "ETL and high-volume ingestion",
         "Evaluation benchmarks",
+        "Full-stack product engineering",
         "Agentic coding workflows",
     ],
     "technical_skills": {
@@ -45,10 +51,102 @@ DEFAULT_CANDIDATE_PROFILE: dict[str, Any] = {
     },
 }
 
+ROLE_STATUS_SCORE_ADJUSTMENTS = {
+    "strong": 16,
+    "possible": 7,
+    "weak": -6,
+    "exclude": -30,
+}
+
+SENIOR_TERMS = ("senior", "sr", "staff", "principal", "lead")
+BACKEND_ROLE_TERMS = (
+    "backend",
+    "back end",
+    "back-end",
+    "api",
+    "apis",
+    "server",
+    "server-side",
+    "platform",
+    "infrastructure",
+    "infra",
+    "distributed",
+    "cloud",
+    "database",
+    "data platform",
+    "data infrastructure",
+    "etl",
+    "pipeline",
+    "pipelines",
+    "integration",
+    "integrations",
+    "python",
+    "node",
+    "fastapi",
+)
+SOFTWARE_ROLE_TERMS = (
+    "software engineer",
+    "software engineering",
+    "software developer",
+    "swe",
+)
+FULL_STACK_TERMS = ("full stack", "full-stack", "fullstack")
+FOUNDING_TERMS = ("founding engineer", "founding software engineer")
+FRONTEND_TERMS = (
+    "frontend",
+    "front end",
+    "front-end",
+    "ui engineer",
+    "web engineer",
+    "react engineer",
+    "design engineer",
+)
+EXCLUDED_ROLE_TERMS = (
+    "designer",
+    "product designer",
+    "sales",
+    "account executive",
+    "marketing",
+    "growth",
+    "customer success",
+    "support",
+    "operations",
+    "intern",
+    "internship",
+    "apprentice",
+)
+RESEARCH_ONLY_TERMS = (
+    "research scientist",
+    "ml researcher",
+    "ai researcher",
+    "machine learning researcher",
+)
+DATA_ANALYST_TERMS = ("data analyst", "business analyst", "analytics analyst")
+
+
+@dataclass(frozen=True)
+class RoleClassification:
+    status: str
+    reasons: list[str]
+
 SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
     (
+        "Backend systems",
+        16,
+        (
+            "backend",
+            "infrastructure",
+            "platform",
+            "api",
+            "developer tools",
+            "devtools",
+            "cloud",
+            "distributed",
+        ),
+    ),
+    (
         "AI/LLM",
-        14,
+        7,
         (
             "ai",
             "artificial intelligence",
@@ -59,20 +157,6 @@ SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
             "openai",
             "mcp",
             "machine learning",
-        ),
-    ),
-    (
-        "Backend systems",
-        10,
-        (
-            "backend",
-            "infrastructure",
-            "platform",
-            "api",
-            "developer tools",
-            "devtools",
-            "cloud",
-            "distributed",
         ),
     ),
     (
@@ -90,7 +174,7 @@ SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
     ),
     (
         "Full-stack product",
-        7,
+        3,
         ("full-stack", "full stack", "react", "next.js", "typescript", "product engineer"),
     ),
     (
@@ -158,6 +242,185 @@ def _has_signal(text: str, term: str) -> bool:
     if len(term) <= 3 and term.isalpha():
         return re.search(rf"\b{re.escape(term)}\b", text) is not None
     return term in text
+
+
+def _has_any_signal(text: str, terms: tuple[str, ...]) -> bool:
+    return any(_has_signal(text, term) for term in terms)
+
+
+def classify_role_text(title: str, context: str = "") -> RoleClassification:
+    title_text = title.lower()
+    combined = f"{title} {context}".lower()
+    is_full_stack = _has_any_signal(combined, FULL_STACK_TERMS)
+    has_backend_signal = _has_any_signal(combined, BACKEND_ROLE_TERMS)
+    has_software_signal = _has_any_signal(title_text, SOFTWARE_ROLE_TERMS)
+    has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS)
+    is_founding = _has_any_signal(title_text, FOUNDING_TERMS)
+    has_frontend_signal = _has_any_signal(combined, FRONTEND_TERMS)
+
+    if _has_any_signal(title_text, EXCLUDED_ROLE_TERMS):
+        return RoleClassification("exclude", ["Non-engineering or junior/intern role"])
+    if _has_any_signal(title_text, DATA_ANALYST_TERMS):
+        return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
+    if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
+        return RoleClassification("exclude", ["Research-only ML role lacks backend/platform signal"])
+    if has_frontend_signal and not is_full_stack and not has_backend_signal:
+        return RoleClassification("exclude", ["Frontend-only role is outside backend/SWE focus"])
+
+    if not is_full_stack and has_backend_signal and (
+        has_senior_signal
+        or is_founding
+        or "backend" in title_text
+        or "platform" in title_text
+        or "infrastructure" in title_text
+    ):
+        return RoleClassification("strong", ["Backend/platform role matches primary target lane"])
+    if has_senior_signal and has_software_signal and not has_frontend_signal:
+        return RoleClassification("strong", ["Senior software engineering role matches target lane"])
+    if is_full_stack and has_backend_signal:
+        return RoleClassification("possible", ["Full-stack role has backend/API/data/infra signals"])
+    if is_founding and has_backend_signal:
+        return RoleClassification("possible", ["Founding role has backend-heavy signals"])
+    if is_founding or is_full_stack or has_software_signal:
+        return RoleClassification("weak", ["Engineering role exists, but backend depth is unclear"])
+    return RoleClassification("weak", ["No clear senior backend/SWE role signal"])
+
+
+def _job_context(job: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for key in (
+        "title",
+        "role",
+        "role_specific_type",
+        "pretty_role",
+        "type",
+        "location",
+        "visa",
+        "salary_range",
+        "equity_range",
+    ):
+        value = job.get(key)
+        if value:
+            chunks.append(str(value))
+    skills = job.get("skills") or []
+    if isinstance(skills, list):
+        chunks.extend(str(skill) for skill in skills)
+    return " ".join(chunks)
+
+
+def _best_status(classifications: list[tuple[str, RoleClassification]]) -> str:
+    if any(classification.status == "strong" for _, classification in classifications):
+        return "strong"
+    if any(classification.status == "possible" for _, classification in classifications):
+        return "possible"
+    if any(classification.status == "weak" for _, classification in classifications):
+        return "weak"
+    return "exclude"
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def role_focus_record(
+    company: Company,
+    *,
+    yc_jobs: list[dict[str, Any]] | None = None,
+    verified_roles: list[str] | None = None,
+) -> dict[str, Any]:
+    role_inputs: list[tuple[str, str]] = []
+    for job in yc_jobs or []:
+        title = str(job.get("title") or "").strip()
+        if title:
+            role_inputs.append((title, _job_context(job)))
+    for role in verified_roles or []:
+        title = str(role).strip()
+        if title:
+            role_inputs.append((title, title))
+
+    classifications = [
+        (title, classify_role_text(title, context)) for title, context in role_inputs
+    ]
+    matching_titles = [
+        title
+        for title, classification in classifications
+        if classification.status in {"strong", "possible"}
+    ]
+    reasons = [
+        reason
+        for _, classification in classifications
+        for reason in classification.reasons
+        if classification.status in {"strong", "possible"}
+    ]
+
+    if classifications:
+        status = _best_status(classifications)
+        if not reasons:
+            reasons = [
+                reason
+                for _, classification in classifications
+                for reason in classification.reasons
+            ]
+    else:
+        company_text = _company_text(company)
+        if _has_any_signal(company_text, BACKEND_ROLE_TERMS):
+            status = "possible"
+            reasons = ["No public matching role yet, but company signal is backend/platform-heavy"]
+        else:
+            status = "weak"
+            reasons = ["No public backend/SWE role found yet"]
+
+    if status == "strong":
+        target_role_lane = "Senior Backend / Senior Software"
+        application_angle = (
+            "Apply directly as a senior backend/SWE candidate and lead with backend systems, "
+            "data pipelines, and AI infrastructure proof points."
+        )
+    elif status == "possible":
+        target_role_lane = "Backend-heavy SWE / Founding Engineer"
+        application_angle = (
+            "Approach with a backend-heavy demo or integration that proves senior engineering "
+            "judgment before asking for a role conversation."
+        )
+    elif status == "weak":
+        target_role_lane = "Unclear backend/SWE fit"
+        application_angle = (
+            "Keep as research-only until a backend/SWE role or strong backend-heavy product angle appears."
+        )
+    else:
+        target_role_lane = "Outside backend/SWE focus"
+        application_angle = "Do not prioritize for the backend/SWE shortlist."
+
+    return {
+        "target_role_lane": target_role_lane,
+        "matching_job_titles": _dedupe_preserve_order(matching_titles),
+        "role_match_status": status,
+        "role_match_reasons": _dedupe_preserve_order(reasons)[:5],
+        "application_angle": application_angle,
+        "proof_points_to_emphasize": proof_points_for_role_status(status),
+    }
+
+
+def proof_points_for_role_status(status: str) -> list[str]:
+    if status == "exclude":
+        return []
+    points = [
+        "Senior backend/API ownership",
+        "Distributed systems and infrastructure judgment",
+        "Data pipelines and high-volume ingestion",
+        "LLM/AI systems as backend product leverage",
+        "Remote execution with US teams",
+    ]
+    if status == "possible":
+        points.append("Fast prototype/demo shipping for founder-led teams")
+    return points
 
 
 def score_company(company: Company, profile: dict[str, Any]) -> CandidateScore:
@@ -240,9 +503,14 @@ def rank_companies(
     return sorted(scored, key=lambda item: item.fit_score, reverse=True)
 
 
-def target_record(score: CandidateScore, *, rank: int) -> dict[str, Any]:
+def target_record(
+    score: CandidateScore,
+    *,
+    rank: int,
+    yc_jobs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     company = score.company
-    return {
+    record = {
         "rank": rank,
         "id": company.id,
         "name": company.name,
@@ -282,6 +550,8 @@ def target_record(score: CandidateScore, *, rank: int) -> dict[str, Any]:
         "risks": [],
         "next_action": "",
     }
+    record.update(role_focus_record(company, yc_jobs=yc_jobs))
+    return record
 
 
 def rerank_verified_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -297,6 +567,7 @@ def rerank_verified_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any
             score += 12
         elif role_fit == "possible":
             score += 5
+        score += ROLE_STATUS_SCORE_ADJUSTMENTS.get(str(target.get("role_match_status")), 0)
         target["fit_score"] = max(score, 0)
     reranked = sorted(targets, key=lambda item: int(item.get("fit_score") or 0), reverse=True)
     for index, target in enumerate(reranked, start=1):
@@ -345,9 +616,10 @@ async def enrich_targets_with_llm(
     batch_size: int = 10,
 ) -> None:
     system = (
-        "You help a senior AI/backend/data engineer choose YC companies to approach. "
-        "Be specific, pragmatic, and prototype-first. Do not invent private facts, founders, "
-        "emails, or claims that a prototype already exists."
+        "You help a senior backend/software engineer choose companies to approach. "
+        "Use AI, LLM, and data engineering experience as supporting proof points, not as the "
+        "primary role lane. Be specific, pragmatic, and prototype-first. Do not invent private "
+        "facts, founders, emails, or claims that a prototype already exists."
     )
     schema = weekly_target_schema()
     for start in range(0, len(targets), batch_size):
@@ -372,6 +644,11 @@ async def enrich_targets_with_llm(
                         "yc_is_hiring": target["yc_is_hiring"],
                         "verified_hiring_status": target["verified_hiring_status"],
                         "verified_roles": target["verified_roles"],
+                        "target_role_lane": target["target_role_lane"],
+                        "role_match_status": target["role_match_status"],
+                        "role_match_reasons": target["role_match_reasons"],
+                        "application_angle": target["application_angle"],
+                        "proof_points_to_emphasize": target["proof_points_to_emphasize"],
                         "candidate_strength_matches": target["candidate_strength_matches"],
                         "fit_reasons": target["fit_reasons"],
                         "prototype_angle": target["prototype_angle"],

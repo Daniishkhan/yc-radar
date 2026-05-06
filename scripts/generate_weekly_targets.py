@@ -17,9 +17,11 @@ from yc_radar.services.candidate_fit import (
     load_candidate_profile,
     rank_companies,
     rerank_verified_targets,
+    role_focus_record,
     target_record,
 )
 from yc_radar.services.company_repository import CompanyRepository
+from yc_radar.services.database import engine_from_url, fetch_yc_job_rows
 from yc_radar.services.hiring_verifier import (
     FirecrawlPageScraper,
     HiringVerification,
@@ -52,6 +54,12 @@ CSV_FIELDS = [
     "fit_score",
     "fit_reasons",
     "candidate_strength_matches",
+    "target_role_lane",
+    "matching_job_titles",
+    "role_match_status",
+    "role_match_reasons",
+    "application_angle",
+    "proof_points_to_emphasize",
     "verified_hiring_status",
     "career_page_url",
     "verified_roles",
@@ -103,9 +111,17 @@ def main() -> None:
 
     profile = load_candidate_profile(args.profile_path)
     companies = CompanyRepository().list()
+    jobs_by_slug = load_yc_jobs_by_slug(settings.database_url)
     ranked = rank_companies(companies, profile, max_team_size=args.max_team_size)
     pool_scores = ranked[: args.candidate_pool]
-    targets = [target_record(score, rank=index) for index, score in enumerate(pool_scores, start=1)]
+    targets = [
+        target_record(
+            score,
+            rank=index,
+            yc_jobs=jobs_by_slug.get(score.company.slug, []),
+        )
+        for index, score in enumerate(pool_scores, start=1)
+    ]
 
     verification_cache_path = output_dir / "hiring_verifications.json"
     cache = load_hiring_cache(verification_cache_path)
@@ -113,8 +129,8 @@ def main() -> None:
     new_firecrawl_pages = 0
     cached_verifications = 0
 
+    companies_by_slug = {score.company.slug: score.company for score in pool_scores}
     if verify_hiring and settings.firecrawl_api_key:
-        companies_by_slug = {score.company.slug: score.company for score in pool_scores}
         cached_verifications, new_firecrawl_pages = verify_targets(
             targets=targets,
             companies_by_slug=companies_by_slug,
@@ -128,6 +144,7 @@ def main() -> None:
     else:
         save_hiring_cache(verification_cache_path, cache)
 
+    refresh_role_focus(targets, companies_by_slug, jobs_by_slug)
     targets = rerank_verified_targets(targets)[: args.limit]
     use_llm = args.use_llm if args.use_llm is not None else bool(settings.openai_api_key)
     if use_llm and settings.openai_api_key:
@@ -165,6 +182,32 @@ def main() -> None:
     else:
         print(f"Firecrawl pages used this run: {new_firecrawl_pages}")
         print(f"Cached hiring verifications reused: {cached_verifications}")
+
+
+def load_yc_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
+    engine = engine_from_url(database_url)
+    jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
+    for job in fetch_yc_job_rows(engine):
+        jobs_by_slug.setdefault(job["company_slug"], []).append(job)
+    return jobs_by_slug
+
+
+def refresh_role_focus(
+    targets: list[dict[str, Any]],
+    companies_by_slug: dict[str, Company],
+    jobs_by_slug: dict[str, list[dict[str, Any]]],
+) -> None:
+    for target in targets:
+        company = companies_by_slug.get(target["slug"])
+        if company is None:
+            continue
+        target.update(
+            role_focus_record(
+                company,
+                yc_jobs=jobs_by_slug.get(company.slug, []),
+                verified_roles=target.get("verified_roles") or [],
+            )
+        )
 
 
 def verify_targets(

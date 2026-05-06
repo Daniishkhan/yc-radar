@@ -7,7 +7,7 @@ not a generic FastAPI template. The useful loop is:
 2. Store the structured data in SQLite.
 3. Discover career pages cheaply and deterministically.
 4. Rank companies/jobs against the candidate profile.
-5. Generate prototype, PR, or founder outreach plays.
+5. Generate backend/SWE-focused prototype, PR, or founder outreach plays.
 
 ## Project Shape
 
@@ -22,6 +22,12 @@ not a generic FastAPI template. The useful loop is:
 - `scripts/generate_weekly_targets.py`: creates local candidate-fit target runs.
 - `scripts/ingest_resume.py`: converts the private resume PDF into local structured profile data.
 - `tests/`: deterministic tests; no network calls.
+
+## Product Focus
+
+The current role lane is senior backend / senior software engineering. AI, LLM, data engineering,
+and full-stack experience are supporting strengths. Keep generic AI engineer, frontend-only,
+research-only, sales, marketing, and intern roles out of the main shortlist.
 
 ## Source Of Truth
 

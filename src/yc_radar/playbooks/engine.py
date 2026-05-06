@@ -46,8 +46,8 @@ def outreach_for(company: Company, mission: PrototypeMission) -> OutreachBrief:
         f"Repo: {{repo_url}}\n"
         f"Loom: {{loom_url}}\n\n"
         f"If this is useful, I would love to show how I would take it from demo to production. "
-        f"I am looking for a senior AI/backend/product-engineering role where I can ship this kind "
-        f"of thing quickly.\n\n"
+        f"I am looking for a senior backend or senior software engineering role where AI/data "
+        f"systems experience helps me ship this kind of thing quickly.\n\n"
         f"Best,\nDanish"
     )
     return OutreachBrief(company=company, subject=subject, body=body, mission=mission)
@@ -195,4 +195,3 @@ def _customer_workflow_mission(company: Company) -> PrototypeMission:
         proof_points=["Specific user story", "Working demo", "Before/after comparison", "Short Loom"],
         outreach_angle="I converted your positioning into a working demo and would love to compare notes.",
     )
-
