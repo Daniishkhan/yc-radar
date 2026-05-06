@@ -1,0 +1,39 @@
+[project]
+name = "yc-radar"
+version = "0.1.0"
+description = "A YC company intelligence and prototype-playbook workbench for senior AI engineering outreach."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.27.0",
+    "openai>=1.50.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "pypdf>=5.0.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+yc-radar-targets = "yc_radar.cli:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

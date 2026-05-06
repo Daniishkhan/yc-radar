@@ -1,0 +1,12 @@
+services:
+  api:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./src:/app/src:ro
+    command: uvicorn yc_radar.main:app --host 0.0.0.0 --port 8000 --reload
+
