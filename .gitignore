@@ -19,3 +19,4 @@ data/resume/*.pdf
 data/profile/candidate_profile.json
 data/profile/resume_text.txt
 data/runs/
+data/cache/

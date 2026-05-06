@@ -5,6 +5,7 @@ YC Radar is a FastAPI workbench for turning the YC company directory into practi
 The first version is intentionally grounded and boring in the right places:
 
 - `data/yc_companies_raw.json` keeps the public YC/Algolia export.
+- `data/yc_radar.db` is the local SQLite source of truth for companies, YC jobs, and career surfaces.
 - `data/yc_companies_prototype_targets.csv` ranks companies for prototype outreach.
 - The API reads local data first, so it works before we wire in databases or queues.
 - Playbooks are deterministic by default, then can be refined by an LLM when `OPENAI_API_KEY` is set.
@@ -29,7 +30,20 @@ Open:
 uv run python extract_yc_companies.py
 ```
 
-The extractor queries the same public Algolia index used by `ycombinator.com/companies`, splits by batch to avoid the 1,000-result cap, and writes JSON/CSV outputs into `data/`.
+The extractor queries the same public Algolia index used by `ycombinator.com/companies`, splits by batch to avoid the 1,000-result cap, enriches hiring companies with YC page-prop job postings, writes SQLite tables, and exports JSON/CSV snapshots into `data/`.
+
+## Discover Career URLs
+
+```bash
+uv run python scripts/discover_career_urls.py --limit 20
+```
+
+This deterministic resolver reads companies and YC jobs from SQLite, then finds career surfaces using YC job URLs, homepage links, `robots.txt` sitemaps, one-level sitemap indexes, and capped common-path probes. It does not use Firecrawl or browser automation. Results are written to SQLite and exported to:
+
+- `data/yc_career_surfaces_raw.json`
+- `data/yc_career_surfaces.csv`
+
+The HTTP cache lives in ignored `data/cache/career_url_discovery.json`.
 
 ## One-Time Candidate Knowledge Base
 

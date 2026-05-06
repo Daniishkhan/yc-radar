@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     app_name: str = "YC Radar"
     app_env: str = "development"
     data_dir: Path = Field(default=Path("data"), validation_alias="DATA_DIR")
+    database_url: str = Field(default="sqlite:///data/yc_radar.db", validation_alias="DATABASE_URL")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", validation_alias="OPENAI_MODEL")
     firecrawl_api_key: str | None = Field(default=None, validation_alias="FIRECRAWL_API_KEY")

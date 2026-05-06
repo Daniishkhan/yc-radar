@@ -14,6 +14,13 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from yc_radar.services.database import (
+    create_schema,
+    engine_from_url,
+    upsert_companies,
+    upsert_yc_job_postings,
+)
+
 
 APP_ID = "45BWZJ1SGC"
 API_KEY = (
@@ -379,6 +386,8 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
 
 def main() -> None:
     OUT_DIR.mkdir(exist_ok=True)
+    engine = engine_from_url()
+    create_schema(engine)
 
     facet_page = algolia_query(page=0, hits_per_page=1, include_facets=True)
     batch_counts = facet_page["facets"]["batch"]
@@ -405,6 +414,9 @@ def main() -> None:
     job_postings = [
         job for company in companies for job in company.get("jobPostings", []) if isinstance(job, dict)
     ]
+
+    upsert_companies(engine, companies)
+    upsert_yc_job_postings(engine, job_postings)
 
     ranked_rows = []
     for company in companies:
@@ -444,6 +456,7 @@ def main() -> None:
     print(f"Wrote {OUT_DIR / 'yc_companies_prototype_targets.csv'}")
     print(f"Wrote {OUT_DIR / 'yc_job_postings_raw.json'}")
     print(f"Wrote {OUT_DIR / 'yc_job_postings.csv'}")
+    print(f"Wrote {engine.url.database}")
 
 
 if __name__ == "__main__":

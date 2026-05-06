@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Python 3.11 FastAPI project using a `src` package layout. Application code lives in `src/yc_radar/`: `main.py` creates the FastAPI app, `api/routes.py` defines endpoints, `domain/models.py` holds Pydantic models, `services/` loads company data, `playbooks/` builds deterministic mission output, `agents/` contains LLM-assisted refinements, and `core/config.py` handles settings. Tests live in `tests/`. Local YC exports and ranked target CSVs live in `data/`. `extract_yc_companies.py` refreshes those data files.
+This is a Python 3.11 FastAPI project using a `src` package layout. Application code lives in `src/yc_radar/`: `main.py` creates the FastAPI app, `api/routes.py` defines endpoints, `domain/models.py` holds Pydantic models, `services/` loads SQLite-backed company data, `playbooks/` builds deterministic mission output, `agents/` contains LLM-assisted refinements, and `core/config.py` handles settings. Tests live in `tests/`. Local YC exports, ranked target CSVs, and the SQLite DB live in `data/`. `extract_yc_companies.py` refreshes YC company/job data, and `scripts/discover_career_urls.py` finds deterministic career surfaces.
 
 ## Build, Test, and Development Commands
 
@@ -18,10 +18,11 @@ uv run pytest
 uv run ruff check src tests scripts extract_yc_companies.py
 uv run python extract_yc_companies.py
 uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
+uv run python scripts/discover_career_urls.py --limit 20
 docker compose up --build
 ```
 
-Use `uv run uvicorn` for local API development, `uv run pytest` for the test suite, `uv run ruff check` for linting, the extractor to refresh `data/`, the weekly target script for local candidate-fit runs, and Docker Compose for a containerized run.
+Use `uv run uvicorn` for local API development, `uv run pytest` for the test suite, `uv run ruff check` for linting, the extractor to refresh SQLite plus JSON/CSV snapshots, the weekly target script for local candidate-fit runs, the career discovery script for URL surfaces, and Docker Compose for a containerized run.
 
 ## Coding Style & Naming Conventions
 
@@ -39,4 +40,4 @@ Pull requests should include a brief summary, test commands run, linked issue or
 
 ## Security & Configuration Tips
 
-Copy `.env.example` to `.env` for local settings. Do not commit secrets. `OPENAI_API_KEY` is optional and should only be required for LLM-refined outreach paths. `FIRECRAWL_API_KEY` is optional for live hiring checks; keep runs free-plan-safe by using exact-page scraping, at most three pages per company, and no wildcard crawls.
+Copy `.env.example` to `.env` for local settings. Do not commit secrets. `DATABASE_URL` defaults to the local SQLite DB at `data/yc_radar.db`. `OPENAI_API_KEY` is optional and should only be required for LLM-refined outreach paths. `FIRECRAWL_API_KEY` is optional for live hiring checks; keep runs free-plan-safe by using exact-page scraping, at most three pages per company, and no wildcard crawls.
