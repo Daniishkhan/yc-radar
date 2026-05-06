@@ -1,19 +1,19 @@
 [project]
 name = "yc-radar"
 version = "0.1.0"
-description = "A YC company intelligence and prototype-playbook workbench for senior AI engineering outreach."
+description = "A script-first YC intelligence workbench for senior backend/SWE job targeting."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115.0",
     "firecrawl-py>=4.25.0",
     "httpx>=0.27.0",
     "openai>=1.50.0",
+    "pgvector>=0.4.2",
+    "psycopg[binary]>=3.3.4",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
     "pypdf>=5.0.0",
     "sqlalchemy>=2.0.49",
-    "uvicorn[standard]>=0.30.0",
 ]
 
 [project.optional-dependencies]

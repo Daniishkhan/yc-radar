@@ -15,6 +15,7 @@ build/
 *.egg-info/
 yc_algolia_*.network-request
 yc_algolia_*.network-response
+data/db/
 data/local/
 data/resume/
 data/profile/

@@ -129,6 +129,7 @@ class RoleClassification:
     status: str
     reasons: list[str]
 
+
 SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
     (
         "Backend systems",
@@ -263,22 +264,34 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
         return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
     if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
-        return RoleClassification("exclude", ["Research-only ML role lacks backend/platform signal"])
+        return RoleClassification(
+            "exclude", ["Research-only ML role lacks backend/platform signal"]
+        )
     if has_frontend_signal and not is_full_stack and not has_backend_signal:
         return RoleClassification("exclude", ["Frontend-only role is outside backend/SWE focus"])
 
-    if not is_full_stack and has_backend_signal and (
-        has_senior_signal
-        or is_founding
-        or "backend" in title_text
-        or "platform" in title_text
-        or "infrastructure" in title_text
+    if (
+        not is_full_stack
+        and has_backend_signal
+        and (
+            has_senior_signal
+            or is_founding
+            or "backend" in title_text
+            or "back end" in title_text
+            or "back-end" in title_text
+            or "platform" in title_text
+            or "infrastructure" in title_text
+        )
     ):
         return RoleClassification("strong", ["Backend/platform role matches primary target lane"])
     if has_senior_signal and has_software_signal and not has_frontend_signal:
-        return RoleClassification("strong", ["Senior software engineering role matches target lane"])
+        return RoleClassification(
+            "strong", ["Senior software engineering role matches target lane"]
+        )
     if is_full_stack and has_backend_signal:
-        return RoleClassification("possible", ["Full-stack role has backend/API/data/infra signals"])
+        return RoleClassification(
+            "possible", ["Full-stack role has backend/API/data/infra signals"]
+        )
     if is_founding and has_backend_signal:
         return RoleClassification("possible", ["Founding role has backend-heavy signals"])
     if is_founding or is_full_stack or has_software_signal:
@@ -364,9 +377,7 @@ def role_focus_record(
         status = _best_status(classifications)
         if not reasons:
             reasons = [
-                reason
-                for _, classification in classifications
-                for reason in classification.reasons
+                reason for _, classification in classifications for reason in classification.reasons
             ]
     else:
         company_text = _company_text(company)
@@ -391,9 +402,7 @@ def role_focus_record(
         )
     elif status == "weak":
         target_role_lane = "Unclear backend/SWE fit"
-        application_angle = (
-            "Keep as research-only until a backend/SWE role or strong backend-heavy product angle appears."
-        )
+        application_angle = "Keep as research-only until a backend/SWE role or strong backend-heavy product angle appears."
     else:
         target_role_lane = "Outside backend/SWE focus"
         application_angle = "Do not prioritize for the backend/SWE shortlist."

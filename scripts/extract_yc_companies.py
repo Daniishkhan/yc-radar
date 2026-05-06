@@ -205,7 +205,9 @@ def extract_company_job_postings(company: dict[str, Any]) -> list[dict[str, Any]
     return jobs
 
 
-def extract_all_job_postings(companies: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+def extract_all_job_postings(
+    companies: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     hiring_companies = [company for company in companies if company.get("isHiring")]
     jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
     errors: list[str] = []
@@ -226,7 +228,9 @@ def extract_all_job_postings(companies: list[dict[str, Any]]) -> tuple[dict[str,
                 jobs_by_slug[str(company["slug"])] = []
 
             if completed % 100 == 0:
-                print(f"Fetched job postings for {completed} / {len(hiring_companies)} hiring companies.")
+                print(
+                    f"Fetched job postings for {completed} / {len(hiring_companies)} hiring companies."
+                )
 
     return jobs_by_slug, errors
 
@@ -324,7 +328,9 @@ def prototype_angle(company: dict[str, Any]) -> str:
         return "Build a candidate/job matching or workflow automation prototype with transparent scoring."
     if "ai" in blob or "agent" in blob:
         return "Build a focused AI agent demo that automates one painful user workflow end to end."
-    return "Build a narrow workflow prototype tied to their one-liner, with a 60-second Loom and repo."
+    return (
+        "Build a narrow workflow prototype tied to their one-liner, with a 60-second Loom and repo."
+    )
 
 
 def prototype_score(company: dict[str, Any]) -> int:
@@ -394,7 +400,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     parser = argparse.ArgumentParser(
-        description="Refresh YC companies/jobs into SQLite and lightweight CSV snapshots."
+        description="Refresh YC companies/jobs into Postgres and lightweight CSV snapshots."
     )
     parser.add_argument("--snapshot-dir", type=Path, default=settings.snapshots_dir)
     parser.add_argument("--write-raw-json", action="store_true")

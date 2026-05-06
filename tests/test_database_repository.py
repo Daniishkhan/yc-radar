@@ -1,15 +1,44 @@
+from sqlalchemy import inspect
+
 from yc_radar.services.company_repository import CompanyRepository
 from yc_radar.services.database import (
+    create_schema,
     engine_from_url,
+    fetch_discovered_url_rows,
+    fetch_page_classification_rows,
+    fetch_source_document_rows,
     fetch_yc_job_rows,
     replace_career_page_data,
     upsert_companies,
+    upsert_page_classifications,
+    upsert_source_documents,
     upsert_yc_job_postings,
 )
 
 
-def test_company_repository_reads_from_sqlite(tmp_path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'yc_radar.db'}"
+def test_postgres_schema_includes_document_intelligence_tables(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    create_schema(engine)
+
+    table_names = set(inspect(engine).get_table_names())
+
+    assert {
+        "source_documents",
+        "discovered_urls",
+        "page_classifications",
+        "career_page_discovery_statuses",
+        "external_job_postings",
+        "job_extraction_runs",
+        "document_chunks",
+        "document_embeddings",
+        "job_role_signals",
+    }.issubset(table_names)
+
+
+def test_company_repository_reads_from_postgres(postgres_database_url: str) -> None:
+    database_url = postgres_database_url
     engine = engine_from_url(database_url)
     upsert_companies(
         engine,
@@ -44,8 +73,10 @@ def test_company_repository_reads_from_sqlite(tmp_path) -> None:
     assert repo.search(query="pipelines", hiring=True, max_team_size=10)[0].slug == "agent-data"
 
 
-def test_upsert_yc_job_postings_round_trips_structured_fields(tmp_path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'yc_radar.db'}"
+def test_upsert_yc_job_postings_round_trips_structured_fields(
+    postgres_database_url: str,
+) -> None:
+    database_url = postgres_database_url
     engine = engine_from_url(database_url)
 
     upsert_yc_job_postings(
@@ -75,8 +106,10 @@ def test_upsert_yc_job_postings_round_trips_structured_fields(tmp_path) -> None:
     assert jobs[0]["skills"] == ["Python", "TypeScript", "LLMs"]
 
 
-def test_replace_career_page_data_separates_raw_events_from_canonical_pages(tmp_path) -> None:
-    database_url = f"sqlite:///{tmp_path / 'yc_radar.db'}"
+def test_replace_career_page_data_separates_raw_events_from_canonical_pages(
+    postgres_database_url: str,
+) -> None:
+    database_url = postgres_database_url
     engine = engine_from_url(database_url)
 
     replace_career_page_data(
@@ -141,10 +174,98 @@ def test_replace_career_page_data_separates_raw_events_from_canonical_pages(tmp_
         page_count = connection.exec_driver_sql(
             "SELECT COUNT(*) FROM company_career_pages"
         ).scalar_one()
+        discovered_url_count = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM discovered_urls"
+        ).scalar_one()
         primary_count = connection.exec_driver_sql(
             "SELECT COUNT(*) FROM company_primary_career_pages"
         ).scalar_one()
 
     assert event_count == 2
     assert page_count == 1
+    assert discovered_url_count == 1
     assert primary_count == 1
+
+    discovered_urls = fetch_discovered_url_rows(engine)
+    assert discovered_urls[0]["url_kind"] == "careers_page"
+    assert discovered_urls[0]["url_key"] == "https://example.com/careers"
+
+
+def test_source_documents_and_page_classifications_round_trip(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+
+    replace_career_page_data(
+        engine,
+        discovery_events=[],
+        career_pages=[
+            {
+                "company_id": 1,
+                "company_slug": "example",
+                "company_name": "Example",
+                "website": "https://example.com",
+                "career_page_url": "https://example.com/careers/software-engineer",
+                "normalized_url": "https://example.com/careers/software-engineer",
+                "page_type": "jobs_page",
+                "discovery_source": "sitemap",
+                "confidence": 0.78,
+                "is_primary": True,
+                "observed_source_count": 1,
+            }
+        ],
+        company_slugs=["example"],
+    )
+    discovered_url = fetch_discovered_url_rows(engine)[0]
+    source_key = f"{discovered_url['company_slug']}:{discovered_url['url_key']}"
+
+    upsert_source_documents(
+        engine,
+        [
+            {
+                "discovered_url_id": discovered_url["id"],
+                "company_id": 1,
+                "company_slug": "example",
+                "company_name": "Example",
+                "source_type": "career_url",
+                "source_key": source_key,
+                "url": discovered_url["normalized_url"],
+                "normalized_url": discovered_url["normalized_url"],
+                "title": "Software Engineer at Example",
+                "raw_text": "<h1>Software Engineer</h1>",
+                "clean_text": "Software Engineer Apply now Requirements",
+                "content_hash": "abc123",
+            }
+        ],
+    )
+    source_document = fetch_source_document_rows(engine, source_keys=[source_key])[0]
+
+    upsert_page_classifications(
+        engine,
+        [
+            {
+                "source_document_id": source_document["id"],
+                "discovered_url_id": discovered_url["id"],
+                "company_id": 1,
+                "company_slug": "example",
+                "company_name": "Example",
+                "url": discovered_url["normalized_url"],
+                "normalized_url": discovered_url["normalized_url"],
+                "page_kind": "job_detail",
+                "confidence": 0.86,
+                "parser_name": "test_parser",
+                "parser_version": "test",
+                "http_status": 200,
+                "job_title": "Software Engineer",
+                "role_titles": ["Software Engineer"],
+                "job_count": 1,
+                "evidence": {"detail_marker_hits": 2},
+            }
+        ],
+    )
+
+    classifications = fetch_page_classification_rows(engine)
+
+    assert source_document["discovered_url_id"] == discovered_url["id"]
+    assert classifications[0]["page_kind"] == "job_detail"
+    assert classifications[0]["role_titles"] == ["Software Engineer"]

@@ -130,7 +130,9 @@ def main() -> None:
 
     verification_cache_path = output_dir / "hiring_verifications.json"
     cache = load_hiring_cache(verification_cache_path)
-    verify_hiring = args.verify_hiring if args.verify_hiring is not None else bool(settings.firecrawl_api_key)
+    verify_hiring = (
+        args.verify_hiring if args.verify_hiring is not None else bool(settings.firecrawl_api_key)
+    )
     new_firecrawl_pages = 0
     cached_verifications = 0
 
@@ -183,7 +185,9 @@ def main() -> None:
     print(f"Wrote {len(targets)} weekly targets: {json_path}")
     print(f"Wrote CSV: {csv_path}")
     if verify_hiring and not settings.firecrawl_api_key:
-        print("Firecrawl verification requested but FIRECRAWL_API_KEY is not set; hiring is unknown.")
+        print(
+            "Firecrawl verification requested but FIRECRAWL_API_KEY is not set; hiring is unknown."
+        )
     else:
         print(f"Firecrawl pages used this run: {new_firecrawl_pages}")
         print(f"Cached hiring verifications reused: {cached_verifications}")

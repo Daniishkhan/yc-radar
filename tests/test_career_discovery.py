@@ -144,6 +144,64 @@ def test_common_path_probes_are_used_only_when_no_external_career_page_exists() 
     assert "https://example.com/careers" in calls
 
 
+def test_common_path_probe_rejects_non_ats_cross_domain_redirects() -> None:
+    result = HttpResult(
+        url="https://example.com/careers",
+        final_url="https://acquirer.example/jobs",
+        status_code=200,
+        content_type="text/html",
+        text="<h1>Careers</h1><p>Open positions</p>",
+    )
+
+    assert discover_career_urls.is_valid_probe_hit(result) is False
+
+
+def test_resume_skips_only_completed_companies_unless_forced() -> None:
+    companies = [
+        {"slug": "done"},
+        {"slug": "pending"},
+    ]
+
+    pending = discover_career_urls.pending_discovery_companies(
+        companies,
+        completed_slugs={"done"},
+        force=False,
+    )
+    forced = discover_career_urls.pending_discovery_companies(
+        companies,
+        completed_slugs={"done"},
+        force=True,
+    )
+
+    assert [company["slug"] for company in pending] == ["pending"]
+    assert [company["slug"] for company in forced] == ["done", "pending"]
+
+
+def test_discovery_status_marks_success_and_failure() -> None:
+    success = discover_career_urls.discovery_status(
+        {
+            "company": {"id": 1, "slug": "example", "name": "Example"},
+            "discovery_events": [{"url": "https://example.com/careers"}],
+            "career_pages": [{"career_page_url": "https://example.com/careers"}],
+            "error": None,
+        }
+    )
+    failure = discover_career_urls.discovery_status(
+        {
+            "company": {"id": 2, "slug": "broken", "name": "Broken"},
+            "discovery_events": [],
+            "career_pages": [],
+            "error": "boom",
+        }
+    )
+
+    assert success["status"] == "completed"
+    assert success["discovery_event_count"] == 1
+    assert success["career_page_count"] == 1
+    assert failure["status"] == "failed"
+    assert failure["error"] == "boom"
+
+
 def test_discovery_events_are_non_lossy_but_career_pages_are_canonical() -> None:
     events: list[dict] = []
     company = {"id": 1, "slug": "example", "name": "Example", "raw_json": {}}
@@ -178,6 +236,65 @@ def test_discovery_events_are_non_lossy_but_career_pages_are_canonical() -> None
     assert len(pages) == 1
     assert pages[0]["discovery_source"] == "homepage_link"
     assert pages[0]["observed_source_count"] == 2
+
+
+def test_exact_duplicate_homepage_events_are_collapsed() -> None:
+    events: list[dict] = []
+    company = {"id": 1, "slug": "example", "name": "Example", "raw_json": {}}
+    checked_at = discover_career_urls.datetime.now(discover_career_urls.UTC)
+
+    for _ in range(2):
+        discover_career_urls.add_discovery_event(
+            events,
+            company,
+            url="https://example.com/careers",
+            page_type="careers_page",
+            discovery_source="homepage_link",
+            confidence=0.84,
+            http_status=200,
+            evidence="Careers",
+            checked_at=checked_at,
+        )
+
+    assert len(events) == 1
+
+
+def test_canonical_pages_collapse_scheme_and_www_variants() -> None:
+    events: list[dict] = []
+    company = {"id": 1, "slug": "example", "name": "Example", "raw_json": {}}
+    checked_at = discover_career_urls.datetime.now(discover_career_urls.UTC)
+
+    discover_career_urls.add_discovery_event(
+        events,
+        company,
+        url="http://www.example.com/careers",
+        page_type="careers_page",
+        discovery_source="homepage_link",
+        confidence=0.84,
+        http_status=200,
+        evidence="Careers",
+        checked_at=checked_at,
+    )
+    discover_career_urls.add_discovery_event(
+        events,
+        company,
+        url="https://example.com/careers",
+        page_type="careers_page",
+        discovery_source="sitemap",
+        confidence=0.78,
+        http_status=200,
+        evidence="career-like URL in sitemap",
+        checked_at=checked_at,
+    )
+
+    pages = discover_career_urls.build_company_career_pages(events)
+
+    assert len(pages) == 1
+    assert pages[0]["observed_source_count"] == 2
+    assert pages[0]["raw_json"]["observed_urls"] == [
+        "http://www.example.com/careers",
+        "https://example.com/careers",
+    ]
 
 
 def test_yc_jobs_stay_as_events_and_do_not_become_company_career_pages() -> None:

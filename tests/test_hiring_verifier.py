@@ -96,7 +96,9 @@ def test_verify_hiring_from_homepage_and_careers_page() -> None:
 
 
 def test_verify_unknown_when_no_careers_page_is_found() -> None:
-    scraper = FakeScraper({"https://example.com": ScrapedPage(url="https://example.com", html="Home")})
+    scraper = FakeScraper(
+        {"https://example.com": ScrapedPage(url="https://example.com", html="Home")}
+    )
 
     verification = verify_company_hiring(company(), scraper, DEFAULT_CANDIDATE_PROFILE)
 
