@@ -60,6 +60,7 @@ week, and why am I a credible fit?"
 
 - Python 3.11+
 - Postgres with SQLAlchemy, JSONB, full-text search, and pgvector
+- Redis, Celery, and Flower for queued internal pipeline work
 - Pydantic v2
 - httpx for deterministic website checks
 - OpenAI SDK for LLM-assisted ranking and outreach
@@ -85,6 +86,19 @@ postgresql+psycopg://yc_radar:yc_radar@localhost:5433/yc_radar
 The Compose file uses the `pgvector/pgvector:0.8.2-pg17-trixie` image with a named Docker volume
 for persistence. It publishes container port `5432` on host port `5433` to avoid colliding with a
 machine-level Postgres install.
+
+Redis and Flower are optional for queued runs:
+
+```bash
+docker compose up -d redis flower
+```
+
+Flower runs at `http://localhost:5555`. Celery workers run locally through `uv` so they use the
+same checked-out code and `.env` file:
+
+```bash
+uv run celery -A yc_radar.worker worker -Q classification --concurrency 4 --loglevel INFO
+```
 
 Important tables:
 
@@ -156,6 +170,7 @@ refetching pages. Only pages classified as `job_detail` with a title are promote
 uv sync --extra dev
 cp .env.example .env
 docker compose up -d postgres
+docker compose up -d redis flower
 uv run python scripts/load_snapshots.py
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 uv run python scripts/classify_discovered_urls.py --limit 50 --concurrency 10
@@ -273,6 +288,18 @@ uv run python scripts/discover_career_urls.py --concurrency 10
 Discovery runs checkpoint after each batch, so rerunning the same command skips companies already
 marked completed. Use `--force` to reprocess the selected companies.
 
+Run the full local pipeline from checked-in snapshots through queued classification:
+
+```bash
+docker compose up -d postgres redis flower
+uv run celery -A yc_radar.worker worker -Q classification --concurrency 8 --loglevel INFO
+uv run python scripts/run_full_pipeline.py --wait-classification
+```
+
+Run the worker command in its own terminal. The pipeline script loads snapshots, discovers career
+URLs for all companies that are not already completed, and enqueues all unclassified discovered
+URLs. Flower is available at `http://localhost:5555`.
+
 ## Classify Discovered Pages
 
 ```bash
@@ -298,6 +325,51 @@ Current checked-in classification smoke:
 - 9 individual job detail pages
 - 3 ATS listing pages
 - 3 fetch errors
+
+## Queued Classification
+
+For larger runs, use Celery so each discovered URL is a separate observable task:
+
+```bash
+docker compose up -d redis flower
+uv run celery -A yc_radar.worker worker -Q classification --concurrency 4 --loglevel INFO
+uv run python scripts/enqueue_classification_tasks.py --limit 50 --wait
+```
+
+This keeps `source_documents`, `page_classifications`, and `external_job_postings` in Postgres,
+while Redis/Celery/Flower handle live task state, retries, and failure inspection. The queued
+classifier intentionally avoids the shared JSON page-fetch cache because multiple Celery worker
+processes writing one cache file would be unsafe.
+
+## CI/CD
+
+The GitHub Actions workflow in `.github/workflows/ci-cd.yml` runs tests and Ruff on pull requests
+and pushes. On pushes to `main`, it deploys to the EC2 runner by rsyncing the repository and running
+`scripts/deploy_ec2.sh`.
+
+Required GitHub repository secrets:
+
+```text
+EC2_HOST=54.91.53.20
+EC2_USER=ubuntu
+EC2_SSH_KEY=<private key that can SSH to the EC2 host>
+```
+
+Optional GitHub repository variable:
+
+```text
+EC2_APP_DIR=/home/ubuntu/yc-radar
+```
+
+The deploy preserves server-local state:
+
+- `.env`
+- `.venv`
+- `data/local/`
+- `logs/`
+
+By default, deploy restarts the Celery classification worker but does not restart the long-running
+pipeline. To restart the pipeline, run the workflow manually and set `restart_pipeline=true`.
 
 ## Candidate Profile
 

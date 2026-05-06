@@ -697,6 +697,17 @@ def fetch_discovered_url_rows(
     return [dict(row) for row in rows]
 
 
+def fetch_discovered_url_row(engine: Engine, discovered_url_id: int) -> dict[str, Any] | None:
+    create_schema(engine)
+    statement = select(discovered_urls_table).where(
+        discovered_urls_table.c.id == discovered_url_id,
+        discovered_urls_table.c.is_active.is_(True),
+    )
+    with engine.connect() as connection:
+        row = connection.execute(statement).mappings().first()
+    return dict(row) if row else None
+
+
 def fetch_source_document_rows(
     engine: Engine,
     *,

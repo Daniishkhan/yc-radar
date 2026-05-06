@@ -18,5 +18,28 @@ services:
       timeout: 5s
       retries: 12
 
+  redis:
+    image: redis:7-alpine
+    container_name: yc-radar-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  flower:
+    image: mher/flower:2.0
+    container_name: yc-radar-flower
+    restart: unless-stopped
+    command: celery --broker=redis://redis:6379/0 flower --port=5555
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5555:5555"
+
 volumes:
   yc_radar_postgres_data:

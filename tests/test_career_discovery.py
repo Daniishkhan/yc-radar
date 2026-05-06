@@ -52,6 +52,50 @@ def test_homepage_anchor_extraction_catches_careers_and_ats_links() -> None:
     assert "https://example.com/pricing" not in scored
 
 
+def test_vendor_marketing_pages_are_not_treated_as_ats_career_urls() -> None:
+    assert discover_career_urls.is_career_url(
+        "https://www.ashbyhq.com/product-updates/ai-assisted-application-review"
+    ) is False
+    assert discover_career_urls.is_career_url(
+        "https://www.ashbyhq.com/podcast/episodes/recruiting-team-productivity"
+    ) is False
+    assert discover_career_urls.page_type_for(
+        "https://www.ashbyhq.com/product-updates/ai-assisted-application-review"
+    ) == "careers_page"
+    assert discover_career_urls.is_career_url("https://jobs.ashbyhq.com/example") is True
+    assert discover_career_urls.page_type_for("https://jobs.ashbyhq.com/example") == "ats"
+
+
+def test_sitemap_hits_ignore_vendor_marketing_noise() -> None:
+    async def run() -> list[tuple[str, int | None]]:
+        http = FakeHttp(
+            {
+                "https://www.ashbyhq.com/sitemap.xml": HttpResult(
+                    url="https://www.ashbyhq.com/sitemap.xml",
+                    final_url="https://www.ashbyhq.com/sitemap.xml",
+                    status_code=200,
+                    content_type="application/xml",
+                    text=(
+                        "<url><loc>https://www.ashbyhq.com/product-updates/ai</loc></url>"
+                        "<url><loc>https://www.ashbyhq.com/podcast/episodes/foo</loc></url>"
+                        "<url><loc>https://www.ashbyhq.com/careers</loc></url>"
+                    ),
+                ),
+            }
+        )
+        return await discover_career_urls.discover_sitemap_hits(
+            ["https://www.ashbyhq.com/sitemap.xml"],
+            http,
+            max_child_sitemaps=0,
+        )
+
+    import asyncio
+
+    hits = asyncio.run(run())
+
+    assert hits == [("https://www.ashbyhq.com/careers", 200)]
+
+
 def test_one_level_sitemap_index_expansion_finds_career_urls() -> None:
     async def run() -> list[tuple[str, int | None]]:
         http = FakeHttp(

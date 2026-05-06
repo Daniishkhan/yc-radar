@@ -1,0 +1,99 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to EC2 after tests pass
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      restart_pipeline:
+        description: Restart the long-running pipeline on EC2
+        required: true
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+concurrency:
+  group: yc-radar-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Run Ruff
+        run: uv run ruff check src tests scripts
+
+  deploy:
+    name: Deploy to EC2
+    needs: test
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy == 'true')
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER || 'ubuntu' }}
+      EC2_APP_DIR: ${{ vars.EC2_APP_DIR || '/home/ubuntu/yc-radar' }}
+      RESTART_PIPELINE: ${{ inputs.restart_pipeline || '0' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST"
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/yc_radar_ec2
+          chmod 600 ~/.ssh/yc_radar_ec2
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync code to EC2
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/yc_radar_ec2 "$EC2_USER@$EC2_HOST" "mkdir -p '$EC2_APP_DIR'"
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/yc_radar_ec2" \
+            --exclude '.git/' \
+            --exclude '.env' \
+            --exclude '.venv/' \
+            --exclude '.pytest_cache/' \
+            --exclude '.ruff_cache/' \
+            --exclude '.playwright-mcp/' \
+            --exclude 'data/local/' \
+            --exclude 'logs/' \
+            ./ "$EC2_USER@$EC2_HOST:$EC2_APP_DIR/"
+
+      - name: Run EC2 deploy
+        run: |
+          set -euo pipefail
+          if [[ "$RESTART_PIPELINE" == "true" ]]; then
+            RESTART_PIPELINE=1
+          fi
+          ssh -i ~/.ssh/yc_radar_ec2 "$EC2_USER@$EC2_HOST" \
+            "cd '$EC2_APP_DIR' && RESTART_PIPELINE='$RESTART_PIPELINE' bash scripts/deploy_ec2.sh"

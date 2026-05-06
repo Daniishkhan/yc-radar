@@ -49,6 +49,33 @@ ATS_DOMAINS = (
     "app.dover.com",
     "wellfound.com",
 )
+ATS_JOB_BOARD_DOMAINS = (
+    "jobs.ashbyhq.com",
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.lever.co",
+    "apply.workable.com",
+    "jobs.workable.com",
+    "workdayjobs.com",
+    "bamboohr.com",
+    "recruitee.com",
+    "smartrecruiters.com",
+    "applytojob.com",
+    "app.dover.com",
+    "wellfound.com",
+)
+VENDOR_CONTENT_SEGMENTS = {
+    "blog",
+    "customer-stories",
+    "docs",
+    "guides",
+    "news",
+    "podcast",
+    "product",
+    "product-updates",
+    "resources",
+    "templates",
+}
 GENERIC_CAREER_SEGMENTS = {
     "career",
     "careers",
@@ -175,9 +202,10 @@ class PageClassification:
 
 
 class CachedHttpClient:
-    def __init__(self, cache_path: Path, *, concurrency: int) -> None:
+    def __init__(self, cache_path: Path | None, *, concurrency: int) -> None:
         self.cache_path = cache_path
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.cache_path is not None:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.cache = self._load_cache()
         self.semaphore = asyncio.Semaphore(concurrency)
         self.client = httpx.AsyncClient(
@@ -194,7 +222,7 @@ class CachedHttpClient:
         self.save()
 
     async def get(self, url: str) -> HttpResult:
-        if url in self.cache:
+        if self.cache_path is not None and url in self.cache:
             return HttpResult(**self.cache[url])
 
         async with self.semaphore:
@@ -216,15 +244,20 @@ class CachedHttpClient:
                     text="",
                     error=str(exc),
                 )
-            self.cache[url] = result.__dict__
+            if self.cache_path is not None:
+                self.cache[url] = result.__dict__
             return result
 
     def save(self) -> None:
+        if self.cache_path is None:
+            return
         self.cache_path.write_text(
             json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8"
         )
 
     def _load_cache(self) -> dict[str, dict[str, Any]]:
+        if self.cache_path is None:
+            return {}
         if not self.cache_path.exists():
             return {}
         return json.loads(self.cache_path.read_text(encoding="utf-8"))
@@ -270,6 +303,23 @@ async def run(args: argparse.Namespace) -> None:
             *(fetch_and_classify(row, http) for row in discovered_urls)
         )
 
+    summary = persist_classification_results(engine, results)
+
+    recent_rows = fetch_page_classification_rows(engine, limit=max(args.limit, len(results)))
+    write_csv(args.output_csv, recent_rows, PAGE_CLASSIFICATION_CSV_FIELDS)
+
+    print(f"Selected {len(discovered_urls)} discovered URLs.")
+    print(f"Fetched and stored {summary['document_count']} source documents.")
+    print(f"Classified page kinds: {format_counts(Counter(summary['page_counts']))}")
+    print(f"Upserted {summary['external_job_count']} external job detail postings.")
+    print(f"Wrote {args.output_csv}")
+    print(f"Updated {engine.url.database}")
+
+
+def persist_classification_results(
+    engine: Any,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
     documents = [result["document"] for result in results]
     upsert_source_documents(engine, documents)
     document_rows = fetch_source_document_rows(
@@ -295,26 +345,25 @@ async def run(args: argparse.Namespace) -> None:
     upsert_page_classifications(engine, classifications)
     upsert_external_job_postings(engine, external_jobs)
 
-    recent_rows = fetch_page_classification_rows(engine, limit=max(args.limit, len(classifications)))
-    write_csv(args.output_csv, recent_rows, PAGE_CLASSIFICATION_CSV_FIELDS)
-
     page_counts = Counter(classification["page_kind"] for classification in classifications)
-    print(f"Selected {len(discovered_urls)} discovered URLs.")
-    print(f"Fetched and stored {len(documents)} source documents.")
-    print(f"Classified page kinds: {format_counts(page_counts)}")
-    print(f"Upserted {len(external_jobs)} external job detail postings.")
-    print(f"Wrote {args.output_csv}")
-    print(f"Updated {engine.url.database}")
+    return {
+        "document_count": len(documents),
+        "classification_count": len(classifications),
+        "external_job_count": len(external_jobs),
+        "page_counts": dict(page_counts),
+    }
 
 
 async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dict[str, Any]:
     requested_url = str(row.get("normalized_url") or row.get("url") or "")
     result = await http.get(requested_url)
     fetched_at = datetime.now(UTC)
-    title = extract_title(result.text)
-    clean_text = strip_html(result.text)
+    raw_text = postgres_text(result.text)[:MAX_STORED_TEXT_CHARS]
+    title = postgres_text(extract_title(raw_text))
+    clean_text = postgres_text(strip_html(raw_text))
+    final_url = postgres_text(result.final_url or requested_url)
     classification = classify_page(
-        url=result.final_url or requested_url,
+        url=final_url,
         title=title,
         text=clean_text,
         http_status=result.status_code,
@@ -328,10 +377,10 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
         "company_name": row.get("company_name"),
         "source_type": SOURCE_TYPE,
         "source_key": source_key,
-        "url": result.final_url or requested_url,
-        "normalized_url": result.final_url or requested_url,
+        "url": final_url,
+        "normalized_url": final_url,
         "title": title,
-        "raw_text": result.text[:MAX_STORED_TEXT_CHARS],
+        "raw_text": raw_text,
         "clean_text": clean_text[:MAX_STORED_TEXT_CHARS],
         "content_hash": content_hash(result, clean_text),
         "http_status": result.status_code,
@@ -352,8 +401,8 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
         "company_id": row.get("company_id"),
         "company_slug": row.get("company_slug"),
         "company_name": row.get("company_name"),
-        "url": result.final_url or requested_url,
-        "normalized_url": result.final_url or requested_url,
+        "url": final_url,
+        "normalized_url": final_url,
         "page_kind": classification.page_kind,
         "confidence": classification.confidence,
         "parser_name": PARSER_NAME,
@@ -376,6 +425,10 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
     }
 
 
+def postgres_text(value: str) -> str:
+    return (value or "").replace("\x00", "")
+
+
 def classify_page(
     *,
     url: str,
@@ -389,7 +442,8 @@ def classify_page(
     path = parsed.path.lower()
     normalized_text = text.lower()
     roles = extract_role_titles(title, text, url)
-    is_ats = any(ats_domain in domain for ats_domain in ATS_DOMAINS)
+    is_ats = is_ats_job_board_url(url)
+    is_vendor_marketing = is_vendor_marketing_url(url)
     generic_path = is_generic_career_path(path)
     role_like_path = is_role_like_path(path)
     listing_hits = marker_hits(normalized_text, LISTING_MARKERS)
@@ -401,6 +455,7 @@ def classify_page(
         "path": path or "/",
         "url_kind": url_kind,
         "is_ats": is_ats,
+        "is_vendor_marketing": is_vendor_marketing,
         "generic_path": generic_path,
         "role_like_path": role_like_path,
         "listing_marker_hits": listing_hits,
@@ -414,6 +469,8 @@ def classify_page(
         return PageClassification("fetch_error", 0.98, None, roles, evidence)
     if not text.strip():
         return PageClassification("unknown", 0.4, None, roles, evidence)
+    if is_vendor_marketing:
+        return PageClassification("irrelevant", 0.88, None, roles, evidence)
 
     if is_ats and ((role_like_path and roles) or (len(roles) == 1 and detail_hits >= 2)):
         return PageClassification("job_detail", 0.88, roles[0] if roles else None, roles, evidence)
@@ -587,6 +644,29 @@ def content_hash(result: HttpResult, clean_text_value: str) -> str:
 
 def clean_domain(domain: str) -> str:
     return domain.lower().removeprefix("www.")
+
+
+def is_ats_job_board_url(url: str) -> bool:
+    domain = clean_domain(urlparse(url).netloc)
+    return any(
+        domain == ats_domain or domain.endswith(f".{ats_domain}")
+        for ats_domain in ATS_JOB_BOARD_DOMAINS
+    )
+
+
+def is_vendor_marketing_url(url: str) -> bool:
+    parsed = urlparse(url)
+    domain = clean_domain(parsed.netloc)
+    if not any(ats_domain in domain for ats_domain in ATS_DOMAINS):
+        return False
+    if is_ats_job_board_url(url):
+        return False
+    path_segments = {
+        segment.lower().replace("_", "-")
+        for segment in parsed.path.strip("/").split("/")
+        if segment
+    }
+    return bool(path_segments.intersection(VENDOR_CONTENT_SEGMENTS))
 
 
 def clean_text(value: str) -> str:

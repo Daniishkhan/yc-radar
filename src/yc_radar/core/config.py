@@ -17,6 +17,18 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", validation_alias="OPENAI_MODEL")
     firecrawl_api_key: str | None = Field(default=None, validation_alias="FIRECRAWL_API_KEY")
+    celery_broker_url: str = Field(
+        default="redis://localhost:6379/0",
+        validation_alias="CELERY_BROKER_URL",
+    )
+    celery_result_backend: str = Field(
+        default="redis://localhost:6379/1",
+        validation_alias="CELERY_RESULT_BACKEND",
+    )
+    celery_task_result_expires: int = Field(
+        default=86_400,
+        validation_alias="CELERY_TASK_RESULT_EXPIRES",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

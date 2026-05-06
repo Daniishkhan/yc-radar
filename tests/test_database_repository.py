@@ -5,6 +5,7 @@ from yc_radar.services.database import (
     create_schema,
     engine_from_url,
     fetch_discovered_url_rows,
+    fetch_discovered_url_row,
     fetch_page_classification_rows,
     fetch_source_document_rows,
     fetch_yc_job_rows,
@@ -189,6 +190,9 @@ def test_replace_career_page_data_separates_raw_events_from_canonical_pages(
     discovered_urls = fetch_discovered_url_rows(engine)
     assert discovered_urls[0]["url_kind"] == "careers_page"
     assert discovered_urls[0]["url_key"] == "https://example.com/careers"
+    discovered_url = fetch_discovered_url_row(engine, discovered_urls[0]["id"])
+    assert discovered_url is not None
+    assert discovered_url["company_slug"] == "example"
 
 
 def test_source_documents_and_page_classifications_round_trip(

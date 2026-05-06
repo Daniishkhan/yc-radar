@@ -61,6 +61,9 @@ LOW_VALUE_TERMS = (
     "/academy/",
     "/blog/",
     "/news/",
+    "/podcast/",
+    "/product-updates/",
+    "/resources/",
     "/templates/",
     "blog",
     "docs",
@@ -75,6 +78,21 @@ LOW_VALUE_TERMS = (
     "linkedin",
     "facebook",
     "instagram",
+)
+ATS_JOB_BOARD_DOMAINS = (
+    "jobs.ashbyhq.com",
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.lever.co",
+    "apply.workable.com",
+    "jobs.workable.com",
+    "workdayjobs.com",
+    "bamboohr.com",
+    "recruitee.com",
+    "smartrecruiters.com",
+    "applytojob.com",
+    "app.dover.com",
+    "wellfound.com",
 )
 CAREER_PATH_PATTERN = re.compile(
     r"(^|/)(careers?|jobs?|job-openings?|open-positions?|open-roles?|"
@@ -732,12 +750,12 @@ def career_link_score(homepage: str, url: str, text: str) -> float:
     link_domain = clean_domain(parsed_url.netloc)
     combined = f"{url} {text}".lower()
     same_domain = link_domain == home_domain or link_domain.endswith(f".{home_domain}")
-    ats = any(domain in link_domain for domain in ATS_DOMAINS)
+    ats = is_ats_job_board_url(url)
     career_signal = is_career_url(url)
 
     if not same_domain and not ats:
         return 0
-    if any(term in combined for term in LOW_VALUE_TERMS) and not ats:
+    if any(term in combined for term in LOW_VALUE_TERMS):
         return 0
     if ats and (career_signal or has_career_text_signal(text)):
         return 0.92
@@ -753,7 +771,7 @@ def is_allowed_career_destination(source_url: str, destination_url: str) -> bool
     destination_domain = clean_domain(urlparse(destination_url).netloc)
     if destination_domain == source_domain or destination_domain.endswith(f".{source_domain}"):
         return True
-    return any(ats_domain in destination_domain for ats_domain in ATS_DOMAINS)
+    return is_ats_job_board_url(destination_url)
 
 
 def career_page_dedupe_key(url: str) -> str:
@@ -767,7 +785,7 @@ def page_type_for(url: str) -> str:
     domain = clean_domain(urlparse(url).netloc)
     if "ycombinator.com" in domain and "/jobs/" in urlparse(url).path:
         return "yc_job"
-    if any(ats_domain in domain for ats_domain in ATS_DOMAINS):
+    if is_ats_job_board_url(url):
         return "ats"
     if "/jobs/" in urlparse(url).path.lower():
         return "jobs_page"
@@ -809,13 +827,20 @@ def is_career_like(value: str) -> bool:
 
 def is_career_url(url: str) -> bool:
     parsed = urlparse(url)
-    domain = clean_domain(parsed.netloc)
-    if any(ats_domain in domain for ats_domain in ATS_DOMAINS):
+    if is_ats_job_board_url(url):
         return True
     path = parsed.path.lower().replace("_", "-")
     if any(term in path for term in LOW_VALUE_TERMS):
         return False
     return bool(CAREER_PATH_PATTERN.search(path))
+
+
+def is_ats_job_board_url(url: str) -> bool:
+    domain = clean_domain(urlparse(url).netloc)
+    return any(
+        domain == ats_domain or domain.endswith(f".{ats_domain}")
+        for ats_domain in ATS_JOB_BOARD_DOMAINS
+    )
 
 
 def has_career_text_signal(value: str) -> bool:

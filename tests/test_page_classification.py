@@ -56,6 +56,36 @@ def test_classifier_keeps_ats_index_separate_from_job_details() -> None:
     assert result.job_title is None
 
 
+def test_classifier_marks_ats_vendor_marketing_pages_irrelevant() -> None:
+    result = classify_discovered_urls.classify_page(
+        url="https://www.ashbyhq.com/product-updates/ai-assisted-application-review",
+        title="AI assisted application review",
+        text=(
+            "Product updates for recruiting teams. Senior Software Engineer examples "
+            "and candidate review workflows."
+        ),
+        http_status=200,
+        url_kind="careers_page",
+    )
+
+    assert result.page_kind == "irrelevant"
+    assert result.evidence["is_ats"] is False
+    assert result.evidence["is_vendor_marketing"] is True
+
+
+def test_classifier_still_accepts_real_ats_job_board_urls() -> None:
+    result = classify_discovered_urls.classify_page(
+        url="https://jobs.ashbyhq.com/example",
+        title="Example Jobs",
+        text="Open roles Senior Software Engineer Product Manager Apply to any matching role.",
+        http_status=200,
+        url_kind="ats",
+    )
+
+    assert result.page_kind == "ats_listing"
+    assert result.evidence["is_ats"] is True
+
+
 def test_short_role_terms_do_not_match_inside_company_slug() -> None:
     result = classify_discovered_urls.classify_page(
         url="https://jobs.ashbyhq.com/aiprise",
@@ -67,3 +97,7 @@ def test_short_role_terms_do_not_match_inside_company_slug() -> None:
 
     assert result.page_kind == "ats_listing"
     assert result.job_title is None
+
+
+def test_postgres_text_strips_nul_bytes() -> None:
+    assert classify_discovered_urls.postgres_text("abc\x00def") == "abcdef"
