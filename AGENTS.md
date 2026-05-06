@@ -5,7 +5,7 @@ not a generic FastAPI template. The useful loop is:
 
 1. Ingest YC companies and jobs.
 2. Store the structured data in SQLite.
-3. Discover career surfaces cheaply and deterministically.
+3. Discover career pages cheaply and deterministically.
 4. Rank companies/jobs against the candidate profile.
 5. Generate prototype, PR, or founder outreach plays.
 
@@ -32,7 +32,12 @@ Important tables:
 
 - `companies`
 - `yc_job_postings`
-- `career_surfaces`
+- `career_page_discovery_events`: raw evidence, including YC job URL observations.
+- `company_career_pages`: clean deduped external career/jobs/ATS URLs.
+
+Useful view:
+
+- `company_primary_career_pages`: one best external career URL per company.
 
 Personal candidate data is ignored and should stay local:
 
@@ -65,6 +70,8 @@ Use `uv`; do not add pip workflows back into the docs.
 - Use SQLAlchemy for DB writes/reads; avoid ad hoc SQLite string work in app code.
 - Preserve API response shapes when changing persistence.
 - Keep network-heavy scripts resumable or cached where possible.
+- Use table and column names that are obvious in TablePlus. Prefer names like
+  `company_career_pages` over abstract names like `surfaces`.
 - Tests should mock network behavior.
 - Generated YC snapshots and `data/yc_radar.db` can be committed when the user asks to refresh
   or inspect data.
@@ -86,7 +93,7 @@ exact pages only, at most three pages per company, low concurrency, and cached r
 
 Use short Conventional Commit-style subjects when possible:
 
-- `feat: add sqlite persistence and career surface discovery`
+- `feat: add sqlite persistence and career page discovery`
 - `docs: refresh project guide`
 - `fix: preserve visa fields in yc job ingestion`
 

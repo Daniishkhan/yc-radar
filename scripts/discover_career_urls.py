@@ -16,10 +16,11 @@ import httpx
 
 from yc_radar.core.config import get_settings
 from yc_radar.services.database import (
+    drop_legacy_career_surfaces_table,
     engine_from_url,
     fetch_companies_for_discovery,
     fetch_yc_job_rows,
-    replace_career_surfaces,
+    replace_career_page_data,
 )
 
 CAREER_TERMS = (
@@ -88,7 +89,7 @@ SITEMAP_CANDIDATES = (
     "/sitemap_index.xml",
     "/sitemap-index.xml",
 )
-CSV_FIELDS = [
+DISCOVERY_EVENT_CSV_FIELDS = [
     "company_id",
     "company_slug",
     "company_name",
@@ -97,11 +98,29 @@ CSV_FIELDS = [
     "yc_job_count",
     "url",
     "normalized_url",
-    "url_type",
-    "source",
+    "page_type",
+    "discovery_source",
     "confidence",
     "http_status",
     "evidence",
+    "checked_at",
+]
+CAREER_PAGE_CSV_FIELDS = [
+    "company_id",
+    "company_slug",
+    "company_name",
+    "website",
+    "yc_is_hiring",
+    "yc_job_count",
+    "career_page_url",
+    "normalized_url",
+    "page_type",
+    "discovery_source",
+    "confidence",
+    "http_status",
+    "evidence",
+    "is_primary",
+    "observed_source_count",
     "checked_at",
 ]
 
@@ -190,7 +209,9 @@ class CachedHttpClient:
             return result
 
     def save(self) -> None:
-        self.cache_path.write_text(json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8")
+        self.cache_path.write_text(
+            json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8"
+        )
 
     def _load_cache(self) -> dict[str, dict[str, Any]]:
         if not self.cache_path.exists():
@@ -199,14 +220,28 @@ class CachedHttpClient:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Discover YC company career/job URL surfaces.")
+    parser = argparse.ArgumentParser(description="Discover YC company career/job pages.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--max-sitemaps", type=int, default=6)
     parser.add_argument("--max-child-sitemaps", type=int, default=8)
-    parser.add_argument("--cache-path", type=Path, default=Path("data/cache/career_url_discovery.json"))
-    parser.add_argument("--output-json", type=Path, default=Path("data/yc_career_surfaces_raw.json"))
-    parser.add_argument("--output-csv", type=Path, default=Path("data/yc_career_surfaces.csv"))
+    parser.add_argument(
+        "--cache-path", type=Path, default=Path("data/cache/career_url_discovery.json")
+    )
+    parser.add_argument(
+        "--output-json", type=Path, default=Path("data/company_career_pages_raw.json")
+    )
+    parser.add_argument("--output-csv", type=Path, default=Path("data/company_career_pages.csv"))
+    parser.add_argument(
+        "--events-json",
+        type=Path,
+        default=Path("data/career_page_discovery_events_raw.json"),
+    )
+    parser.add_argument(
+        "--events-csv",
+        type=Path,
+        default=Path("data/career_page_discovery_events.csv"),
+    )
     return parser.parse_args()
 
 
@@ -224,7 +259,7 @@ async def run(args: argparse.Namespace) -> None:
 
     async with CachedHttpClient(args.cache_path, concurrency=args.concurrency) as http:
         tasks = [
-            discover_company_surfaces(
+            discover_company_career_data(
                 company,
                 jobs_by_slug.get(company["slug"], []),
                 http,
@@ -233,40 +268,54 @@ async def run(args: argparse.Namespace) -> None:
             )
             for company in companies
         ]
-        surface_groups = await asyncio.gather(*tasks)
+        company_results = await asyncio.gather(*tasks)
 
-    surfaces = [surface for group in surface_groups for surface in group]
+    discovery_events = [event for result in company_results for event in result["discovery_events"]]
+    career_pages = [page for result in company_results for page in result["career_pages"]]
     company_slugs = [company["slug"] for company in companies]
-    replace_career_surfaces(engine, surfaces, company_slugs=company_slugs)
-    write_json(args.output_json, surfaces)
-    write_csv(args.output_csv, surfaces)
+    replace_career_page_data(
+        engine,
+        discovery_events,
+        career_pages,
+        company_slugs=company_slugs,
+    )
+    drop_legacy_career_surfaces_table(engine)
+    write_json(args.output_json, career_pages)
+    write_csv(args.output_csv, career_pages, CAREER_PAGE_CSV_FIELDS)
+    write_json(args.events_json, discovery_events)
+    write_csv(args.events_csv, discovery_events, DISCOVERY_EVENT_CSV_FIELDS)
 
     print(f"Checked {len(companies)} companies.")
-    print(f"Discovered {len(surfaces)} career surfaces.")
+    print(f"Recorded {len(discovery_events)} career page discovery events.")
+    print(f"Wrote {len(career_pages)} canonical company career pages.")
     print(f"Wrote {args.output_json}")
     print(f"Wrote {args.output_csv}")
+    print(f"Wrote {args.events_json}")
+    print(f"Wrote {args.events_csv}")
     print(f"Updated {settings.database_url}")
 
 
-async def discover_company_surfaces(
+async def discover_company_career_data(
     company: dict[str, Any],
     yc_jobs: list[dict[str, Any]],
     http: CachedHttpClient,
     *,
     max_sitemaps: int,
     max_child_sitemaps: int,
-) -> list[dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
     checked_at = datetime.now(UTC)
-    surfaces: dict[str, dict[str, Any]] = {}
+    discovery_events: list[dict[str, Any]] = []
 
     for job in yc_jobs:
-        absolute_url = job.get("absolute_url") or urljoin("https://www.ycombinator.com", job.get("url") or "")
-        add_surface(
-            surfaces,
+        absolute_url = job.get("absolute_url") or urljoin(
+            "https://www.ycombinator.com", job.get("url") or ""
+        )
+        add_discovery_event(
+            discovery_events,
             company,
             url=absolute_url,
-            url_type="yc_job",
-            source="yc_job_posting",
+            page_type="yc_job",
+            discovery_source="yc_job_posting",
             confidence=1.0,
             http_status=None,
             evidence=f"{job.get('title', '')} | {job.get('location', '')} | {job.get('visa', '')}",
@@ -276,7 +325,10 @@ async def discover_company_surfaces(
 
     website = canonical_homepage(company.get("website"))
     if not website:
-        return sorted_surfaces(surfaces)
+        return {
+            "discovery_events": sorted_discovery_events(discovery_events),
+            "career_pages": build_company_career_pages(discovery_events),
+        }
 
     homepage = await http.get(website)
     for href, text in extract_homepage_links(homepage.text):
@@ -286,12 +338,12 @@ async def discover_company_surfaces(
         score = career_link_score(website, url, text)
         if score <= 0:
             continue
-        add_surface(
-            surfaces,
+        add_discovery_event(
+            discovery_events,
             company,
             url=url,
-            url_type=url_type_for(url),
-            source="homepage_link",
+            page_type=page_type_for(url),
+            discovery_source="homepage_link",
             confidence=score,
             http_status=homepage.status_code,
             evidence=text or href,
@@ -305,36 +357,39 @@ async def discover_company_surfaces(
         max_child_sitemaps=max_child_sitemaps,
     )
     for url, status_code in sitemap_hits:
-        add_surface(
-            surfaces,
+        add_discovery_event(
+            discovery_events,
             company,
             url=url,
-            url_type=url_type_for(url),
-            source="sitemap",
+            page_type=page_type_for(url),
+            discovery_source="sitemap",
             confidence=0.78,
             http_status=status_code,
             evidence="career-like URL in sitemap",
             checked_at=checked_at,
         )
 
-    if not any(surface["source"] != "yc_job_posting" for surface in surfaces.values()):
+    if not has_external_career_event(discovery_events):
         for path in COMMON_PATHS:
             probe_url = urljoin(website.rstrip("/") + "/", path.lstrip("/"))
             result = await http.get(probe_url)
             if is_valid_probe_hit(result):
-                add_surface(
-                    surfaces,
+                add_discovery_event(
+                    discovery_events,
                     company,
                     url=result.final_url,
-                    url_type=url_type_for(result.final_url),
-                    source="common_path_probe",
+                    page_type=page_type_for(result.final_url),
+                    discovery_source="common_path_probe",
                     confidence=0.65,
                     http_status=result.status_code,
                     evidence=path,
                     checked_at=checked_at,
                 )
 
-    return sorted_surfaces(surfaces)
+    return {
+        "discovery_events": sorted_discovery_events(discovery_events),
+        "career_pages": build_company_career_pages(discovery_events),
+    }
 
 
 def extract_homepage_links(html: str) -> list[tuple[str, str]]:
@@ -411,13 +466,13 @@ def is_valid_probe_hit(result: HttpResult) -> bool:
     return is_career_url(result.final_url) and has_career_text_signal(text)
 
 
-def add_surface(
-    surfaces: dict[str, dict[str, Any]],
+def add_discovery_event(
+    discovery_events: list[dict[str, Any]],
     company: dict[str, Any],
     *,
     url: str,
-    url_type: str,
-    source: str,
+    page_type: str,
+    discovery_source: str,
     confidence: float,
     http_status: int | None,
     evidence: str,
@@ -427,26 +482,85 @@ def add_surface(
     normalized_url = normalize_url(url, url)
     if not normalized_url:
         return
-    existing = surfaces.get(normalized_url)
-    if existing and existing["confidence"] >= confidence:
-        return
-    surfaces[normalized_url] = {
-        "company_id": company.get("id"),
-        "company_slug": company.get("slug"),
-        "company_name": company.get("name"),
-        "website": company.get("website"),
-        "yc_is_hiring": bool(company.get("is_hiring")),
-        "yc_job_count": len(company.get("raw_json", {}).get("jobPostings") or []),
-        "url": url,
-        "normalized_url": normalized_url,
-        "url_type": url_type,
-        "source": source,
-        "confidence": confidence,
-        "http_status": http_status,
-        "evidence": evidence[:500],
-        "checked_at": checked_at.isoformat(),
-        "raw_json": raw_json or {},
-    }
+    discovery_events.append(
+        {
+            "company_id": company.get("id"),
+            "company_slug": company.get("slug"),
+            "company_name": company.get("name"),
+            "website": company.get("website"),
+            "yc_is_hiring": bool(company.get("is_hiring")),
+            "yc_job_count": len(company.get("raw_json", {}).get("jobPostings") or []),
+            "url": url,
+            "normalized_url": normalized_url,
+            "page_type": page_type,
+            "discovery_source": discovery_source,
+            "confidence": confidence,
+            "http_status": http_status,
+            "evidence": evidence[:500],
+            "checked_at": checked_at.isoformat(),
+            "raw_json": raw_json or {},
+        }
+    )
+
+
+def build_company_career_pages(discovery_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in discovery_events:
+        if not is_external_career_event(event):
+            continue
+        grouped.setdefault(str(event["normalized_url"]), []).append(event)
+
+    pages: list[dict[str, Any]] = []
+    for events in grouped.values():
+        best = max(events, key=lambda event: float(event["confidence"]))
+        sources = sorted({str(event["discovery_source"]) for event in events})
+        pages.append(
+            {
+                "company_id": best.get("company_id"),
+                "company_slug": best.get("company_slug"),
+                "company_name": best.get("company_name"),
+                "website": best.get("website"),
+                "yc_is_hiring": best.get("yc_is_hiring"),
+                "yc_job_count": best.get("yc_job_count"),
+                "career_page_url": best.get("url"),
+                "normalized_url": best.get("normalized_url"),
+                "page_type": best.get("page_type"),
+                "discovery_source": best.get("discovery_source"),
+                "confidence": best.get("confidence"),
+                "http_status": best.get("http_status"),
+                "evidence": best.get("evidence"),
+                "is_primary": False,
+                "observed_source_count": len(sources),
+                "checked_at": best.get("checked_at"),
+                "raw_json": {
+                    "event_count": len(events),
+                    "discovery_sources": sources,
+                },
+            }
+        )
+
+    pages = sorted(
+        pages,
+        key=lambda page: (
+            -float(page["confidence"]),
+            0 if page["page_type"] == "ats" else 1,
+            str(page["normalized_url"]),
+        ),
+    )
+    if pages:
+        pages[0]["is_primary"] = True
+    return pages
+
+
+def is_external_career_event(event: dict[str, Any]) -> bool:
+    if event.get("page_type") == "yc_job":
+        return False
+    domain = clean_domain(urlparse(str(event.get("normalized_url") or "")).netloc)
+    return "ycombinator.com" not in domain
+
+
+def has_external_career_event(events: list[dict[str, Any]]) -> bool:
+    return any(is_external_career_event(event) for event in events)
 
 
 def career_link_score(homepage: str, url: str, text: str) -> float:
@@ -472,7 +586,7 @@ def career_link_score(homepage: str, url: str, text: str) -> float:
     return 0
 
 
-def url_type_for(url: str) -> str:
+def page_type_for(url: str) -> str:
     domain = clean_domain(urlparse(url).netloc)
     if "ycombinator.com" in domain and "/jobs/" in urlparse(url).path:
         return "yc_job"
@@ -506,7 +620,9 @@ def normalize_url(base_url: str, href: str) -> str | None:
     parsed = urlparse(urljoin(base_url, href))
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") or "/", "", parsed.query, ""))
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/") or "/", "", parsed.query, "")
+    )
 
 
 def is_career_like(value: str) -> bool:
@@ -540,8 +656,16 @@ def strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", without_tags).strip()
 
 
-def sorted_surfaces(surfaces: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(surfaces.values(), key=lambda item: (-float(item["confidence"]), item["normalized_url"]))
+def sorted_discovery_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        events,
+        key=lambda item: (
+            str(item["company_slug"]),
+            -float(item["confidence"]),
+            str(item["normalized_url"]),
+            str(item["discovery_source"]),
+        ),
+    )
 
 
 def dedupe(values: list[str]) -> list[str]:
@@ -557,17 +681,19 @@ def dedupe(values: list[str]) -> list[str]:
 
 def write_json(path: Path, payload: list[dict[str, Any]]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    tmp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8"
+    )
     tmp_path.replace(path)
 
 
-def write_csv(path: Path, surfaces: list[dict[str, Any]]) -> None:
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     with tmp_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        for surface in surfaces:
-            writer.writerow({field: surface.get(field) for field in CSV_FIELDS})
+        for row in rows:
+            writer.writerow({field: row.get(field) for field in fieldnames})
     tmp_path.replace(path)
 
 

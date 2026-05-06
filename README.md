@@ -31,8 +31,14 @@ Core tables:
 - `companies`: YC company profile data, prototype score, prototype angle, and raw payload.
 - `yc_job_postings`: YC job postings extracted from company page props, including title,
   location, salary, equity, visa, skills, and raw payload.
-- `career_surfaces`: discovered job/career URLs from YC jobs, homepage links, sitemaps,
-  and capped common-path probes.
+- `career_page_discovery_events`: raw, non-lossy evidence from YC job URLs, homepage links,
+  sitemaps, and capped common-path probes.
+- `company_career_pages`: clean, deduped external career/jobs/ATS URLs for each company.
+
+Useful view:
+
+- `company_primary_career_pages`: one best external career URL per company for quick TablePlus
+  inspection.
 
 CSV and JSON files in `data/` are snapshots for inspection and debugging. They are useful,
 but the app should read from SQLite first.
@@ -85,7 +91,7 @@ The current checked-in snapshot has 5,880 companies and 4,833 YC job postings.
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 ```
 
-This script reads from SQLite and finds career surfaces without Firecrawl or browser
+This script reads from SQLite and finds career pages without Firecrawl or browser
 automation. It uses a deterministic, cheap path:
 
 - Seed from known YC job posting URLs.
@@ -94,13 +100,21 @@ automation. It uses a deterministic, cheap path:
 - If nothing useful is found, probe a small fixed set like `/careers`, `/jobs`, `/join-us`,
   `/join`, `/work-with-us`, and `/open-positions`.
 
-It writes to the `career_surfaces` table and exports:
+It writes raw observations and clean canonical pages separately:
 
-- `data/yc_career_surfaces_raw.json`
-- `data/yc_career_surfaces.csv`
+- `career_page_discovery_events`: raw evidence, including YC job URLs.
+- `company_career_pages`: deduped external career/jobs/ATS URLs.
+- `company_primary_career_pages`: view with one best URL per company.
 
-The current checked-in career surface sample was run against 100 companies and found 127
-surfaces, including 34 external career/job/ATS URLs.
+It exports:
+
+- `data/company_career_pages_raw.json`
+- `data/company_career_pages.csv`
+- `data/career_page_discovery_events_raw.json`
+- `data/career_page_discovery_events.csv`
+
+The current checked-in sample was run against 100 companies and found 34 canonical external
+career/job/ATS URLs from 160 raw discovery events.
 
 Inspect external career URLs:
 
@@ -110,10 +124,26 @@ import sqlite3
 
 conn = sqlite3.connect("data/yc_radar.db")
 for row in conn.execute("""
-    SELECT company_slug, company_name, url, source, confidence, http_status
-    FROM career_surfaces
-    WHERE url NOT LIKE 'https://www.ycombinator.com/%'
+    SELECT company_slug, company_name, career_page_url, discovery_source, confidence, http_status
+    FROM company_career_pages
     ORDER BY confidence DESC, company_slug
+"""):
+    print(row)
+conn.close()
+PY
+```
+
+Inspect one best URL per company:
+
+```bash
+uv run python - <<'PY'
+import sqlite3
+
+conn = sqlite3.connect("data/yc_radar.db")
+for row in conn.execute("""
+    SELECT company_slug, company_name, career_page_url, discovery_source, confidence
+    FROM company_primary_career_pages
+    ORDER BY company_slug
 """):
     print(row)
 conn.close()

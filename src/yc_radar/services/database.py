@@ -21,6 +21,8 @@ from sqlalchemy import (
     create_engine,
     delete,
     func,
+    inspect,
+    text,
     select,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -89,8 +91,8 @@ yc_job_postings_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
-career_surfaces_table = Table(
-    "career_surfaces",
+career_page_discovery_events_table = Table(
+    "career_page_discovery_events",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("company_id", Integer, index=True),
@@ -101,8 +103,8 @@ career_surfaces_table = Table(
     Column("yc_job_count", Integer, nullable=False, default=0),
     Column("url", Text, nullable=False),
     Column("normalized_url", Text, nullable=False),
-    Column("url_type", String, nullable=False),
-    Column("source", String, nullable=False),
+    Column("page_type", String, nullable=False),
+    Column("discovery_source", String, nullable=False),
     Column("confidence", Float, nullable=False),
     Column("http_status", Integer),
     Column("evidence", Text),
@@ -110,7 +112,32 @@ career_surfaces_table = Table(
     Column("raw_json", JSON, nullable=False, default=dict),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("company_slug", "normalized_url", name="uq_career_surface_company_url"),
+)
+
+company_career_pages_table = Table(
+    "company_career_pages",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("company_id", Integer, index=True),
+    Column("company_slug", String, nullable=False, index=True),
+    Column("company_name", String, nullable=False),
+    Column("website", String),
+    Column("yc_is_hiring", Boolean, nullable=False, default=False),
+    Column("yc_job_count", Integer, nullable=False, default=0),
+    Column("career_page_url", Text, nullable=False),
+    Column("normalized_url", Text, nullable=False),
+    Column("page_type", String, nullable=False),
+    Column("discovery_source", String, nullable=False),
+    Column("confidence", Float, nullable=False),
+    Column("http_status", Integer),
+    Column("evidence", Text),
+    Column("is_primary", Boolean, nullable=False, default=False),
+    Column("observed_source_count", Integer, nullable=False, default=1),
+    Column("checked_at", DateTime(timezone=True), nullable=False),
+    Column("raw_json", JSON, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("company_slug", "normalized_url", name="uq_company_career_page_url"),
 )
 
 
@@ -124,6 +151,30 @@ def engine_from_url(database_url: str | None = None) -> Engine:
 
 def create_schema(engine: Engine) -> None:
     metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE VIEW IF NOT EXISTS company_primary_career_pages AS
+                SELECT
+                    company_id,
+                    company_slug,
+                    company_name,
+                    website,
+                    yc_is_hiring,
+                    yc_job_count,
+                    career_page_url,
+                    page_type,
+                    discovery_source,
+                    confidence,
+                    http_status,
+                    evidence,
+                    checked_at
+                FROM company_career_pages
+                WHERE is_primary = 1
+                """
+            )
+        )
 
 
 def has_companies(engine: Engine) -> bool:
@@ -148,9 +199,10 @@ def upsert_yc_job_postings(engine: Engine, jobs: list[dict[str, Any]]) -> None:
     _upsert_rows(engine, yc_job_postings_table, rows, index_elements=["id"])
 
 
-def replace_career_surfaces(
+def replace_career_page_data(
     engine: Engine,
-    surfaces: list[dict[str, Any]],
+    discovery_events: list[dict[str, Any]],
+    career_pages: list[dict[str, Any]],
     *,
     company_slugs: list[str] | None = None,
 ) -> None:
@@ -158,19 +210,29 @@ def replace_career_surfaces(
     with engine.begin() as connection:
         if company_slugs:
             connection.execute(
-                delete(career_surfaces_table).where(
-                    career_surfaces_table.c.company_slug.in_(company_slugs)
+                delete(career_page_discovery_events_table).where(
+                    career_page_discovery_events_table.c.company_slug.in_(company_slugs)
+                )
+            )
+            connection.execute(
+                delete(company_career_pages_table).where(
+                    company_career_pages_table.c.company_slug.in_(company_slugs)
                 )
             )
         else:
-            connection.execute(delete(career_surfaces_table))
-        if surfaces:
-            rows = [_career_surface_row(surface) for surface in surfaces]
+            connection.execute(delete(career_page_discovery_events_table))
+            connection.execute(delete(company_career_pages_table))
+        if discovery_events:
+            rows = [_career_page_discovery_event_row(event) for event in discovery_events]
             for chunk in _chunks(rows, BATCH_SIZE):
-                statement = sqlite_insert(career_surfaces_table).values(chunk)
+                connection.execute(career_page_discovery_events_table.insert(), chunk)
+        if career_pages:
+            rows = [_company_career_page_row(page) for page in career_pages]
+            for chunk in _chunks(rows, BATCH_SIZE):
+                statement = sqlite_insert(company_career_pages_table).values(chunk)
                 update_columns = {
                     column.name: getattr(statement.excluded, column.name)
-                    for column in career_surfaces_table.columns
+                    for column in company_career_pages_table.columns
                     if column.name not in {"id", "created_at"}
                 }
                 connection.execute(
@@ -179,6 +241,14 @@ def replace_career_surfaces(
                         set_=update_columns,
                     )
                 )
+
+
+def drop_legacy_career_surfaces_table(engine: Engine) -> None:
+    create_schema(engine)
+    if "career_surfaces" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE career_surfaces"))
 
 
 def fetch_company_rows(engine: Engine) -> list[dict[str, Any]]:
@@ -201,7 +271,9 @@ def fetch_company_row(engine: Engine, slug: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def fetch_companies_for_discovery(engine: Engine, *, limit: int | None = None) -> list[dict[str, Any]]:
+def fetch_companies_for_discovery(
+    engine: Engine, *, limit: int | None = None
+) -> list[dict[str, Any]]:
     create_schema(engine)
     statement = select(companies_table).order_by(companies_table.c.slug)
     if limit is not None:
@@ -303,25 +375,51 @@ def _job_row(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _career_surface_row(surface: dict[str, Any]) -> dict[str, Any]:
+def _career_page_discovery_event_row(event: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now(UTC)
-    checked_at = _to_datetime(surface.get("checked_at")) or now
+    checked_at = _to_datetime(event.get("checked_at")) or now
     return {
-        "company_id": _to_int(surface.get("company_id")),
-        "company_slug": str(surface.get("company_slug") or "").lower(),
-        "company_name": surface.get("company_name") or "",
-        "website": surface.get("website"),
-        "yc_is_hiring": bool(surface.get("yc_is_hiring")),
-        "yc_job_count": _to_int(surface.get("yc_job_count")) or 0,
-        "url": surface.get("url") or surface.get("normalized_url") or "",
-        "normalized_url": surface.get("normalized_url") or surface.get("url") or "",
-        "url_type": surface.get("url_type") or "unknown",
-        "source": surface.get("source") or "unknown",
-        "confidence": float(surface.get("confidence") or 0),
-        "http_status": _to_int(surface.get("http_status")),
-        "evidence": surface.get("evidence"),
+        "company_id": _to_int(event.get("company_id")),
+        "company_slug": str(event.get("company_slug") or "").lower(),
+        "company_name": event.get("company_name") or "",
+        "website": event.get("website"),
+        "yc_is_hiring": bool(event.get("yc_is_hiring")),
+        "yc_job_count": _to_int(event.get("yc_job_count")) or 0,
+        "url": event.get("url") or event.get("normalized_url") or "",
+        "normalized_url": event.get("normalized_url") or event.get("url") or "",
+        "page_type": event.get("page_type") or "unknown",
+        "discovery_source": event.get("discovery_source") or "unknown",
+        "confidence": float(event.get("confidence") or 0),
+        "http_status": _to_int(event.get("http_status")),
+        "evidence": event.get("evidence"),
         "checked_at": checked_at,
-        "raw_json": _json_safe(surface),
+        "raw_json": _json_safe(event),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _company_career_page_row(page: dict[str, Any]) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    checked_at = _to_datetime(page.get("checked_at")) or now
+    return {
+        "company_id": _to_int(page.get("company_id")),
+        "company_slug": str(page.get("company_slug") or "").lower(),
+        "company_name": page.get("company_name") or "",
+        "website": page.get("website"),
+        "yc_is_hiring": bool(page.get("yc_is_hiring")),
+        "yc_job_count": _to_int(page.get("yc_job_count")) or 0,
+        "career_page_url": page.get("career_page_url") or page.get("url") or "",
+        "normalized_url": page.get("normalized_url") or page.get("career_page_url") or "",
+        "page_type": page.get("page_type") or "unknown",
+        "discovery_source": page.get("discovery_source") or "unknown",
+        "confidence": float(page.get("confidence") or 0),
+        "http_status": _to_int(page.get("http_status")),
+        "evidence": page.get("evidence"),
+        "is_primary": bool(page.get("is_primary")),
+        "observed_source_count": _to_int(page.get("observed_source_count")) or 1,
+        "checked_at": checked_at,
+        "raw_json": _json_safe(page),
         "created_at": now,
         "updated_at": now,
     }

@@ -36,11 +36,15 @@ def test_homepage_anchor_extraction_catches_careers_and_ats_links() -> None:
     scored = []
     for href, text in anchors:
         normalized = discover_career_urls.normalize_url("https://example.com", href)
-        if normalized and discover_career_urls.career_link_score(
-            "https://example.com",
-            normalized,
-            text,
-        ) > 0:
+        if (
+            normalized
+            and discover_career_urls.career_link_score(
+                "https://example.com",
+                normalized,
+                text,
+            )
+            > 0
+        ):
             scored.append(normalized)
 
     assert "https://example.com/careers" in scored
@@ -84,8 +88,8 @@ def test_one_level_sitemap_index_expansion_finds_career_urls() -> None:
     assert hits == [("https://example.com/careers/open-roles", 200)]
 
 
-def test_common_path_probes_are_used_only_when_no_discovered_surface_exists() -> None:
-    async def run() -> tuple[list[dict], list[str]]:
+def test_common_path_probes_are_used_only_when_no_external_career_page_exists() -> None:
+    async def run() -> tuple[dict[str, list[dict]], list[str]]:
         company = {
             "id": 1,
             "slug": "example",
@@ -120,50 +124,78 @@ def test_common_path_probes_are_used_only_when_no_discovered_surface_exists() ->
             }
         )
 
-        surfaces = await discover_career_urls.discover_company_surfaces(
+        result = await discover_career_urls.discover_company_career_data(
             company,
             [],
             http,
             max_sitemaps=0,
             max_child_sitemaps=0,
         )
-        return surfaces, http.calls
+        return result, http.calls
 
     import asyncio
 
-    surfaces, calls = asyncio.run(run())
+    result, calls = asyncio.run(run())
 
-    assert any(surface["source"] == "common_path_probe" for surface in surfaces)
+    assert any(
+        event["discovery_source"] == "common_path_probe" for event in result["discovery_events"]
+    )
+    assert result["career_pages"][0]["career_page_url"] == "https://example.com/careers"
     assert "https://example.com/careers" in calls
 
 
-def test_duplicate_surfaces_keep_highest_confidence() -> None:
-    surfaces: dict[str, dict] = {}
+def test_discovery_events_are_non_lossy_but_career_pages_are_canonical() -> None:
+    events: list[dict] = []
     company = {"id": 1, "slug": "example", "name": "Example", "raw_json": {}}
     checked_at = discover_career_urls.datetime.now(discover_career_urls.UTC)
 
-    discover_career_urls.add_surface(
-        surfaces,
+    discover_career_urls.add_discovery_event(
+        events,
         company,
         url="https://example.com/careers/",
-        url_type="careers_page",
-        source="sitemap",
+        page_type="careers_page",
+        discovery_source="sitemap",
         confidence=0.78,
         http_status=200,
         evidence="sitemap",
         checked_at=checked_at,
     )
-    discover_career_urls.add_surface(
-        surfaces,
+    discover_career_urls.add_discovery_event(
+        events,
         company,
         url="https://example.com/careers",
-        url_type="careers_page",
-        source="homepage_link",
+        page_type="careers_page",
+        discovery_source="homepage_link",
         confidence=0.84,
         http_status=200,
         evidence="Careers",
         checked_at=checked_at,
     )
 
-    assert len(surfaces) == 1
-    assert next(iter(surfaces.values()))["source"] == "homepage_link"
+    pages = discover_career_urls.build_company_career_pages(events)
+
+    assert len(events) == 2
+    assert len(pages) == 1
+    assert pages[0]["discovery_source"] == "homepage_link"
+    assert pages[0]["observed_source_count"] == 2
+
+
+def test_yc_jobs_stay_as_events_and_do_not_become_company_career_pages() -> None:
+    events: list[dict] = []
+    company = {"id": 1, "slug": "example", "name": "Example", "raw_json": {}}
+    checked_at = discover_career_urls.datetime.now(discover_career_urls.UTC)
+
+    discover_career_urls.add_discovery_event(
+        events,
+        company,
+        url="https://www.ycombinator.com/companies/example/jobs/abc-engineer",
+        page_type="yc_job",
+        discovery_source="yc_job_posting",
+        confidence=1.0,
+        http_status=None,
+        evidence="Engineer | Remote | Will sponsor",
+        checked_at=checked_at,
+    )
+
+    assert len(events) == 1
+    assert discover_career_urls.build_company_career_pages(events) == []

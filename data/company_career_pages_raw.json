@@ -1,0 +1,823 @@
+[
+  {
+    "career_page_url": "http://1910.ai/careers",
+    "checked_at": "2026-05-06T18:15:50.546477+00:00",
+    "company_id": 12286,
+    "company_name": "1910",
+    "company_slug": "1910",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "http://1910.ai/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 3
+    },
+    "website": "http://1910.ai",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://80000hours.org/about/work-with-us",
+    "checked_at": "2026-05-06T18:15:50.587108+00:00",
+    "company_id": 941,
+    "company_name": "80,000 Hours",
+    "company_slug": "80-000-hours",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Work with us",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://80000hours.org/about/work-with-us",
+    "observed_source_count": 2,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link",
+        "sitemap"
+      ],
+      "event_count": 3
+    },
+    "website": "http://80000hours.org",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://jobs.ashbyhq.com/9-mothers",
+    "checked_at": "2026-05-06T18:15:50.602989+00:00",
+    "company_id": 31193,
+    "company_name": "9 Mothers",
+    "company_slug": "9-mothers-corporation",
+    "confidence": 0.92,
+    "discovery_source": "homepage_link",
+    "evidence": "view job openings",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://jobs.ashbyhq.com/9-mothers",
+    "observed_source_count": 1,
+    "page_type": "ats",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 3
+    },
+    "website": "https://9mothers.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 14
+  },
+  {
+    "career_page_url": "http://athinkingape.com/careers",
+    "checked_at": "2026-05-06T18:15:50.612715+00:00",
+    "company_id": 305,
+    "company_name": "A Thinking Ape",
+    "company_slug": "a-thinking-ape",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "http://athinkingape.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 7
+    },
+    "website": "http://athinkingape.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://a0.dev/careers",
+    "checked_at": "2026-05-06T18:15:50.617841+00:00",
+    "company_id": 30223,
+    "company_name": "a0.dev",
+    "company_slug": "a0-dev",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://a0.dev/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "https://a0.dev",
+    "yc_is_hiring": true,
+    "yc_job_count": 2
+  },
+  {
+    "career_page_url": "https://www.abacum.ai/company/careers",
+    "checked_at": "2026-05-06T18:15:50.627821+00:00",
+    "company_id": 22579,
+    "company_name": "Abacum",
+    "company_slug": "abacum",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.abacum.ai/company/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://www.abacum.ai/",
+    "yc_is_hiring": true,
+    "yc_job_count": 2
+  },
+  {
+    "career_page_url": "https://www.emburse.com/company/careers",
+    "checked_at": "2026-05-06T18:15:50.637225+00:00",
+    "company_id": 572,
+    "company_name": "Abacus",
+    "company_slug": "abacus",
+    "confidence": 0.65,
+    "discovery_source": "common_path_probe",
+    "evidence": "/careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.emburse.com/company/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "common_path_probe"
+      ],
+      "event_count": 1
+    },
+    "website": "http://abacus.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://www.abalonebio.com/careers",
+    "checked_at": "2026-05-06T18:15:50.637724+00:00",
+    "company_id": 13081,
+    "company_name": "Abalone Bio",
+    "company_slug": "abalone-bio",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.abalonebio.com/careers",
+    "observed_source_count": 2,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link",
+        "sitemap"
+      ],
+      "event_count": 5
+    },
+    "website": "https://www.abalonebio.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://www.abalonebio.com/careers/ab2025-101",
+    "checked_at": "2026-05-06T18:15:50.637724+00:00",
+    "company_id": 13081,
+    "company_name": "Abalone Bio",
+    "company_slug": "abalone-bio",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://www.abalonebio.com/careers/ab2025-101",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://www.abalonebio.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://abatable.com/careers",
+    "checked_at": "2026-05-06T18:15:50.641258+00:00",
+    "company_id": 24726,
+    "company_name": "Abatable",
+    "company_slug": "abatable",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://abatable.com/careers",
+    "observed_source_count": 2,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link",
+        "sitemap"
+      ],
+      "event_count": 4
+    },
+    "website": "https://www.abatable.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://abelpolice.com/careers",
+    "checked_at": "2026-05-06T18:15:50.651986+00:00",
+    "company_id": 29558,
+    "company_name": "Abel Police",
+    "company_slug": "abel-police",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://abelpolice.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "http://abelpolice.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://abelpolice.com/careers/senior-engineer",
+    "checked_at": "2026-05-06T18:15:50.651986+00:00",
+    "company_id": 29558,
+    "company_name": "Abel Police",
+    "company_slug": "abel-police",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://abelpolice.com/careers/senior-engineer",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "http://abelpolice.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://abhi.com.pk/job-openings",
+    "checked_at": "2026-05-06T18:15:50.653470+00:00",
+    "company_id": 24685,
+    "company_name": "Abhi",
+    "company_slug": "abhi",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Career",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://abhi.com.pk/job-openings",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 2
+    },
+    "website": "https://abhi.com.pk/",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://absurd.com/careers",
+    "checked_at": "2026-05-06T18:15:50.668567+00:00",
+    "company_id": 30958,
+    "company_name": "Absurd",
+    "company_slug": "absurd",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://absurd.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://absurd.com/",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://acciojob.com/jobs",
+    "checked_at": "2026-05-06T18:15:50.684297+00:00",
+    "company_id": 12242,
+    "company_name": "AccioJob",
+    "company_slug": "acciojob",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://acciojob.com/jobs",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "http://www.acciojob.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://www.aclu.org/careers",
+    "checked_at": "2026-05-06T18:15:50.704598+00:00",
+    "company_id": 1575,
+    "company_name": "ACLU",
+    "company_slug": "aclu",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers Full-time positions and internships",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.aclu.org/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "https://www.aclu.org/",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "http://acunote.com/jobs",
+    "checked_at": "2026-05-06T18:15:50.760895+00:00",
+    "company_id": 143,
+    "company_name": "Acunote",
+    "company_slug": "acunote",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Jobs",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "http://acunote.com/jobs",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "http://acunote.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://adam.new/careers",
+    "checked_at": "2026-05-06T18:15:50.762513+00:00",
+    "company_id": 30234,
+    "company_name": "Adam",
+    "company_slug": "adam",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://adam.new/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "https://adam.new/",
+    "yc_is_hiring": true,
+    "yc_job_count": 3
+  },
+  {
+    "career_page_url": "https://www.adam.new/careers",
+    "checked_at": "2026-05-06T18:15:50.762513+00:00",
+    "company_id": 30234,
+    "company_name": "Adam",
+    "company_slug": "adam",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://www.adam.new/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://adam.new/",
+    "yc_is_hiring": true,
+    "yc_job_count": 3
+  },
+  {
+    "career_page_url": "https://www.adaptyvbio.com/careers",
+    "checked_at": "2026-05-06T18:15:50.771358+00:00",
+    "company_id": 24505,
+    "company_name": "Adaptyv",
+    "company_slug": "adaptyv",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.adaptyvbio.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 3
+    },
+    "website": "https://www.adaptyvbio.com/",
+    "yc_is_hiring": true,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://adenhq.com/careers",
+    "checked_at": "2026-05-06T18:15:50.773961+00:00",
+    "company_id": 13141,
+    "company_name": "Aden",
+    "company_slug": "aden",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Join Us",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://adenhq.com/careers",
+    "observed_source_count": 2,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link",
+        "sitemap"
+      ],
+      "event_count": 5
+    },
+    "website": "https://adenhq.com/",
+    "yc_is_hiring": true,
+    "yc_job_count": 7
+  },
+  {
+    "career_page_url": "http://www.advano.io/careers",
+    "checked_at": "2026-05-06T18:15:50.802141+00:00",
+    "company_id": 1621,
+    "company_name": "Advano",
+    "company_slug": "advano",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "http://www.advano.io/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "http://www.advano.io",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://adyn.com/careers",
+    "checked_at": "2026-05-06T18:15:50.812732+00:00",
+    "company_id": 13413,
+    "company_name": "adyn",
+    "company_slug": "adyn",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://adyn.com/careers",
+    "observed_source_count": 2,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link",
+        "sitemap"
+      ],
+      "event_count": 2
+    },
+    "website": "https://adyn.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 5
+  },
+  {
+    "career_page_url": "https://adyn.com/careers/back-end-engineer",
+    "checked_at": "2026-05-06T18:15:50.812732+00:00",
+    "company_id": 13413,
+    "company_name": "adyn",
+    "company_slug": "adyn",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://adyn.com/careers/back-end-engineer",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://adyn.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 5
+  },
+  {
+    "career_page_url": "https://adyn.com/careers/digital-storytelling-intern",
+    "checked_at": "2026-05-06T18:15:50.812732+00:00",
+    "company_id": 13413,
+    "company_name": "adyn",
+    "company_slug": "adyn",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://adyn.com/careers/digital-storytelling-intern",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://adyn.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 5
+  },
+  {
+    "career_page_url": "http://www.aellaapp.com/career",
+    "checked_at": "2026-05-06T18:15:50.821081+00:00",
+    "company_id": 1503,
+    "company_name": "Aella",
+    "company_slug": "aella",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "http://www.aellaapp.com/career",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "http://www.aellaapp.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://aerones.com/company-2/careers",
+    "checked_at": "2026-05-06T18:15:50.826932+00:00",
+    "company_id": 1875,
+    "company_name": "Aerones",
+    "company_slug": "aerones",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://aerones.com/company-2/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 2
+    },
+    "website": "http://www.aerones.com",
+    "yc_is_hiring": false,
+    "yc_job_count": 0
+  },
+  {
+    "career_page_url": "https://www.afriexapp.com/careers",
+    "checked_at": "2026-05-06T18:15:50.855491+00:00",
+    "company_id": 22152,
+    "company_name": "Afriex",
+    "company_slug": "afriex",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.afriexapp.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 1
+    },
+    "website": "https://www.afriexapp.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 1
+  },
+  {
+    "career_page_url": "https://www.afriex.com/careers",
+    "checked_at": "2026-05-06T18:15:50.855491+00:00",
+    "company_id": 22152,
+    "company_name": "Afriex",
+    "company_slug": "afriex",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://www.afriex.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://www.afriexapp.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 1
+  },
+  {
+    "career_page_url": "https://afterquery.com/careers",
+    "checked_at": "2026-05-06T18:15:50.870627+00:00",
+    "company_id": 30303,
+    "company_name": "AfterQuery",
+    "company_slug": "afterquery",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://afterquery.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 5
+    },
+    "website": "https://afterquery.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 11
+  },
+  {
+    "career_page_url": "https://www.afterquery.com/careers",
+    "checked_at": "2026-05-06T18:15:50.870627+00:00",
+    "company_id": 30303,
+    "company_name": "AfterQuery",
+    "company_slug": "afterquery",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://www.afterquery.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://afterquery.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 11
+  },
+  {
+    "career_page_url": "https://www.useagave.com/careers",
+    "checked_at": "2026-05-06T18:15:50.877441+00:00",
+    "company_id": 25273,
+    "company_name": "Agave",
+    "company_slug": "agave",
+    "confidence": 0.84,
+    "discovery_source": "homepage_link",
+    "evidence": "Careers",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://www.useagave.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "homepage_link"
+      ],
+      "event_count": 2
+    },
+    "website": "https://www.useagave.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 12
+  },
+  {
+    "career_page_url": "https://useagave.com/careers",
+    "checked_at": "2026-05-06T18:15:50.877441+00:00",
+    "company_id": 25273,
+    "company_name": "Agave",
+    "company_slug": "agave",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": false,
+    "normalized_url": "https://useagave.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://www.useagave.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 12
+  },
+  {
+    "career_page_url": "https://getagency.com/careers",
+    "checked_at": "2026-05-06T18:15:50.883194+00:00",
+    "company_id": 25696,
+    "company_name": "Agency",
+    "company_slug": "agency",
+    "confidence": 0.78,
+    "discovery_source": "sitemap",
+    "evidence": "career-like URL in sitemap",
+    "http_status": 200,
+    "is_primary": true,
+    "normalized_url": "https://getagency.com/careers",
+    "observed_source_count": 1,
+    "page_type": "careers_page",
+    "raw_json": {
+      "discovery_sources": [
+        "sitemap"
+      ],
+      "event_count": 1
+    },
+    "website": "https://GetAgency.com",
+    "yc_is_hiring": true,
+    "yc_job_count": 1
+  }
+]
