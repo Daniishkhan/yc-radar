@@ -10,6 +10,7 @@ sys.modules["discover_career_urls"] = discover_career_urls
 SPEC.loader.exec_module(discover_career_urls)
 
 HttpResult = discover_career_urls.HttpResult
+CachedHttpClient = discover_career_urls.CachedHttpClient
 
 
 class FakeHttp:
@@ -360,3 +361,38 @@ def test_yc_jobs_stay_as_events_and_do_not_become_company_career_pages() -> None
 
     assert len(events) == 1
     assert discover_career_urls.build_company_career_pages(events) == []
+
+
+def test_empty_or_corrupt_http_cache_starts_fresh(tmp_path: Path) -> None:
+    empty_cache = tmp_path / "empty.json"
+    empty_cache.write_text("", encoding="utf-8")
+
+    empty_client = CachedHttpClient(empty_cache, concurrency=1)
+    assert empty_client.cache == {}
+
+    corrupt_cache = tmp_path / "corrupt.json"
+    corrupt_cache.write_text("{not-json", encoding="utf-8")
+
+    corrupt_client = CachedHttpClient(corrupt_cache, concurrency=1)
+
+    assert corrupt_client.cache == {}
+    assert not corrupt_cache.exists()
+    assert (tmp_path / "corrupt.json.corrupt").exists()
+
+
+def test_http_cache_save_is_atomic(tmp_path: Path) -> None:
+    cache_path = tmp_path / "cache.json"
+    client = CachedHttpClient(cache_path, concurrency=1)
+    client.cache["https://example.com"] = {
+        "url": "https://example.com",
+        "final_url": "https://example.com",
+        "status_code": 200,
+        "content_type": "text/html",
+        "text": "ok",
+        "error": None,
+    }
+
+    client.save()
+
+    assert cache_path.exists()
+    assert not (tmp_path / "cache.json.tmp").exists()

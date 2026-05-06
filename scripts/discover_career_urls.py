@@ -251,14 +251,22 @@ class CachedHttpClient:
             return result
 
     def save(self) -> None:
-        self.cache_path.write_text(
-            json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        tmp_path = self.cache_path.with_suffix(f"{self.cache_path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(self.cache_path)
 
     def _load_cache(self) -> dict[str, dict[str, Any]]:
         if not self.cache_path.exists():
             return {}
-        return json.loads(self.cache_path.read_text(encoding="utf-8"))
+        raw_cache = self.cache_path.read_text(encoding="utf-8")
+        if not raw_cache.strip():
+            return {}
+        try:
+            return json.loads(raw_cache)
+        except json.JSONDecodeError:
+            corrupt_path = self.cache_path.with_suffix(f"{self.cache_path.suffix}.corrupt")
+            self.cache_path.replace(corrupt_path)
+            return {}
 
 
 def parse_args() -> argparse.Namespace:
