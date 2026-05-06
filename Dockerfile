@@ -11,8 +11,8 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY scripts ./scripts
 COPY data ./data
-COPY extract_yc_companies.py ./extract_yc_companies.py
 
 RUN uv sync --frozen --no-dev
 

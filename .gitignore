@@ -15,8 +15,8 @@ build/
 *.egg-info/
 yc_algolia_*.network-request
 yc_algolia_*.network-response
-data/resume/*.pdf
-data/profile/candidate_profile.json
-data/profile/resume_text.txt
+data/local/
+data/resume/
+data/profile/
 data/runs/
 data/cache/

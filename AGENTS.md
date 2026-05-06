@@ -17,7 +17,7 @@ not a generic FastAPI template. The useful loop is:
 - `src/yc_radar/services/`: data access, candidate fit, profile loading, hiring verification.
 - `src/yc_radar/playbooks/`: deterministic mission and outreach playbook logic.
 - `src/yc_radar/agents/`: OpenAI-assisted refinements; keep LLM usage optional.
-- `extract_yc_companies.py`: refreshes YC company and job data into SQLite plus snapshots.
+- `scripts/extract_yc_companies.py`: refreshes YC company and job data into SQLite plus snapshots.
 - `scripts/discover_career_urls.py`: finds career/job/ATS URLs without Firecrawl or browser automation.
 - `scripts/generate_weekly_targets.py`: creates local candidate-fit target runs.
 - `scripts/ingest_resume.py`: converts the private resume PDF into local structured profile data.
@@ -31,8 +31,8 @@ research-only, sales, marketing, and intern roles out of the main shortlist.
 
 ## Source Of Truth
 
-`data/yc_radar.db` is primary. CSV/JSON files in `data/` are inspection snapshots and debug
-artifacts.
+`data/db/yc_radar.db` is primary. CSV files in `data/snapshots/` are lightweight inspection
+exports. Raw JSON debug artifacts belong under ignored `data/local/debug/`.
 
 Important tables:
 
@@ -47,10 +47,11 @@ Useful view:
 
 Personal candidate data is ignored and should stay local:
 
-- `data/resume/`
-- `data/profile/`
-- `data/runs/`
-- `data/cache/`
+- `data/local/resume/`
+- `data/local/profile/`
+- `data/local/runs/`
+- `data/local/cache/`
+- `data/local/debug/`
 
 Do not expose resume/profile contents through the API unless the user explicitly asks for that.
 
@@ -60,8 +61,8 @@ Do not expose resume/profile contents through the API unless the user explicitly
 uv sync --extra dev
 uv run uvicorn yc_radar.main:app --reload
 uv run pytest
-uv run ruff check src tests scripts extract_yc_companies.py
-uv run python extract_yc_companies.py
+uv run ruff check src tests scripts
+uv run python scripts/extract_yc_companies.py
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
 docker compose up --build
@@ -79,8 +80,8 @@ Use `uv`; do not add pip workflows back into the docs.
 - Use table and column names that are obvious in TablePlus. Prefer names like
   `company_career_pages` over abstract names like `surfaces`.
 - Tests should mock network behavior.
-- Generated YC snapshots and `data/yc_radar.db` can be committed when the user asks to refresh
-  or inspect data.
+- Generated YC CSV snapshots and `data/db/yc_radar.db` can be committed when the user asks to
+  refresh or inspect data.
 
 ## Scraping And Enrichment Rules
 
@@ -90,7 +91,7 @@ Career URL discovery should stay cheap:
 - No dynamic browser scraping.
 - No broad domain crawls.
 - Fetch homepage, `robots.txt`, capped sitemaps, and a small fixed probe list.
-- Cache HTTP responses in `data/cache/career_url_discovery.json`.
+- Cache HTTP responses in `data/local/cache/career_url_discovery.json`.
 
 Firecrawl belongs in live hiring verification, not bulk discovery. Keep it free-plan-safe:
 exact pages only, at most three pages per company, low concurrency, and cached results.
@@ -107,7 +108,7 @@ Before committing code changes, run:
 
 ```bash
 uv run pytest
-uv run ruff check src tests scripts extract_yc_companies.py
+uv run ruff check src tests scripts
 ```
 
 For docs-only changes, a pytest smoke run is usually enough, but lint/test is still preferred

@@ -12,10 +12,7 @@ from typing import Any
 
 from pypdf import PdfReader
 
-
-DEFAULT_RESUME_PATH = Path("data/resume/resume.pdf")
-DEFAULT_PROFILE_PATH = Path("data/profile/candidate_profile.json")
-DEFAULT_TEXT_PATH = Path("data/profile/resume_text.txt")
+from yc_radar.core.config import get_settings
 
 
 def normalize_text(text: str) -> str:
@@ -235,7 +232,7 @@ def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any
         "source": {
             "resume_path": str(resume_path),
             "pages": pages,
-            "raw_text_path": str(DEFAULT_TEXT_PATH),
+            "raw_text_path": "",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "notes": [
                 "Generated from resume PDF plus the user's stated expertise in LLMs, backend systems, and data engineering.",
@@ -250,13 +247,19 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert a resume PDF into candidate_profile.json.")
-    parser.add_argument("--resume", type=Path, default=DEFAULT_RESUME_PATH)
-    parser.add_argument("--profile", type=Path, default=DEFAULT_PROFILE_PATH)
-    parser.add_argument("--text", type=Path, default=DEFAULT_TEXT_PATH)
-    args = parser.parse_args()
+def parse_args() -> argparse.Namespace:
+    settings = get_settings()
+    parser = argparse.ArgumentParser(
+        description="Convert a resume PDF into candidate_profile.json."
+    )
+    parser.add_argument("--resume", type=Path, default=settings.resume_path)
+    parser.add_argument("--profile", type=Path, default=settings.candidate_profile_path)
+    parser.add_argument("--text", type=Path, default=settings.resume_text_path)
+    return parser.parse_args()
 
+
+def main() -> None:
+    args = parse_args()
     raw_text, pages = extract_pdf_text(args.resume)
     args.text.parent.mkdir(parents=True, exist_ok=True)
     args.text.write_text(raw_text, encoding="utf-8")
