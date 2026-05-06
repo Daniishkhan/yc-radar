@@ -232,7 +232,9 @@ def normalize_url(base_url: str, href: str) -> str | None:
     parsed = urlparse(urljoin(base_url, href))
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return None
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") or "/", "", parsed.query, ""))
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/") or "/", "", parsed.query, "")
+    )
 
 
 def career_link_score(homepage_url: str, url: str, text: str = "") -> int:
@@ -370,7 +372,9 @@ def verify_company_hiring(
     try:
         homepage = scrape_limited(company.website)
         pages.append(homepage)
-        career_links = detect_career_links(company.website, homepage, limit=max_pages_per_company - 1)
+        career_links = detect_career_links(
+            company.website, homepage, limit=max_pages_per_company - 1
+        )
         for career_url in career_links:
             if pages_used >= max_pages_per_company:
                 break

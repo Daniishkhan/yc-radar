@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     app_env: str = "development"
     data_dir: Path = Field(default=Path("data"), validation_alias="DATA_DIR")
     database_url_override: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    default_database_url: str = Field(
+        default="postgresql+psycopg://yc_radar:yc_radar@localhost:5433/yc_radar",
+        validation_alias="DEFAULT_DATABASE_URL",
+    )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4.1-mini", validation_alias="OPENAI_MODEL")
     firecrawl_api_key: str | None = Field(default=None, validation_alias="FIRECRAWL_API_KEY")
@@ -18,13 +22,9 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        if self.database_url_override:
+        if self.database_url_override and self.database_url_override.strip():
             return self.database_url_override
-        return f"sqlite:///{self.database_path}"
-
-    @property
-    def database_path(self) -> Path:
-        return self.data_dir / "db" / "yc_radar.db"
+        return self.default_database_url
 
     @property
     def snapshots_dir(self) -> Path:
@@ -55,8 +55,20 @@ class Settings(BaseSettings):
         return self.snapshots_dir / "career_page_discovery_events.csv"
 
     @property
+    def discovered_urls_csv_path(self) -> Path:
+        return self.snapshots_dir / "discovered_urls.csv"
+
+    @property
+    def page_classifications_csv_path(self) -> Path:
+        return self.snapshots_dir / "page_classifications.csv"
+
+    @property
     def career_url_discovery_cache_path(self) -> Path:
         return self.local_dir / "cache" / "career_url_discovery.json"
+
+    @property
+    def page_fetch_cache_path(self) -> Path:
+        return self.local_dir / "cache" / "page_fetches.json"
 
     @property
     def resume_path(self) -> Path:

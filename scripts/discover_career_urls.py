@@ -18,9 +18,14 @@ from yc_radar.core.config import get_settings
 from yc_radar.services.database import (
     drop_legacy_career_surfaces_table,
     engine_from_url,
+    fetch_career_page_discovery_event_rows,
     fetch_companies_for_discovery,
+    fetch_company_career_page_rows,
+    fetch_completed_career_discovery_slugs,
+    fetch_discovered_url_rows,
     fetch_yc_job_rows,
     replace_career_page_data,
+    upsert_career_page_discovery_statuses,
 )
 
 CAREER_TERMS = (
@@ -123,6 +128,25 @@ CAREER_PAGE_CSV_FIELDS = [
     "observed_source_count",
     "checked_at",
 ]
+DISCOVERED_URL_CSV_FIELDS = [
+    "company_id",
+    "company_slug",
+    "company_name",
+    "website",
+    "url",
+    "normalized_url",
+    "url_key",
+    "url_kind",
+    "discovery_sources",
+    "source_event_count",
+    "confidence",
+    "fetch_priority",
+    "http_status",
+    "is_primary",
+    "is_active",
+    "first_seen_at",
+    "last_seen_at",
+]
 
 
 @dataclass
@@ -224,12 +248,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover YC company career/job pages.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument("--max-sitemaps", type=int, default=6)
     parser.add_argument("--max-child-sitemaps", type=int, default=8)
-    parser.add_argument(
-        "--cache-path", type=Path, default=settings.career_url_discovery_cache_path
-    )
+    parser.add_argument("--cache-path", type=Path, default=settings.career_url_discovery_cache_path)
     parser.add_argument("--output-csv", type=Path, default=settings.company_career_pages_csv_path)
+    parser.add_argument(
+        "--discovered-urls-csv",
+        type=Path,
+        default=settings.discovered_urls_csv_path,
+    )
     parser.add_argument(
         "--events-csv",
         type=Path,
@@ -240,6 +268,11 @@ def parse_args() -> argparse.Namespace:
         "--raw-output-dir",
         type=Path,
         default=settings.local_debug_dir / "career_discovery",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reprocess selected companies even when discovery status is already completed.",
     )
     return parser.parse_args()
 
@@ -252,50 +285,160 @@ async def run(args: argparse.Namespace) -> None:
     settings = get_settings()
     engine = engine_from_url(settings.database_url)
     companies = fetch_companies_for_discovery(engine, limit=args.limit)
+    selected_slugs = [str(company["slug"]) for company in companies]
+    completed_slugs = (
+        set()
+        if args.force
+        else fetch_completed_career_discovery_slugs(engine, company_slugs=selected_slugs)
+    )
+    pending_companies = pending_discovery_companies(
+        companies,
+        completed_slugs=completed_slugs,
+        force=args.force,
+    )
     jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
     for job in fetch_yc_job_rows(engine):
         jobs_by_slug.setdefault(job["company_slug"], []).append(job)
 
     async with CachedHttpClient(args.cache_path, concurrency=args.concurrency) as http:
-        tasks = [
-            discover_company_career_data(
-                company,
-                jobs_by_slug.get(company["slug"], []),
+        processed_count = 0
+        for batch in chunks(pending_companies, max(1, args.batch_size)):
+            batch_results = await discover_company_batch(
+                batch,
+                jobs_by_slug,
                 http,
                 max_sitemaps=args.max_sitemaps,
                 max_child_sitemaps=args.max_child_sitemaps,
             )
-            for company in companies
-        ]
-        company_results = await asyncio.gather(*tasks)
+            batch_events = [
+                event for result in batch_results for event in result["discovery_events"]
+            ]
+            batch_pages = [page for result in batch_results for page in result["career_pages"]]
+            batch_slugs = [str(company["slug"]) for company in batch]
+            replace_career_page_data(
+                engine,
+                batch_events,
+                batch_pages,
+                company_slugs=batch_slugs,
+            )
+            upsert_career_page_discovery_statuses(
+                engine,
+                [discovery_status(result) for result in batch_results],
+            )
+            processed_count += len(batch)
+            http.save()
+            print(
+                f"Checkpointed {processed_count} / {len(pending_companies)} pending "
+                f"companies ({len(completed_slugs)} already completed).",
+                flush=True,
+            )
 
-    discovery_events = [event for result in company_results for event in result["discovery_events"]]
-    career_pages = [page for result in company_results for page in result["career_pages"]]
-    company_slugs = [company["slug"] for company in companies]
-    replace_career_page_data(
-        engine,
-        discovery_events,
-        career_pages,
-        company_slugs=company_slugs,
-    )
     drop_legacy_career_surfaces_table(engine)
+    discovery_events = fetch_career_page_discovery_event_rows(engine, company_slugs=selected_slugs)
+    career_pages = fetch_company_career_page_rows(engine, company_slugs=selected_slugs)
+    discovered_urls = fetch_discovered_url_rows(engine, company_slugs=selected_slugs)
     write_csv(args.output_csv, career_pages, CAREER_PAGE_CSV_FIELDS)
+    write_csv(args.discovered_urls_csv, discovered_urls, DISCOVERED_URL_CSV_FIELDS)
     write_csv(args.events_csv, discovery_events, DISCOVERY_EVENT_CSV_FIELDS)
     if args.write_raw_json:
         write_json(args.raw_output_dir / "company_career_pages_raw.json", career_pages)
+        write_json(args.raw_output_dir / "discovered_urls_raw.json", discovered_urls)
         write_json(
             args.raw_output_dir / "career_page_discovery_events_raw.json",
             discovery_events,
         )
 
-    print(f"Checked {len(companies)} companies.")
+    print(f"Selected {len(companies)} companies.")
+    print(f"Skipped {len(completed_slugs)} already completed companies.")
+    print(f"Checked {len(pending_companies)} pending companies.")
     print(f"Recorded {len(discovery_events)} career page discovery events.")
     print(f"Wrote {len(career_pages)} canonical company career pages.")
+    print(f"Queued {len(discovered_urls)} discovered URLs for fetch/classification.")
     print(f"Wrote {args.output_csv}")
+    print(f"Wrote {args.discovered_urls_csv}")
     print(f"Wrote {args.events_csv}")
     if args.write_raw_json:
         print(f"Wrote raw JSON debug files under {args.raw_output_dir}")
     print(f"Updated {settings.database_url}")
+
+
+def pending_discovery_companies(
+    companies: list[dict[str, Any]],
+    *,
+    completed_slugs: set[str],
+    force: bool,
+) -> list[dict[str, Any]]:
+    if force:
+        return companies
+    return [company for company in companies if str(company["slug"]) not in completed_slugs]
+
+
+async def discover_company_batch(
+    companies: list[dict[str, Any]],
+    jobs_by_slug: dict[str, list[dict[str, Any]]],
+    http: CachedHttpClient,
+    *,
+    max_sitemaps: int,
+    max_child_sitemaps: int,
+) -> list[dict[str, Any]]:
+    tasks = [
+        discover_company_result(
+            company,
+            jobs_by_slug.get(company["slug"], []),
+            http,
+            max_sitemaps=max_sitemaps,
+            max_child_sitemaps=max_child_sitemaps,
+        )
+        for company in companies
+    ]
+    return await asyncio.gather(*tasks)
+
+
+async def discover_company_result(
+    company: dict[str, Any],
+    yc_jobs: list[dict[str, Any]],
+    http: CachedHttpClient,
+    *,
+    max_sitemaps: int,
+    max_child_sitemaps: int,
+) -> dict[str, Any]:
+    try:
+        result = await discover_company_career_data(
+            company,
+            yc_jobs,
+            http,
+            max_sitemaps=max_sitemaps,
+            max_child_sitemaps=max_child_sitemaps,
+        )
+        return {
+            "company": company,
+            "discovery_events": result["discovery_events"],
+            "career_pages": result["career_pages"],
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "company": company,
+            "discovery_events": [],
+            "career_pages": [],
+            "error": str(exc),
+        }
+
+
+def discovery_status(result: dict[str, Any]) -> dict[str, Any]:
+    company = result["company"]
+    error = result.get("error")
+    return {
+        "company_id": company.get("id"),
+        "company_slug": company.get("slug"),
+        "company_name": company.get("name"),
+        "website": company.get("website"),
+        "status": "failed" if error else "completed",
+        "discovery_event_count": len(result["discovery_events"]),
+        "career_page_count": len(result["career_pages"]),
+        "error": error,
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
 
 
 async def discover_company_career_data(
@@ -465,6 +608,8 @@ def is_valid_probe_hit(result: HttpResult) -> bool:
         return False
     if re.search(r"\b(page not found|not found|404)\b", result.text[:5000], flags=re.I):
         return False
+    if not is_allowed_career_destination(result.url, result.final_url):
+        return False
     text = strip_html(result.text[:30_000]).lower()
     return is_career_url(result.final_url) and has_career_text_signal(text)
 
@@ -485,25 +630,28 @@ def add_discovery_event(
     normalized_url = normalize_url(url, url)
     if not normalized_url:
         return
-    discovery_events.append(
-        {
-            "company_id": company.get("id"),
-            "company_slug": company.get("slug"),
-            "company_name": company.get("name"),
-            "website": company.get("website"),
-            "yc_is_hiring": bool(company.get("is_hiring")),
-            "yc_job_count": len(company.get("raw_json", {}).get("jobPostings") or []),
-            "url": url,
-            "normalized_url": normalized_url,
-            "page_type": page_type,
-            "discovery_source": discovery_source,
-            "confidence": confidence,
-            "http_status": http_status,
-            "evidence": evidence[:500],
-            "checked_at": checked_at.isoformat(),
-            "raw_json": raw_json or {},
-        }
-    )
+    event = {
+        "company_id": company.get("id"),
+        "company_slug": company.get("slug"),
+        "company_name": company.get("name"),
+        "website": company.get("website"),
+        "yc_is_hiring": bool(company.get("is_hiring")),
+        "yc_job_count": len(company.get("raw_json", {}).get("jobPostings") or []),
+        "url": url,
+        "normalized_url": normalized_url,
+        "page_type": page_type,
+        "discovery_source": discovery_source,
+        "confidence": confidence,
+        "http_status": http_status,
+        "evidence": evidence[:500],
+        "checked_at": checked_at.isoformat(),
+        "raw_json": raw_json or {},
+    }
+    if discovery_event_key(event) in {
+        discovery_event_key(existing) for existing in discovery_events
+    }:
+        return
+    discovery_events.append(event)
 
 
 def build_company_career_pages(discovery_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -511,12 +659,13 @@ def build_company_career_pages(discovery_events: list[dict[str, Any]]) -> list[d
     for event in discovery_events:
         if not is_external_career_event(event):
             continue
-        grouped.setdefault(str(event["normalized_url"]), []).append(event)
+        grouped.setdefault(career_page_dedupe_key(str(event["normalized_url"])), []).append(event)
 
     pages: list[dict[str, Any]] = []
     for events in grouped.values():
         best = max(events, key=lambda event: float(event["confidence"]))
         sources = sorted({str(event["discovery_source"]) for event in events})
+        observed_urls = sorted({str(event["normalized_url"]) for event in events})
         pages.append(
             {
                 "company_id": best.get("company_id"),
@@ -538,6 +687,7 @@ def build_company_career_pages(discovery_events: list[dict[str, Any]]) -> list[d
                 "raw_json": {
                     "event_count": len(events),
                     "discovery_sources": sources,
+                    "observed_urls": observed_urls,
                 },
             }
         )
@@ -560,6 +710,15 @@ def is_external_career_event(event: dict[str, Any]) -> bool:
         return False
     domain = clean_domain(urlparse(str(event.get("normalized_url") or "")).netloc)
     return "ycombinator.com" not in domain
+
+
+def discovery_event_key(event: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(event.get("normalized_url") or ""),
+        str(event.get("page_type") or ""),
+        str(event.get("discovery_source") or ""),
+        re.sub(r"\s+", " ", str(event.get("evidence") or "")).strip().lower(),
+    )
 
 
 def has_external_career_event(events: list[dict[str, Any]]) -> bool:
@@ -587,6 +746,21 @@ def career_link_score(homepage: str, url: str, text: str) -> float:
     if career_signal:
         return 0.84
     return 0
+
+
+def is_allowed_career_destination(source_url: str, destination_url: str) -> bool:
+    source_domain = clean_domain(urlparse(source_url).netloc)
+    destination_domain = clean_domain(urlparse(destination_url).netloc)
+    if destination_domain == source_domain or destination_domain.endswith(f".{source_domain}"):
+        return True
+    return any(ats_domain in destination_domain for ats_domain in ATS_DOMAINS)
+
+
+def career_page_dedupe_key(url: str) -> str:
+    parsed = urlparse(url)
+    domain = clean_domain(parsed.netloc)
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse(("https", domain, path, "", parsed.query, ""))
 
 
 def page_type_for(url: str) -> str:
@@ -680,6 +854,10 @@ def dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def chunks(values: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
 
 
 def write_json(path: Path, payload: list[dict[str, Any]]) -> None:

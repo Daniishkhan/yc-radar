@@ -12,22 +12,23 @@ from yc_radar.services.candidate_fit import (
 
 def test_role_classifier_strong_for_senior_backend_and_infra_software_roles() -> None:
     assert classify_role_text("Senior Backend Engineer").status == "strong"
+    assert classify_role_text("Back End Engineer").status == "strong"
     assert (
-        classify_role_text("Senior Software Engineer", "Infrastructure, APIs, distributed systems")
-        .status
+        classify_role_text(
+            "Senior Software Engineer", "Infrastructure, APIs, distributed systems"
+        ).status
         == "strong"
     )
 
 
 def test_role_classifier_possible_for_backend_heavy_full_stack_and_founding_roles() -> None:
+    assert classify_role_text(
+        "Founding Engineer", "Build APIs, data pipelines, and backend systems"
+    ).status in {"possible", "strong"}
     assert (
-        classify_role_text("Founding Engineer", "Build APIs, data pipelines, and backend systems")
-        .status
-        in {"possible", "strong"}
-    )
-    assert (
-        classify_role_text("Full Stack Engineer", "Own backend APIs, integrations, and Postgres")
-        .status
+        classify_role_text(
+            "Full Stack Engineer", "Own backend APIs, integrations, and Postgres"
+        ).status
         == "possible"
     )
 

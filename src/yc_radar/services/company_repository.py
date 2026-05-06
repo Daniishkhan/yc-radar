@@ -1,58 +1,11 @@
 from __future__ import annotations
 
-import csv
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Iterable
 
 from yc_radar.core.config import get_settings
 from yc_radar.domain.models import Company
-from yc_radar.services.database import engine_from_url, fetch_company_row, fetch_company_rows, has_companies
-
-
-def _to_int(value: str | None) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(float(value))
-    except ValueError:
-        return None
-
-
-def _to_bool(value: str | bool | None) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"true", "1", "yes"}
-
-
-def _split_semicolon(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [part.strip() for part in value.split(";") if part.strip()]
-
-
-def _company_from_row(row: dict[str, str]) -> Company:
-    return Company(
-        id=_to_int(row.get("id")),
-        name=row.get("name", ""),
-        slug=row.get("slug", ""),
-        yc_url=row.get("yc_url") or f"https://www.ycombinator.com/companies/{row.get('slug', '')}",
-        website=row.get("website") or None,
-        one_liner=row.get("one_liner") or None,
-        batch=row.get("batch") or None,
-        status=row.get("status") or None,
-        stage=row.get("stage") or None,
-        team_size=_to_int(row.get("team_size")),
-        isHiring=_to_bool(row.get("isHiring")),
-        all_locations=row.get("all_locations") or None,
-        regions=_split_semicolon(row.get("regions")),
-        industry=row.get("industry") or None,
-        subindustry=row.get("subindustry") or None,
-        industries=_split_semicolon(row.get("industries")),
-        tags=_split_semicolon(row.get("tags")),
-        prototype_score=_to_int(row.get("prototype_score")),
-        prototype_angle=row.get("prototype_angle") or None,
-    )
+from yc_radar.services.database import engine_from_url, fetch_company_row, fetch_company_rows
 
 
 def _company_from_db_row(row: dict[str, Any]) -> Company:
@@ -80,24 +33,16 @@ def _company_from_db_row(row: dict[str, Any]) -> Company:
 
 
 class CompanyRepository:
-    def __init__(self, csv_path: Path | None = None, database_url: str | None = None) -> None:
+    def __init__(self, database_url: str | None = None) -> None:
         settings = get_settings()
         self.engine = engine_from_url(database_url or settings.database_url)
-        self.use_database = has_companies(self.engine)
-        self.csv_path = csv_path or settings.companies_csv_path
 
     def list(self) -> list[Company]:
-        if self.use_database:
-            return [_company_from_db_row(row) for row in fetch_company_rows(self.engine)]
-        with self.csv_path.open(newline="", encoding="utf-8") as file:
-            return [_company_from_row(row) for row in csv.DictReader(file)]
+        return [_company_from_db_row(row) for row in fetch_company_rows(self.engine)]
 
     def get_by_slug(self, slug: str) -> Company | None:
-        normalized = slug.lower()
-        if self.use_database:
-            row = fetch_company_row(self.engine, normalized)
-            return _company_from_db_row(row) if row else None
-        return next((company for company in self.list() if company.slug.lower() == normalized), None)
+        row = fetch_company_row(self.engine, slug.lower())
+        return _company_from_db_row(row) if row else None
 
     def search(
         self,
@@ -131,9 +76,7 @@ class CompanyRepository:
             ]
         if terms:
             companies = [
-                company
-                for company in companies
-                if any(term in company.text_blob for term in terms)
+                company for company in companies if any(term in company.text_blob for term in terms)
             ]
 
         return sorted(companies, key=lambda company: company.prototype_score or 0, reverse=True)

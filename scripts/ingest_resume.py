@@ -192,7 +192,12 @@ def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any
                     "Linear-driven autonomous coding harness with parallel worktrees, Guardian, "
                     "Prober, Reviewer agents, and stop-hook auto-merge gating."
                 ),
-                "skills": ["agents", "software automation", "workflow orchestration", "code review"],
+                "skills": [
+                    "agents",
+                    "software automation",
+                    "workflow orchestration",
+                    "code review",
+                ],
             }
         ],
         "startups_advised": ["Besnosy", "Carrus.io", "iCamp NYC"],

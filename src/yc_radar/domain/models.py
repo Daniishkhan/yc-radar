@@ -44,13 +44,6 @@ class Company(BaseModel):
         return " ".join(part for part in parts if part).lower()
 
 
-class CompanyList(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    companies: list[Company]
-
-
 class PrototypeMission(BaseModel):
     company: Company
     playbook: str

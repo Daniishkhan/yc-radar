@@ -1,11 +1,22 @@
 services:
-  api:
-    build: .
-    env_file:
-      - .env
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg17-trixie
+    container_name: yc-radar-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: yc_radar
+      POSTGRES_USER: yc_radar
+      POSTGRES_PASSWORD: yc_radar
     ports:
-      - "8000:8000"
+      - "5433:5432"
     volumes:
-      - ./data:/app/data:ro
-      - ./src:/app/src:ro
-    command: uv run uvicorn yc_radar.main:app --host 0.0.0.0 --port 8000 --reload
+      - yc_radar_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yc_radar -d yc_radar"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  yc_radar_postgres_data:

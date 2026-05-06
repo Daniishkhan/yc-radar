@@ -93,7 +93,7 @@ def _ai_workflow_mission(company: Company) -> PrototypeMission:
             "Extract the core user workflow from their homepage, docs, and YC profile.",
             "Create a synthetic but realistic dataset for that workflow.",
             "Build an agent with tool calls, trace logs, eval cases, and failure states.",
-            "Package it as a hosted demo or local Docker command.",
+            "Package it as a local demo command with clear setup notes.",
         ],
         proof_points=[
             "Agent does real work instead of just chatting",
@@ -135,7 +135,7 @@ def _ops_dashboard_mission(company: Company) -> PrototypeMission:
             "Add explainable flags with citations to source rows.",
             "Show the operator workflow: review, override, export.",
         ],
-        proof_points=["Data model", "Explainability", "Operator UX", "CSV/API export"],
+        proof_points=["Data model", "Explainability", "Operator UX", "CSV/report export"],
         outreach_angle="I built a buyer-facing workflow that makes the operational ROI visible.",
     )
 
@@ -192,6 +192,11 @@ def _customer_workflow_mission(company: Company) -> PrototypeMission:
             "Build the smallest useful workflow with one clear before/after moment.",
             "Ship a repo, screenshots, and a Loom.",
         ],
-        proof_points=["Specific user story", "Working demo", "Before/after comparison", "Short Loom"],
+        proof_points=[
+            "Specific user story",
+            "Working demo",
+            "Before/after comparison",
+            "Short Loom",
+        ],
         outreach_angle="I converted your positioning into a working demo and would love to compare notes.",
     )
