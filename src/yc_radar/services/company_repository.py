@@ -84,9 +84,7 @@ class CompanyRepository:
         settings = get_settings()
         self.engine = engine_from_url(database_url or settings.database_url)
         self.use_database = has_companies(self.engine)
-        self.csv_path = csv_path or settings.targets_csv_path
-        if not self.csv_path.exists():
-            self.csv_path = settings.companies_csv_path
+        self.csv_path = csv_path or settings.companies_csv_path
 
     def list(self) -> list[Company]:
         if self.use_database:

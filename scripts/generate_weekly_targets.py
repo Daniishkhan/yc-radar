@@ -79,6 +79,7 @@ CSV_FIELDS = [
 
 
 def parse_args() -> argparse.Namespace:
+    settings = get_settings()
     parser = argparse.ArgumentParser(
         description="Generate a weekly YC target list with cached, exact-page hiring checks."
     )
@@ -88,7 +89,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-team-size", type=int, default=25)
     parser.add_argument("--max-pages-per-company", type=int, default=3)
     parser.add_argument("--firecrawl-concurrency", type=int, default=2)
-    parser.add_argument("--profile-path", type=Path, default=Path("data/profile/candidate_profile.json"))
+    parser.add_argument(
+        "--profile-path",
+        type=Path,
+        default=settings.candidate_profile_path,
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
 
     verify_group = parser.add_mutually_exclusive_group()
@@ -106,7 +111,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     settings = get_settings()
-    output_dir = args.output_dir or settings.data_dir / "runs" / args.date
+    output_dir = args.output_dir or settings.runs_dir / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
 
     profile = load_candidate_profile(args.profile_path)

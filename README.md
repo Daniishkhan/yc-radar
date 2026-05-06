@@ -70,7 +70,7 @@ The output should answer: "Which companies should I build something for this wee
 The main database is:
 
 ```text
-data/yc_radar.db
+data/db/yc_radar.db
 ```
 
 Important tables:
@@ -86,15 +86,17 @@ Useful view:
 
 - `company_primary_career_pages`: one best external career URL per company.
 
-CSV and JSON files in `data/` are snapshots for quick inspection. The application should read
-from SQLite first.
+CSV files in `data/snapshots/` are lightweight inspection exports. Raw JSON debug payloads,
+resume/profile data, caches, and run outputs live under ignored `data/local/` paths.
+The application should read from SQLite first.
 
 Private local data is ignored by git:
 
-- `data/resume/`
-- `data/profile/`
-- `data/runs/`
-- `data/cache/`
+- `data/local/resume/`
+- `data/local/profile/`
+- `data/local/runs/`
+- `data/local/cache/`
+- `data/local/debug/`
 
 ## Quick Start
 
@@ -113,17 +115,20 @@ Open:
 ## Refresh YC Data
 
 ```bash
-uv run python extract_yc_companies.py
+uv run python scripts/extract_yc_companies.py
 ```
 
 This refreshes companies and YC job postings, then writes SQLite plus snapshot files:
 
-- `data/yc_radar.db`
-- `data/yc_companies_raw.json`
-- `data/yc_companies.csv`
-- `data/yc_companies_prototype_targets.csv`
-- `data/yc_job_postings_raw.json`
-- `data/yc_job_postings.csv`
+- `data/db/yc_radar.db`
+- `data/snapshots/yc_companies.csv`
+- `data/snapshots/yc_job_postings.csv`
+
+Raw JSON debug files are not committed. Write them only when needed:
+
+```bash
+uv run python scripts/extract_yc_companies.py --write-raw-json
+```
 
 Current checked-in snapshot:
 
@@ -149,8 +154,8 @@ It writes:
 - `career_page_discovery_events`
 - `company_career_pages`
 - `company_primary_career_pages`
-- `data/company_career_pages.csv`
-- `data/career_page_discovery_events.csv`
+- `data/snapshots/company_career_pages.csv`
+- `data/snapshots/career_page_discovery_events.csv`
 
 Current checked-in sample:
 
@@ -164,7 +169,7 @@ Inspect clean career pages:
 uv run python - <<'PY'
 import sqlite3
 
-conn = sqlite3.connect("data/yc_radar.db")
+conn = sqlite3.connect("data/db/yc_radar.db")
 for row in conn.execute("""
     SELECT company_slug, company_name, career_page_url, discovery_source, confidence, http_status
     FROM company_career_pages
@@ -181,7 +186,7 @@ Inspect one best URL per company:
 uv run python - <<'PY'
 import sqlite3
 
-conn = sqlite3.connect("data/yc_radar.db")
+conn = sqlite3.connect("data/db/yc_radar.db")
 for row in conn.execute("""
     SELECT company_slug, company_name, career_page_url, discovery_source, confidence
     FROM company_primary_career_pages
@@ -203,7 +208,7 @@ uv run python scripts/discover_career_urls.py --concurrency 10
 Put the resume PDF here:
 
 ```text
-data/resume/resume.pdf
+data/local/resume/resume.pdf
 ```
 
 Then run:
@@ -214,8 +219,8 @@ uv run python scripts/ingest_resume.py
 
 This writes private local files:
 
-- `data/profile/resume_text.txt`
-- `data/profile/candidate_profile.json`
+- `data/local/profile/resume_text.txt`
+- `data/local/profile/candidate_profile.json`
 
 These files should stay local because they contain personal information.
 

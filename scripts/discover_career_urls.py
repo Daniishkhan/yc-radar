@@ -220,27 +220,26 @@ class CachedHttpClient:
 
 
 def parse_args() -> argparse.Namespace:
+    settings = get_settings()
     parser = argparse.ArgumentParser(description="Discover YC company career/job pages.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--max-sitemaps", type=int, default=6)
     parser.add_argument("--max-child-sitemaps", type=int, default=8)
     parser.add_argument(
-        "--cache-path", type=Path, default=Path("data/cache/career_url_discovery.json")
+        "--cache-path", type=Path, default=settings.career_url_discovery_cache_path
     )
-    parser.add_argument(
-        "--output-json", type=Path, default=Path("data/company_career_pages_raw.json")
-    )
-    parser.add_argument("--output-csv", type=Path, default=Path("data/company_career_pages.csv"))
-    parser.add_argument(
-        "--events-json",
-        type=Path,
-        default=Path("data/career_page_discovery_events_raw.json"),
-    )
+    parser.add_argument("--output-csv", type=Path, default=settings.company_career_pages_csv_path)
     parser.add_argument(
         "--events-csv",
         type=Path,
-        default=Path("data/career_page_discovery_events.csv"),
+        default=settings.career_page_discovery_events_csv_path,
+    )
+    parser.add_argument("--write-raw-json", action="store_true")
+    parser.add_argument(
+        "--raw-output-dir",
+        type=Path,
+        default=settings.local_debug_dir / "career_discovery",
     )
     return parser.parse_args()
 
@@ -280,18 +279,22 @@ async def run(args: argparse.Namespace) -> None:
         company_slugs=company_slugs,
     )
     drop_legacy_career_surfaces_table(engine)
-    write_json(args.output_json, career_pages)
     write_csv(args.output_csv, career_pages, CAREER_PAGE_CSV_FIELDS)
-    write_json(args.events_json, discovery_events)
     write_csv(args.events_csv, discovery_events, DISCOVERY_EVENT_CSV_FIELDS)
+    if args.write_raw_json:
+        write_json(args.raw_output_dir / "company_career_pages_raw.json", career_pages)
+        write_json(
+            args.raw_output_dir / "career_page_discovery_events_raw.json",
+            discovery_events,
+        )
 
     print(f"Checked {len(companies)} companies.")
     print(f"Recorded {len(discovery_events)} career page discovery events.")
     print(f"Wrote {len(career_pages)} canonical company career pages.")
-    print(f"Wrote {args.output_json}")
     print(f"Wrote {args.output_csv}")
-    print(f"Wrote {args.events_json}")
     print(f"Wrote {args.events_csv}")
+    if args.write_raw_json:
+        print(f"Wrote raw JSON debug files under {args.raw_output_dir}")
     print(f"Updated {settings.database_url}")
 
 
@@ -680,6 +683,7 @@ def dedupe(values: list[str]) -> list[str]:
 
 
 def write_json(path: Path, payload: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8"
@@ -688,6 +692,7 @@ def write_json(path: Path, payload: list[dict[str, Any]]) -> None:
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     with tmp_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
