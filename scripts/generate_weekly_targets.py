@@ -22,6 +22,7 @@ from yc_radar.services.candidate_fit import (
 )
 from yc_radar.services.company_repository import CompanyRepository
 from yc_radar.services.database import engine_from_url, fetch_yc_job_rows
+from yc_radar.services.job_repository import JobRepository
 from yc_radar.services.hiring_verifier import (
     FirecrawlPageScraper,
     HiringVerification,
@@ -56,6 +57,9 @@ CSV_FIELDS = [
     "candidate_strength_matches",
     "target_role_lane",
     "matching_job_titles",
+    "canonical_active_job_count",
+    "canonical_matching_jobs",
+    "matching_job_provenance",
     "role_match_status",
     "role_match_reasons",
     "application_angle",
@@ -117,6 +121,7 @@ def main() -> None:
     profile = load_candidate_profile(args.profile_path)
     companies = CompanyRepository().list()
     jobs_by_slug = load_yc_jobs_by_slug(settings.database_url)
+    canonical_jobs_by_slug = load_canonical_jobs_by_slug(settings.database_url)
     ranked = rank_companies(companies, profile, max_team_size=args.max_team_size)
     pool_scores = ranked[: args.candidate_pool]
     targets = [
@@ -124,6 +129,7 @@ def main() -> None:
             score,
             rank=index,
             yc_jobs=jobs_by_slug.get(score.company.slug, []),
+            canonical_jobs=canonical_jobs_by_slug.get(score.company.slug, []),
         )
         for index, score in enumerate(pool_scores, start=1)
     ]
@@ -151,7 +157,7 @@ def main() -> None:
     else:
         save_hiring_cache(verification_cache_path, cache)
 
-    refresh_role_focus(targets, companies_by_slug, jobs_by_slug)
+    refresh_role_focus(targets, companies_by_slug, jobs_by_slug, canonical_jobs_by_slug)
     targets = rerank_verified_targets(targets)[: args.limit]
     use_llm = args.use_llm if args.use_llm is not None else bool(settings.openai_api_key)
     if use_llm and settings.openai_api_key:
@@ -163,7 +169,7 @@ def main() -> None:
     write_json(
         json_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "generated_at": generated_at,
             "candidate_pool_size": len(pool_scores),
             "target_count": len(targets),
@@ -180,7 +186,7 @@ def main() -> None:
     )
     write_csv(csv_path, targets)
 
-    print(f"Loaded {len(companies)} YC companies.")
+    print(f"Loaded {len(companies)} YC-seeded companies and {sum(map(len, canonical_jobs_by_slug.values()))} active canonical jobs.")
     print(f"Ranked candidate pool: {len(pool_scores)} companies.")
     print(f"Wrote {len(targets)} weekly targets: {json_path}")
     print(f"Wrote CSV: {csv_path}")
@@ -201,10 +207,19 @@ def load_yc_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
     return jobs_by_slug
 
 
+def load_canonical_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
+    engine = engine_from_url(database_url)
+    jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
+    for job in JobRepository(engine).active_job_rows():
+        jobs_by_slug.setdefault(str(job["company_slug"]), []).append(job)
+    return jobs_by_slug
+
+
 def refresh_role_focus(
     targets: list[dict[str, Any]],
     companies_by_slug: dict[str, Company],
     jobs_by_slug: dict[str, list[dict[str, Any]]],
+    canonical_jobs_by_slug: dict[str, list[dict[str, Any]]],
 ) -> None:
     for target in targets:
         company = companies_by_slug.get(target["slug"])
@@ -214,6 +229,7 @@ def refresh_role_focus(
             role_focus_record(
                 company,
                 yc_jobs=jobs_by_slug.get(company.slug, []),
+                canonical_jobs=canonical_jobs_by_slug.get(company.slug, []),
                 verified_roles=target.get("verified_roles") or [],
             )
         )
@@ -312,6 +328,8 @@ def write_csv(path: Path, targets: list[dict[str, Any]]) -> None:
 
 def csv_value(value: Any) -> str | int | float | bool | None:
     if isinstance(value, list):
+        if any(isinstance(item, dict) for item in value):
+            return json.dumps(value, sort_keys=True, default=str)
         return "; ".join(str(item) for item in value)
     if isinstance(value, dict):
         return json.dumps(value, sort_keys=True)

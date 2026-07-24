@@ -308,6 +308,9 @@ def _job_context(job: dict[str, Any]) -> str:
         "pretty_role",
         "type",
         "location",
+        "department",
+        "employment_type",
+        "description_text",
         "visa",
         "salary_range",
         "equity_range",
@@ -346,38 +349,46 @@ def role_focus_record(
     company: Company,
     *,
     yc_jobs: list[dict[str, Any]] | None = None,
+    canonical_jobs: list[dict[str, Any]] | None = None,
     verified_roles: list[str] | None = None,
 ) -> dict[str, Any]:
-    role_inputs: list[tuple[str, str]] = []
+    role_inputs: list[tuple[str, str, dict[str, Any] | None]] = []
     for job in yc_jobs or []:
         title = str(job.get("title") or "").strip()
         if title:
-            role_inputs.append((title, _job_context(job)))
+            role_inputs.append((title, _job_context(job), None))
+    for job in canonical_jobs or []:
+        title = str(job.get("title") or "").strip()
+        if title:
+            role_inputs.append((title, _job_context(job), job))
     for role in verified_roles or []:
         title = str(role).strip()
         if title:
-            role_inputs.append((title, title))
+            role_inputs.append((title, title, None))
 
     classifications = [
-        (title, classify_role_text(title, context)) for title, context in role_inputs
+        (title, classify_role_text(title, context), canonical_job)
+        for title, context, canonical_job in role_inputs
     ]
     matching_titles = [
         title
-        for title, classification in classifications
+        for title, classification, _ in classifications
         if classification.status in {"strong", "possible"}
     ]
     reasons = [
         reason
-        for _, classification in classifications
+        for _, classification, _ in classifications
         for reason in classification.reasons
         if classification.status in {"strong", "possible"}
     ]
 
     if classifications:
-        status = _best_status(classifications)
+        status = _best_status([(title, classification) for title, classification, _ in classifications])
         if not reasons:
             reasons = [
-                reason for _, classification in classifications for reason in classification.reasons
+                reason
+                for _, classification, _ in classifications
+                for reason in classification.reasons
             ]
     else:
         company_text = _company_text(company)
@@ -407,13 +418,37 @@ def role_focus_record(
         target_role_lane = "Outside backend/SWE focus"
         application_angle = "Do not prioritize for the backend/SWE shortlist."
 
+    matching_provenance = [
+        _canonical_job_provenance(job)
+        for title, classification, job in classifications
+        if job is not None and classification.status in {"strong", "possible"} and title
+    ]
     return {
         "target_role_lane": target_role_lane,
         "matching_job_titles": _dedupe_preserve_order(matching_titles),
+        "canonical_active_job_count": len(canonical_jobs or []),
+        "canonical_matching_jobs": matching_provenance,
+        "matching_job_provenance": matching_provenance,
         "role_match_status": status,
         "role_match_reasons": _dedupe_preserve_order(reasons)[:5],
         "application_angle": application_angle,
         "proof_points_to_emphasize": proof_points_for_role_status(status),
+    }
+
+
+def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
+    def iso(value: Any) -> Any:
+        return value.isoformat() if hasattr(value, "isoformat") else value
+
+    return {
+        "title": job.get("title"),
+        "provider": job.get("provider"),
+        "external_job_id": str(job.get("external_job_id") or ""),
+        "career_source_kind": job.get("career_source_kind"),
+        "career_source_url": job.get("career_source_url"),
+        "posting_url": job.get("posting_url"),
+        "source_published_at": iso(job.get("source_published_at")),
+        "source_updated_at": iso(job.get("source_updated_at")),
     }
 
 
@@ -517,6 +552,7 @@ def target_record(
     *,
     rank: int,
     yc_jobs: list[dict[str, Any]] | None = None,
+    canonical_jobs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     company = score.company
     record = {
@@ -559,7 +595,7 @@ def target_record(
         "risks": [],
         "next_action": "",
     }
-    record.update(role_focus_record(company, yc_jobs=yc_jobs))
+    record.update(role_focus_record(company, yc_jobs=yc_jobs, canonical_jobs=canonical_jobs))
     return record
 
 

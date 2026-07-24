@@ -1,11 +1,9 @@
 # YC Radar
 
-YC Radar is my personal, script-first workbench for finding high-signal companies where I should
-take a real shot at senior backend or senior software engineering roles.
-
-Right now the system is YC-first. The plan is to make the full workflow work end to end on YC
-data, then add more sources such as Apollo, Bright Data, company lists, and other enrichment
-feeds.
+YC Radar is a personal, script-first hiring-radar workbench for finding high-signal companies
+and senior backend/software engineering roles. YC remains the initial company registry and one
+source of raw company/job evidence; it is not the product boundary. The source-neutral job layer
+currently supports public Greenhouse boards and can add other read-only adapters later.
 
 The goal is simple:
 
@@ -22,7 +20,8 @@ deciding where I should apply and what proof points I should lead with.
 
 ## What It Does Today
 
-The current implementation uses YC as the first data source:
+The current implementation uses YC as the initial company source and adds a canonical
+source-neutral job lifecycle for supported career boards:
 
 - Pulls YC company data from the same public source used by `ycombinator.com/companies`.
 - Extracts structured YC job postings, including salary, equity, skills, location, and visa fields.
@@ -32,7 +31,9 @@ The current implementation uses YC as the first data source:
 - Fetches discovered URLs into reusable source documents, then classifies whether each page is a
   career home, job listing, ATS listing, individual job detail, fetch error, or irrelevant page.
 - Ingests my resume into a private local profile file.
-- Generates early candidate-fit target lists from YC data and my profile.
+- Syncs configured public Greenhouse boards through a read-only, no-key GET endpoint and tracks
+  canonical current jobs, immutable content versions, and per-run observations.
+- Generates candidate-fit target lists from YC evidence plus active supported canonical jobs.
 - Writes shortlist outputs to local CSV/JSON files and Postgres-backed tables.
 
 ## Where It Is Going
@@ -107,6 +108,14 @@ Important tables:
 - `document_embeddings`: pgvector-backed embeddings for semantic retrieval.
 - `job_role_signals`: extracted role-fit evidence such as backend, infra, data, seniority, remote,
   and visa signals.
+- `company_sources`: source-specific identities for the current company registry.
+- `career_sources`: configured public career/ATS boards, identified by provider board identity.
+- `source_sync_runs`: persisted fetch status, completeness, counters, and bounded errors.
+- `job_postings`: canonical current jobs, uniquely identified by provider + career source + external
+  job ID (never by URL).
+- `job_posting_versions`: append-only normalized public content snapshots, written only on content
+  changes.
+- `job_posting_observations`: per-complete-run seen/missed evidence.
 
 Useful view:
 
@@ -126,18 +135,59 @@ Private local data is ignored by git:
 - `data/local/cache/`
 - `data/local/debug/`
 
+## Source-Neutral Job Lifecycle
+
+Alembic is the schema authority. For a fresh local database, use:
+
+```bash
+uv sync --extra dev
+docker compose up -d postgres
+uv run alembic upgrade head
+uv run python scripts/load_snapshots.py
+uv run python scripts/sync_job_sources.py discover-greenhouse
+uv run python scripts/sync_job_sources.py sync --provider greenhouse --limit 5
+```
+
+For an existing populated pre-Alembic database, back it up, run the verifier, and only stamp the
+legacy baseline if verification succeeds. Do **not** stamp directly to `head`, and do not use the
+destructive reset path for adoption:
+
+```bash
+uv run python scripts/migrate_database.py verify-existing
+uv run alembic stamp 0001_baseline
+uv run alembic upgrade head
+uv run alembic current
+```
+
+Greenhouse uses only the unauthenticated public GET endpoint documented by the
+[Greenhouse Job Board API](https://developers.greenhouse.io/job-board.html):
+`https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`. This workbench never
+submits applications. A sync run is committed as `running` before its provider request, so an
+interrupted fetch remains auditable. A valid complete snapshot adds/updates jobs and records
+observations. An unchanged body creates no new version. A job is retained after its first
+consecutive complete absence and closes only after its second; failed or partial scans never change
+job lifecycle state. `career_sources.last_synced_at` advances only after a complete snapshot is
+applied; `last_sync_status` records failed/partial attempts. A returning job reactivates the same
+canonical row.
+
+Inspect active canonical jobs without profile/contact data:
+
+```bash
+uv run python scripts/generate_job_opportunities.py --limit 50
+```
+
 ## Pipeline Mental Model
 
 The persistence model is intentionally split by confidence and processing stage:
 
 ```text
-companies + yc_job_postings
-  -> career_page_discovery_events
-  -> company_career_pages
-  -> discovered_urls
-  -> source_documents
-  -> page_classifications
-  -> external_job_postings
+YC/raw company clues -> career-page evidence -> career_sources -> source_sync_runs
+                                                -> job_postings (current state)
+                                                -> job_posting_versions (immutable history)
+                                                -> job_posting_observations (per-run evidence)
+
+Legacy YC discovery -> discovered_urls -> source_documents -> page_classifications
+                    -> external_job_postings
 ```
 
 `career_page_discovery_events` is raw evidence. It should be allowed to contain duplicate-looking
@@ -156,6 +206,7 @@ refetching pages. Only pages classified as `job_detail` with a title are promote
 uv sync --extra dev
 cp .env.example .env
 docker compose up -d postgres
+uv run alembic upgrade head
 uv run python scripts/load_snapshots.py
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 uv run python scripts/classify_discovered_urls.py --limit 50 --concurrency 10
@@ -183,7 +234,7 @@ Reset local Postgres when you want a clean rebuild:
 uv run python scripts/reset_database.py --yes
 ```
 
-Rebuild the local schema when table definitions are changing during MVP iteration:
+Destructively rebuild the local schema through Alembic only when intentionally resetting local data:
 
 ```bash
 uv run python scripts/reset_database.py --yes --rebuild-schema
@@ -348,6 +399,14 @@ DevOps experience are supporting proof points; they should not turn the list int
 engineer, frontend, research, sales, or marketing roles. Strong matches should point toward system
 design, infrastructure, performance, caching, production debugging, security, reliability, or
 backend platform ownership.
+
+## Deferred Roadmap
+
+The current foundation intentionally defers additional ATS adapters, non-YC company onboarding,
+remote/visa eligibility inference, hiring-intent signals, VC/company-list sources, alerting,
+multi-worker operation, and any public web product. Location and other source text are preserved
+without making eligibility claims. Resume, profile, contact, cache, and run files remain under
+ignored `data/local/` paths and are not emitted by canonical-job exports.
 
 ## Product Direction
 

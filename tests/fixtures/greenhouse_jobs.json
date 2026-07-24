@@ -1,0 +1,14 @@
+{
+  "jobs": [
+    {
+      "id": 4012345,
+      "title": "Senior Backend Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/4012345",
+      "content": "<p>Build <strong>distributed API</strong> systems.</p>",
+      "location": {"name": "San Francisco / Remote"},
+      "departments": [{"name": "Engineering"}, {"name": "Platform"}],
+      "first_published": "2026-05-01T12:00:00Z",
+      "updated_at": "2026-05-02T12:00:00Z"
+    }
+  ]
+}

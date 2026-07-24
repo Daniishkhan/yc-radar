@@ -21,6 +21,7 @@ import httpx
 
 from yc_radar.core.config import get_settings
 from yc_radar.services.candidate_fit import classify_role_text
+from yc_radar.services.source_providers import ATS_DOMAINS
 from yc_radar.services.database import (
     engine_from_url,
     fetch_discovered_url_rows,
@@ -36,19 +37,6 @@ PARSER_NAME = "deterministic_page_classifier"
 PARSER_VERSION = "2026-05-07"
 MAX_STORED_TEXT_CHARS = 500_000
 
-ATS_DOMAINS = (
-    "ashbyhq.com",
-    "greenhouse.io",
-    "lever.co",
-    "workable.com",
-    "workdayjobs.com",
-    "bamboohr.com",
-    "recruitee.com",
-    "smartrecruiters.com",
-    "applytojob.com",
-    "app.dover.com",
-    "wellfound.com",
-)
 GENERIC_CAREER_SEGMENTS = {
     "career",
     "careers",

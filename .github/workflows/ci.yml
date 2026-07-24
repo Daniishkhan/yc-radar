@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg17-trixie
+        env:
+          POSTGRES_DB: yc_radar
+          POSTGRES_USER: yc_radar
+          POSTGRES_PASSWORD: yc_radar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yc_radar -d yc_radar"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql+psycopg://yc_radar:yc_radar@localhost:5432/yc_radar
+      YC_RADAR_TEST_DATABASE_URL: postgresql+psycopg://yc_radar:yc_radar@localhost:5432/yc_radar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --extra dev --locked
+      - run: uv run alembic upgrade head
+      - run: uv run alembic check
+      - run: uv run pytest
+      - run: uv run ruff check src tests scripts migrations

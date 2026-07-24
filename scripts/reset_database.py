@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Truncate all YC Radar Postgres tables."""
+"""Truncate all YC Radar Postgres tables through the Alembic-managed schema."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rebuild-schema",
         action="store_true",
-        help="Drop and recreate YC Radar tables and views instead of only truncating rows.",
+        help="Destructively downgrade to base and upgrade Alembic migrations instead of truncating rows.",
     )
     return parser.parse_args()
 

@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import profile_text
+from yc_radar.services.source_providers import ATS_DOMAINS
 
 HiringStatus = Literal["hiring", "not_hiring", "unknown"]
 
@@ -26,19 +27,7 @@ CAREER_KEYWORDS = (
     "roles",
     "work with us",
 )
-KNOWN_ATS_DOMAINS = (
-    "ashbyhq.com",
-    "greenhouse.io",
-    "lever.co",
-    "workable.com",
-    "bamboohr.com",
-    "recruitee.com",
-    "smartrecruiters.com",
-    "workdayjobs.com",
-    "applytojob.com",
-    "app.dover.com",
-    "wellfound.com",
-)
+KNOWN_ATS_DOMAINS = ATS_DOMAINS
 LOW_VALUE_LINK_TERMS = (
     "blog",
     "docs",

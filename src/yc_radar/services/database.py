@@ -9,6 +9,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     Computed,
     DateTime,
@@ -42,7 +43,7 @@ companies_table = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("name", String, nullable=False),
-    Column("slug", String, nullable=False, unique=True, index=True),
+    Column("slug", String, nullable=False),
     Column("yc_url", String, nullable=False),
     Column("website", String),
     Column("one_liner", Text),
@@ -177,7 +178,7 @@ career_page_discovery_statuses_table = Table(
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, unique=True, index=True),
+    Column("company_slug", String, nullable=False),
     Column("company_name", String, nullable=False),
     Column("website", String),
     Column("status", String, nullable=False, index=True),
@@ -376,6 +377,151 @@ job_role_signals_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+company_sources_table = Table(
+    "company_sources",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
+    Column("provider", String, nullable=False, index=True),
+    Column("external_company_id", String, nullable=False),
+    Column("source_url", Text),
+    Column("raw_json", JSONB, nullable=False, default=dict),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("provider", "external_company_id", name="uq_company_source_provider_external"),
+)
+
+career_sources_table = Table(
+    "career_sources",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
+    Column("provider", String, nullable=False, index=True),
+    Column("source_kind", String, nullable=False),
+    Column("external_source_id", String, nullable=False),
+    Column("source_url", Text, nullable=False),
+    Column("discovered_from_url", Text),
+    Column("status", String, nullable=False, default="active", index=True),
+    Column("last_synced_at", DateTime(timezone=True)),
+    Column("last_sync_status", String),
+    Column("raw_json", JSONB, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("status IN ('active', 'disabled')", name="ck_career_sources_status"),
+    UniqueConstraint("provider", "external_source_id", name="uq_career_source_provider_external"),
+)
+
+source_sync_runs_table = Table(
+    "source_sync_runs",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True),
+    Column("run_key", String, nullable=False),
+    Column("provider", String, nullable=False),
+    Column("adapter_version", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("is_complete_scan", Boolean, nullable=False),
+    Column("http_status", Integer),
+    Column("jobs_fetched", Integer, nullable=False, default=0),
+    Column("jobs_added", Integer, nullable=False, default=0),
+    Column("jobs_updated", Integer, nullable=False, default=0),
+    Column("jobs_unchanged", Integer, nullable=False, default=0),
+    Column("jobs_missed", Integer, nullable=False, default=0),
+    Column("jobs_closed", Integer, nullable=False, default=0),
+    Column("jobs_reactivated", Integer, nullable=False, default=0),
+    Column("errors_count", Integer, nullable=False, default=0),
+    Column("errors", JSONB, nullable=False, default=list),
+    Column("request_metadata", JSONB, nullable=False, default=dict),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+    CheckConstraint("status IN ('running', 'completed', 'partial', 'failed')", name="ck_source_sync_runs_status"),
+    CheckConstraint("jobs_fetched >= 0", name="ck_source_sync_runs_jobs_fetched"),
+    UniqueConstraint("career_source_id", "run_key", name="uq_source_sync_run_key"),
+)
+
+job_postings_table = Table(
+    "job_postings",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True),
+    Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
+    Column("provider", String, nullable=False),
+    Column("external_job_id", String, nullable=False),
+    Column("title", Text, nullable=False),
+    Column("posting_url", Text),
+    Column("apply_url", Text),
+    Column("location", Text),
+    Column("department", Text),
+    Column("employment_type", Text),
+    Column("status", String, nullable=False, default="active"),
+    Column("consecutive_complete_misses", Integer, nullable=False, default=0),
+    Column("content_hash", String, nullable=False, index=True),
+    Column("current_version_id", BigInteger, ForeignKey("job_posting_versions.id", use_alter=True, name="fk_job_postings_current_version")),
+    Column("source_published_at", DateTime(timezone=True)),
+    Column("source_updated_at", DateTime(timezone=True)),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_changed_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("closed_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("status IN ('active', 'closed')", name="ck_job_postings_status"),
+    CheckConstraint("consecutive_complete_misses >= 0", name="ck_job_postings_misses"),
+    UniqueConstraint("provider", "career_source_id", "external_job_id", name="uq_job_posting_identity"),
+)
+
+job_posting_versions_table = Table(
+    "job_posting_versions",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("job_posting_id", BigInteger, ForeignKey("job_postings.id"), nullable=False, index=True),
+    Column("source_sync_run_id", BigInteger, ForeignKey("source_sync_runs.id"), nullable=False, index=True),
+    Column("content_hash", String, nullable=False, index=True),
+    Column("title", Text, nullable=False),
+    Column("description_html", Text),
+    Column("description_text", Text),
+    Column("location", Text),
+    Column("department", Text),
+    Column("employment_type", Text),
+    Column("posting_url", Text),
+    Column("apply_url", Text),
+    Column("source_published_at", DateTime(timezone=True)),
+    Column("source_updated_at", DateTime(timezone=True)),
+    Column("raw_payload", JSONB, nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("job_posting_id", "source_sync_run_id", name="uq_job_posting_version_run"),
+)
+
+job_posting_observations_table = Table(
+    "job_posting_observations",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("job_posting_id", BigInteger, ForeignKey("job_postings.id"), nullable=False, index=True),
+    Column("source_sync_run_id", BigInteger, ForeignKey("source_sync_runs.id"), nullable=False, index=True),
+    Column("observation_kind", String, nullable=False),
+    Column("status_before", String, nullable=False),
+    Column("status_after", String, nullable=False),
+    Column("content_hash", String),
+    Column("job_posting_version_id", BigInteger, ForeignKey("job_posting_versions.id")),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("evidence", JSONB, nullable=False, default=dict),
+    CheckConstraint("observation_kind IN ('seen', 'missed')", name="ck_job_observation_kind"),
+    CheckConstraint("status_before IN ('active', 'closed')", name="ck_job_observation_status_before"),
+    CheckConstraint("status_after IN ('active', 'closed')", name="ck_job_observation_status_after"),
+    UniqueConstraint("source_sync_run_id", "job_posting_id", name="uq_job_observation_run_job"),
+)
+
+Index("ix_companies_slug", companies_table.c.slug, unique=True)
+Index(
+    "ix_career_page_discovery_statuses_company_slug",
+    career_page_discovery_statuses_table.c.company_slug,
+    unique=True,
+)
+Index("ix_job_postings_company_active", job_postings_table.c.company_id, job_postings_table.c.status)
+
 Index(
     "ix_source_documents_search_vector",
     source_documents_table.c.search_vector,
@@ -405,41 +551,18 @@ def engine_from_url(database_url: str | None = None) -> Engine:
 
 
 def create_schema(engine: Engine, *, checkfirst: bool = True) -> None:
-    with engine.begin() as connection:
-        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public"))
-    metadata.create_all(engine, checkfirst=checkfirst)
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                """
-                CREATE OR REPLACE VIEW company_primary_career_pages AS
-                SELECT
-                    company_id,
-                    company_slug,
-                    company_name,
-                    website,
-                    yc_is_hiring,
-                    yc_job_count,
-                    career_page_url,
-                    page_type,
-                    discovery_source,
-                    confidence,
-                    http_status,
-                    evidence,
-                    checked_at
-                FROM company_career_pages
-                WHERE is_primary = true
-                """
-            )
-        )
+    """Compatibility entry point backed by Alembic, the sole schema authority."""
+    del checkfirst
+    from yc_radar.services.migrations import upgrade_database
+
+    upgrade_database(engine)
 
 
 def rebuild_database(engine: Engine) -> None:
-    with engine.begin() as connection:
-        connection.execute(text("DROP VIEW IF EXISTS company_primary_career_pages"))
-        for table in reversed(metadata.sorted_tables):
-            connection.execute(text(f'DROP TABLE IF EXISTS "{table.name}" CASCADE'))
-    create_schema(engine, checkfirst=False)
+    """Destructively rebuild the schema through migration history."""
+    from yc_radar.services.migrations import rebuild_database as rebuild_with_migrations
+
+    rebuild_with_migrations(engine)
 
 
 def has_companies(engine: Engine) -> bool:
@@ -454,6 +577,37 @@ def upsert_companies(engine: Engine, companies: list[dict[str, Any]]) -> None:
         return
     rows = [_company_row(company) for company in companies]
     _upsert_rows(engine, companies_table, rows, index_elements=["id"])
+    now = datetime.now(UTC)
+    source_rows = [
+        {
+            "company_id": row["id"],
+            "provider": "yc",
+            "external_company_id": str(row["id"]),
+            "source_url": row["yc_url"],
+            "raw_json": {"provider": "yc"},
+            "first_seen_at": now,
+            "last_seen_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for row in rows
+        if row["id"] is not None
+    ]
+    if source_rows:
+        with engine.begin() as connection:
+            statement = pg_insert(company_sources_table).values(source_rows)
+            connection.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["provider", "external_company_id"],
+                    set_={
+                        "company_id": statement.excluded.company_id,
+                        "source_url": statement.excluded.source_url,
+                        "raw_json": statement.excluded.raw_json,
+                        "last_seen_at": statement.excluded.last_seen_at,
+                        "updated_at": statement.excluded.updated_at,
+                    },
+                )
+            )
 
 
 def upsert_yc_job_postings(engine: Engine, jobs: list[dict[str, Any]]) -> None:

@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from yc_radar.core.config import get_settings
+from yc_radar.services.source_providers import ATS_DOMAINS
 from yc_radar.services.database import (
     drop_legacy_career_surfaces_table,
     engine_from_url,
@@ -42,19 +43,6 @@ CAREER_TERMS = (
     "work-with-us",
     "work_with_us",
     "work with us",
-)
-ATS_DOMAINS = (
-    "ashbyhq.com",
-    "greenhouse.io",
-    "lever.co",
-    "workable.com",
-    "workdayjobs.com",
-    "bamboohr.com",
-    "recruitee.com",
-    "smartrecruiters.com",
-    "applytojob.com",
-    "app.dover.com",
-    "wellfound.com",
 )
 LOW_VALUE_TERMS = (
     "/a/",

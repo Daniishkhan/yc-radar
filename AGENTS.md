@@ -1,21 +1,25 @@
 # YC Radar Agent Notes
 
-This repo is a local, script-first intelligence workbench for YC outreach. Treat it as a practical
-pipeline, not a web service template. The useful loop is:
+This repo is a local, script-first hiring-radar workbench. Treat it as a practical pipeline, not
+a web service template. YC is the initial company registry and one raw evidence source, not the
+product boundary. The useful loop is:
 
-1. Ingest YC companies and jobs.
-2. Store the structured data in Docker-backed Postgres.
-3. Discover career pages cheaply and deterministically.
-4. Fetch and classify discovered URLs into source documents and page kinds.
-5. Promote individual job detail pages into normalized external jobs.
-6. Rank companies/jobs against the candidate profile.
+1. Ingest source-specific company/job evidence (currently YC).
+2. Discover public career pages cheaply and deterministically.
+3. Register supported career/ATS sources (currently Greenhouse) and fetch complete snapshots.
+4. Preserve canonical current jobs, immutable content history, and per-run observations in
+   Docker-backed Postgres.
+5. Fetch/classify URL evidence separately from source-board synchronization.
+6. Rank active jobs and companies against the candidate profile.
 7. Use deterministic logic and optional agents to refine a backend/SWE shortlist.
-8. Write the final output as a CSV and/or Postgres table.
+8. Write local CSV/JSON and/or Postgres outputs.
 
 ## Project Shape
 
-- `src/yc_radar/domain/models.py`: Pydantic domain models.
-- `src/yc_radar/services/`: data access, candidate fit, profile loading, hiring verification.
+- `src/yc_radar/domain/models.py` and `domain/job_sources.py`: Pydantic domain models.
+- `src/yc_radar/adapters/`: read-only job-source contracts and provider adapters.
+- `src/yc_radar/services/`: data access, lifecycle, candidate fit, profile loading, and hiring verification.
+- `migrations/`: Alembic schema history; it is the schema authority.
 - `src/yc_radar/playbooks/`: deterministic mission and outreach playbook logic.
 - `src/yc_radar/agents/`: OpenAI-assisted refinements; keep LLM usage optional.
 - `scripts/extract_yc_companies.py`: refreshes YC company and job data into Postgres plus snapshots.
@@ -24,7 +28,9 @@ pipeline, not a web service template. The useful loop is:
 - `scripts/discover_career_urls.py`: finds career/job/ATS URLs without Firecrawl or browser automation.
 - `scripts/classify_discovered_urls.py`: fetches discovered URLs, stores source documents, and
   classifies pages as career homes, job listings, ATS listings, or job details.
+- `scripts/sync_job_sources.py`: discovers Greenhouse boards and syncs configured sources.
 - `scripts/generate_weekly_targets.py`: creates local candidate-fit target runs.
+- `scripts/generate_job_opportunities.py`: exports public canonical job opportunities locally.
 - `scripts/ingest_resume.py`: converts the private resume PDF into local structured profile data.
 - `tests/`: deterministic tests; no network calls.
 
@@ -64,6 +70,12 @@ Important tables:
 - `document_chunks`: text chunks with generated Postgres full-text vectors.
 - `document_embeddings`: pgvector-backed semantic embeddings.
 - `job_role_signals`: extracted role-fit evidence.
+- `company_sources`: mappings from current companies to source identities.
+- `career_sources`: provider boards/pages with stable external source IDs.
+- `source_sync_runs`: immutable sync audit status, counters, completeness, and bounded errors.
+- `job_postings`: canonical current state identified by provider + career source + external job ID.
+- `job_posting_versions`: immutable public content history, inserted only on content change.
+- `job_posting_observations`: seen/missed evidence per successfully applied complete run.
 
 Useful view:
 
@@ -78,14 +90,23 @@ Use this mental model:
 
 ```text
 raw clues -> clean career URLs -> discovered URL inventory -> fetched source document
-    -> page classification -> external job posting, only for individual job pages
+    -> page classification -> URL-derived external job posting, only for individual job pages
+
+public career URLs -> career source -> complete sync run -> canonical current job
+    -> immutable content version on change + per-run seen/missed observation
 ```
 
 `career_page_discovery_events` can be noisy because it preserves evidence. `discovered_urls` is the
 queue that future sources such as Apollo or Bright Data should feed. `source_documents` is the
 stable text layer for full-text search, pgvector chunks, deterministic parsers, and later LLM
 cleanup. `page_classifications.evidence` is JSONB on purpose; add structured parser evidence there
-before reaching for a new table.
+before reaching for a new table. Do not treat URL-derived `external_job_postings` as canonical ATS
+jobs: canonical identity requires provider + board + external job ID, not a mutable URL.
+
+Only complete, valid provider snapshots can apply lifecycle changes. First complete absence retains
+an active job; second consecutive complete absence closes it. Failed or partial scans must never
+increment misses or close jobs. A reappearing ID reactivates the same row. Greenhouse uses only its
+unauthenticated public GET board endpoint; never submit applications or use browser automation.
 
 Current smoke after a schema rebuild and 200-company discovery:
 
@@ -112,9 +133,11 @@ for that.
 ```bash
 uv sync --extra dev
 docker compose up -d postgres
+uv run alembic upgrade head
+uv run alembic check
 uv run python scripts/load_snapshots.py
 uv run pytest
-uv run ruff check src tests scripts
+uv run ruff check src tests scripts migrations
 uv run python scripts/extract_yc_companies.py
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 uv run python scripts/classify_discovered_urls.py --limit 50 --concurrency 10
@@ -131,6 +154,19 @@ uv run python scripts/classify_discovered_urls.py --limit 100 --concurrency 10
 ```
 
 Use `uv`; do not add pip workflows back into the docs.
+
+For an existing populated schema created before Alembic, back up first and verify before adoption:
+
+```bash
+uv run python scripts/migrate_database.py verify-existing
+uv run alembic stamp 0001_baseline
+uv run alembic upgrade head
+uv run alembic current
+```
+
+Never stamp an existing schema directly to `head`; stop on verifier drift. Fresh databases use
+`uv run alembic upgrade head`. Further roadmap work—additional adapters, remote eligibility
+claims, hiring-intent signals, VC/company sources, and any public product—is explicitly deferred.
 
 ## Implementation Preferences
 
@@ -170,7 +206,8 @@ Before committing code changes, run:
 
 ```bash
 uv run pytest
-uv run ruff check src tests scripts
+uv run alembic check
+uv run ruff check src tests scripts migrations
 ```
 
 For docs-only changes, a pytest smoke run is usually enough, but lint/test is still preferred
