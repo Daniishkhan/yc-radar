@@ -15,7 +15,16 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import httpx
 
 from yc_radar.core.config import get_settings
-from yc_radar.services.source_providers import ATS_DOMAINS
+from yc_radar.services.http_cache import DiskHttpCache
+from yc_radar.services.run_status import (
+    read_status,
+    stage_checkpoint,
+    stage_finished,
+    stage_started,
+    write_status,
+)
+from yc_radar.services.source_providers import is_ats_domain, is_company_ats_url
+from yc_radar.services.url_quality import canonical_url_key, normalize_url
 from yc_radar.services.database import (
     drop_legacy_career_surfaces_table,
     engine_from_url,
@@ -27,7 +36,11 @@ from yc_radar.services.database import (
     fetch_yc_job_rows,
     replace_career_page_data,
     upsert_career_page_discovery_statuses,
+    url_inventory_writer_lock,
 )
+
+MAX_STORED_TEXT_CHARS = 500_000
+RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 CAREER_TERMS = (
     "career",
@@ -145,6 +158,10 @@ class HttpResult:
     content_type: str
     text: str
     error: str | None = None
+    error_class: str | None = None
+    attempt_count: int = 0
+    retryable: bool = False
+    cache_source: str = "network"
 
 
 class AnchorParser(HTMLParser):
@@ -175,13 +192,38 @@ class AnchorParser(HTMLParser):
 
 
 class CachedHttpClient:
-    def __init__(self, cache_path: Path, *, concurrency: int) -> None:
-        self.cache_path = cache_path
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache = self._load_cache()
+    """Discovery request policy over the shared bounded disk cache."""
+
+    def __init__(
+        self,
+        cache_path: Path | None,
+        *,
+        concurrency: int,
+        host_concurrency: int = 2,
+        max_attempts: int = 3,
+        cache_dir: Path | None = None,
+        legacy_cache_path: Path | None = None,
+        bypass_cache: bool = False,
+    ) -> None:
+        if cache_path and cache_path.suffix == ".json":
+            cache_dir = cache_path.with_suffix("")
+            legacy_cache_path = cache_path
+        elif cache_path:
+            cache_dir = cache_path
+        if cache_dir is None:
+            raise ValueError("cache_dir or cache_path is required")
+        self.cache = DiskHttpCache(cache_dir, legacy_path=legacy_cache_path)
         self.semaphore = asyncio.Semaphore(concurrency)
+        self.host_concurrency = host_concurrency
+        self.max_attempts = max(1, max_attempts)
+        self.bypass_cache = bypass_cache
+        self._host_semaphores = [asyncio.Semaphore(host_concurrency) for _ in range(64)]
         self.client = httpx.AsyncClient(
-            headers={"User-Agent": "yc-radar-career-discovery/0.1"},
+            headers={
+                "User-Agent": "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; read-only research)",
+                "Accept": "text/html,application/xhtml+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.8",
+            },
             follow_redirects=True,
             timeout=10,
         )
@@ -191,24 +233,67 @@ class CachedHttpClient:
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         await self.client.aclose()
-        self.save()
 
-    async def get(self, url: str) -> HttpResult:
-        if url in self.cache:
-            cached = self.cache[url]
-            return HttpResult(**cached)
+    @property
+    def cache_metrics(self) -> dict[str, int]:
+        return dict(self.cache.metrics)
 
-        async with self.semaphore:
+    async def get(self, url: str, *, bypass_cache: bool = False) -> HttpResult:
+        if not bypass_cache and not self.bypass_cache:
+            cached = self.cache.load(url)
+            if cached is not None:
+                return HttpResult(
+                    url=url,
+                    final_url=str(cached.get("final_url") or url),
+                    status_code=cached.get("status_code"),
+                    content_type=str(cached.get("content_type") or ""),
+                    text=str(cached.get("text") or ""),
+                    error=cached.get("error"),
+                    error_class=cached.get("error_class"),
+                    attempt_count=int(cached.get("attempt_count") or 0),
+                    retryable=bool(cached.get("retryable")),
+                    cache_source="disk",
+                )
+        host_index = self.host_semaphore_index(url, len(self._host_semaphores))
+        async with self.semaphore, self._host_semaphores[host_index]:
+            return await self._get_uncached(url)
+
+    @staticmethod
+    def host_semaphore_index(url: str, stripe_count: int) -> int:
+        """Return a bounded semaphore stripe from a normalized origin, not a path."""
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower() or "https"
+        hostname = (parsed.hostname or "").lower().removeprefix("www.")
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+        origin = f"{scheme}://{hostname}" + (f":{port}" if port and port != default_port else "")
+        return int(DiskHttpCache.key_for_url(origin)[:2], 16) % stripe_count
+
+    async def _get_uncached(self, url: str) -> HttpResult:
+        result = HttpResult(url, url, None, "", "")
+        for attempt in range(1, self.max_attempts + 1):
             try:
                 response = await self.client.get(url)
+                retryable = response.status_code in RETRYABLE_STATUS_CODES
                 result = HttpResult(
                     url=url,
                     final_url=str(response.url),
                     status_code=response.status_code,
                     content_type=response.headers.get("content-type", ""),
-                    text=response.text[:500_000],
+                    text=response.text[:MAX_STORED_TEXT_CHARS],
+                    error_class=(
+                        "RetryableHttpStatus"
+                        if retryable
+                        else "HttpStatusError" if response.status_code >= 400 else None
+                    ),
+                    attempt_count=attempt,
+                    retryable=retryable,
                 )
-            except Exception as exc:
+            except httpx.RequestError as exc:
+                retryable = not isinstance(exc, httpx.TooManyRedirects)
                 result = HttpResult(
                     url=url,
                     final_url=url,
@@ -216,30 +301,71 @@ class CachedHttpClient:
                     content_type="",
                     text="",
                     error=str(exc),
+                    error_class=type(exc).__name__,
+                    attempt_count=attempt,
+                    retryable=retryable,
                 )
-            self.cache[url] = result.__dict__
-            return result
+                if retryable and attempt < self.max_attempts:
+                    await self._sleep_before_retry(None, attempt)
+                    continue
+                break
+            if not result.retryable or attempt == self.max_attempts:
+                break
+            await self._sleep_before_retry(response, attempt)
+        self.cache.store(url, metadata=result.__dict__, text=result.text)
+        return result
+
+    async def get_many(self, urls: list[str]) -> list[HttpResult]:
+        return await asyncio.gather(*(self.get(url) for url in urls))
+
+    async def _sleep_before_retry(self, response: httpx.Response | None, attempt: int) -> None:
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+        try:
+            delay = float(retry_after) if retry_after else 0.0
+        except ValueError:
+            delay = 0.0
+        if delay <= 0 or delay > 30:
+            delay = min(2.0 ** (attempt - 1), 8.0)
+        await asyncio.sleep(delay)
 
     def save(self) -> None:
-        self.cache_path.write_text(
-            json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8"
-        )
-
-    def _load_cache(self) -> dict[str, dict[str, Any]]:
-        if not self.cache_path.exists():
-            return {}
-        return json.loads(self.cache_path.read_text(encoding="utf-8"))
+        """Compatibility no-op; every cache entry is atomically persisted at fetch time."""
 
 
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     parser = argparse.ArgumentParser(description="Discover YC company career/job pages.")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--company-slug",
+        action="append",
+        default=[],
+        help="Process only this company slug; repeat the option for multiple companies.",
+    )
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=25)
+    parser.add_argument("--host-concurrency", type=int, default=2)
+    parser.add_argument("--max-http-attempts", type=int, default=3)
     parser.add_argument("--max-sitemaps", type=int, default=6)
     parser.add_argument("--max-child-sitemaps", type=int, default=8)
-    parser.add_argument("--cache-path", type=Path, default=settings.career_url_discovery_cache_path)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=settings.career_url_discovery_cache_dir,
+        help="Directory for atomic per-URL cache entries.",
+    )
+    parser.add_argument(
+        "--legacy-cache-path",
+        type=Path,
+        default=settings.career_url_discovery_cache_path,
+        help="Read-only legacy JSON cache fallback; it is never removed automatically.",
+    )
+    parser.add_argument(
+        "--cache-path",
+        type=Path,
+        default=None,
+        help="Deprecated compatibility path; a .json path is used as legacy input.",
+    )
     parser.add_argument("--output-csv", type=Path, default=settings.company_career_pages_csv_path)
     parser.add_argument(
         "--discovered-urls-csv",
@@ -262,34 +388,106 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Reprocess selected companies even when discovery status is already completed.",
     )
+    parser.add_argument("--status-file", type=Path, help="Atomic local stage-status JSON output.")
     return parser.parse_args()
 
 
 def main() -> None:
-    asyncio.run(run(parse_args()))
+    args = parse_args()
+    try:
+        asyncio.run(run(args))
+    except BaseException as exc:
+        status_file = getattr(args, "status_file", None)
+        write_status(
+            status_file,
+            stage_finished(
+                read_status(status_file) or stage_started("discovery"),
+                state="failed",
+                error=exc,
+            ),
+        )
+        raise
 
 
 async def run(args: argparse.Namespace) -> None:
     settings = get_settings()
+    status = stage_started("discovery")
+    write_status(getattr(args, "status_file", None), status)
     engine = engine_from_url(settings.database_url)
-    companies = fetch_companies_for_discovery(engine, limit=args.limit)
+    with url_inventory_writer_lock(engine):
+        await _run_with_inventory_lock(args, settings, status, engine)
+
+
+async def _run_with_inventory_lock(
+    args: argparse.Namespace,
+    settings: Any,
+    status: dict[str, Any],
+    engine: Any,
+) -> None:
+    requested_slugs = sorted({str(slug).strip().lower() for slug in args.company_slug if slug})
+    if requested_slugs:
+        known = fetch_companies_for_discovery(engine, company_slugs=requested_slugs)
+        missing_slugs = sorted(set(requested_slugs) - {str(row["slug"]) for row in known})
+        if missing_slugs:
+            raise SystemExit(f"Unknown company slug(s): {', '.join(missing_slugs)}")
+    companies = fetch_companies_for_discovery(
+        engine,
+        limit=args.limit,
+        company_slugs=requested_slugs or None,
+        only_pending=not args.force,
+    )
     selected_slugs = [str(company["slug"]) for company in companies]
-    completed_slugs = (
-        set()
-        if args.force
-        else fetch_completed_career_discovery_slugs(engine, company_slugs=selected_slugs)
-    )
-    pending_companies = pending_discovery_companies(
-        companies,
-        completed_slugs=completed_slugs,
-        force=args.force,
-    )
+    completed_slugs = set() if args.force else fetch_completed_career_discovery_slugs(engine)
+    pending_companies = companies
+    if not pending_companies:
+        print("No pending companies need career URL discovery; existing snapshots were preserved.")
+        write_status(
+            getattr(args, "status_file", None),
+            stage_finished(
+                status,
+                state="completed",
+                selected=0,
+                processed=0,
+                succeeded=0,
+                failed=0,
+            ),
+        )
+        return
+
     jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
     for job in fetch_yc_job_rows(engine):
         jobs_by_slug.setdefault(job["company_slug"], []).append(job)
 
-    async with CachedHttpClient(args.cache_path, concurrency=args.concurrency) as http:
-        processed_count = 0
+    cache_path = getattr(args, "cache_path", None)
+    cache_dir = getattr(args, "cache_dir", None)
+    legacy_cache_path = getattr(args, "legacy_cache_path", None)
+    success_count = 0
+    failure_count = 0
+    error_classes: dict[str, int] = {}
+    retry_count = 0
+    cache_metrics: dict[str, int] = {}
+    processed_count = 0
+    write_status(
+        getattr(args, "status_file", None),
+        stage_checkpoint(
+            status,
+            selected=len(companies),
+            processed=0,
+            succeeded=0,
+            failed=0,
+            error_classes=error_classes,
+            retry_count=0,
+        ),
+    )
+    async with CachedHttpClient(
+        cache_path or cache_dir,
+        concurrency=args.concurrency,
+        host_concurrency=args.host_concurrency,
+        max_attempts=args.max_http_attempts,
+        cache_dir=None if cache_path else cache_dir,
+        legacy_cache_path=None if cache_path else legacy_cache_path,
+        bypass_cache=bool(args.force),
+    ) as http:
         for batch in chunks(pending_companies, max(1, args.batch_size)):
             batch_results = await discover_company_batch(
                 batch,
@@ -298,45 +496,75 @@ async def run(args: argparse.Namespace) -> None:
                 max_sitemaps=args.max_sitemaps,
                 max_child_sitemaps=args.max_child_sitemaps,
             )
-            batch_events = [
-                event for result in batch_results for event in result["discovery_events"]
-            ]
-            batch_pages = [page for result in batch_results for page in result["career_pages"]]
-            batch_slugs = [str(company["slug"]) for company in batch]
-            replace_career_page_data(
-                engine,
-                batch_events,
-                batch_pages,
-                company_slugs=batch_slugs,
-            )
-            upsert_career_page_discovery_statuses(
-                engine,
-                [discovery_status(result) for result in batch_results],
-            )
+            successful = [result for result in batch_results if result["applicable"]]
+            failed = [result for result in batch_results if not result["applicable"]]
+            if successful:
+                replace_career_page_data(
+                    engine,
+                    [event for result in successful for event in result["discovery_events"]],
+                    [page for result in successful for page in result["career_pages"]],
+                    company_slugs=[str(result["company"]["slug"]) for result in successful],
+                    statuses=[discovery_status(result) for result in successful],
+                )
+            if failed:
+                # Failure checkpoints intentionally retain prior events/pages/queue rows.
+                upsert_career_page_discovery_statuses(
+                    engine, [discovery_status(result) for result in failed]
+                )
+            success_count += len(successful)
+            failure_count += len(failed)
+            for result in batch_results:
+                if result.get("error_class"):
+                    key = str(result["error_class"])
+                    error_classes[key] = error_classes.get(key, 0) + 1
+                retry_count += int(result.get("retry_count") or 0)
+                for warning in result.get("warnings", []):
+                    if warning.get("error_class"):
+                        key = str(warning["error_class"])
+                        error_classes[key] = error_classes.get(key, 0) + 1
+                    retry_count += max(0, int(warning.get("attempt_count") or 0) - 1)
             processed_count += len(batch)
-            http.save()
+            write_status(
+                getattr(args, "status_file", None),
+                stage_checkpoint(
+                    status,
+                    cache=http.cache_metrics,
+                    selected=len(companies),
+                    processed=processed_count,
+                    succeeded=success_count,
+                    failed=failure_count,
+                    error_classes=error_classes,
+                    retry_count=retry_count,
+                ),
+            )
             print(
                 f"Checkpointed {processed_count} / {len(pending_companies)} pending "
                 f"companies ({len(completed_slugs)} already completed).",
                 flush=True,
             )
+        cache_metrics = http.cache_metrics
 
     drop_legacy_career_surfaces_table(engine)
-    discovery_events = fetch_career_page_discovery_event_rows(engine, company_slugs=selected_slugs)
-    career_pages = fetch_company_career_page_rows(engine, company_slugs=selected_slugs)
-    discovered_urls = fetch_discovered_url_rows(engine, company_slugs=selected_slugs)
+    discovery_events = (
+        fetch_career_page_discovery_event_rows(engine, company_slugs=selected_slugs)
+        if selected_slugs
+        else []
+    )
+    career_pages = (
+        fetch_company_career_page_rows(engine, company_slugs=selected_slugs) if selected_slugs else []
+    )
+    discovered_urls = (
+        fetch_discovered_url_rows(engine, company_slugs=selected_slugs) if selected_slugs else []
+    )
     write_csv(args.output_csv, career_pages, CAREER_PAGE_CSV_FIELDS)
     write_csv(args.discovered_urls_csv, discovered_urls, DISCOVERED_URL_CSV_FIELDS)
     write_csv(args.events_csv, discovery_events, DISCOVERY_EVENT_CSV_FIELDS)
     if args.write_raw_json:
         write_json(args.raw_output_dir / "company_career_pages_raw.json", career_pages)
         write_json(args.raw_output_dir / "discovered_urls_raw.json", discovered_urls)
-        write_json(
-            args.raw_output_dir / "career_page_discovery_events_raw.json",
-            discovery_events,
-        )
+        write_json(args.raw_output_dir / "career_page_discovery_events_raw.json", discovery_events)
 
-    print(f"Selected {len(companies)} companies.")
+    print(f"Selected {len(companies)} pending companies.")
     print(f"Skipped {len(completed_slugs)} already completed companies.")
     print(f"Checked {len(pending_companies)} pending companies.")
     print(f"Recorded {len(discovery_events)} career page discovery events.")
@@ -348,6 +576,20 @@ async def run(args: argparse.Namespace) -> None:
     if args.write_raw_json:
         print(f"Wrote raw JSON debug files under {args.raw_output_dir}")
     print(f"Updated {settings.database_url}")
+    write_status(
+        getattr(args, "status_file", None),
+        stage_finished(
+            status,
+            state="completed" if failure_count == 0 else "partial",
+            cache=cache_metrics,
+            selected=len(companies),
+            processed=processed_count,
+            succeeded=success_count,
+            failed=failure_count,
+            error_classes=error_classes,
+            retry_count=retry_count,
+        ),
+    )
 
 
 def pending_discovery_companies(
@@ -398,18 +640,27 @@ async def discover_company_result(
             max_sitemaps=max_sitemaps,
             max_child_sitemaps=max_child_sitemaps,
         )
+        failure = result.get("failure")
         return {
             "company": company,
-            "discovery_events": result["discovery_events"],
-            "career_pages": result["career_pages"],
-            "error": None,
+            "discovery_events": result["discovery_events"] if not failure else [],
+            "career_pages": result["career_pages"] if not failure else [],
+            "applicable": failure is None,
+            "error": failure.get("message") if failure else None,
+            "error_class": failure.get("class") if failure else None,
+            "retry_count": max(0, int(failure.get("attempt_count") or 0) - 1) if failure else 0,
+            "warnings": result.get("warnings", []),
         }
     except Exception as exc:
         return {
             "company": company,
             "discovery_events": [],
             "career_pages": [],
+            "applicable": False,
             "error": str(exc),
+            "error_class": type(exc).__name__,
+            "retry_count": 0,
+            "warnings": [],
         }
 
 
@@ -426,6 +677,10 @@ def discovery_status(result: dict[str, Any]) -> dict[str, Any]:
         "career_page_count": len(result["career_pages"]),
         "error": error,
         "checked_at": datetime.now(UTC).isoformat(),
+        "raw_json": {
+            "error_class": result.get("error_class"),
+            "warnings": result.get("warnings", []),
+        },
     }
 
 
@@ -439,6 +694,7 @@ async def discover_company_career_data(
 ) -> dict[str, list[dict[str, Any]]]:
     checked_at = datetime.now(UTC)
     discovery_events: list[dict[str, Any]] = []
+    discovery_event_keys: set[tuple[str, str, str, str]] = set()
 
     for job in yc_jobs:
         absolute_url = job.get("absolute_url") or urljoin(
@@ -446,6 +702,7 @@ async def discover_company_career_data(
         )
         add_discovery_event(
             discovery_events,
+            discovery_event_keys,
             company,
             url=absolute_url,
             page_type="yc_job",
@@ -465,15 +722,34 @@ async def discover_company_career_data(
         }
 
     homepage = await http.get(website)
+    if (
+        homepage.error
+        or homepage.status_code is None
+        or homepage.retryable
+        or homepage.status_code >= 400
+    ):
+        return {
+            "discovery_events": [],
+            "career_pages": [],
+            "warnings": [],
+            "failure": {
+                "class": homepage.error_class or "RetryableHttpStatus",
+                "message": homepage.error or f"HTTP {homepage.status_code}",
+                "attempt_count": homepage.attempt_count,
+            },
+        }
+    warnings: list[dict[str, Any]] = []
+    homepage_url = homepage.final_url or website
     for href, text in extract_homepage_links(homepage.text):
-        url = normalize_url(website, href)
+        url = normalize_url(homepage_url, href)
         if not url:
             continue
-        score = career_link_score(website, url, text)
+        score = career_link_score(homepage_url, url, text)
         if score <= 0:
             continue
         add_discovery_event(
             discovery_events,
+            discovery_event_keys,
             company,
             url=url,
             page_type=page_type_for(url),
@@ -484,45 +760,89 @@ async def discover_company_career_data(
             checked_at=checked_at,
         )
 
-    sitemap_urls = await discover_sitemap_urls(website, http, max_sitemaps=max_sitemaps)
-    sitemap_hits = await discover_sitemap_hits(
-        sitemap_urls,
-        http,
-        max_child_sitemaps=max_child_sitemaps,
+    has_high_confidence_ats = any(
+        event.get("page_type") == "ats" and float(event.get("confidence") or 0) >= 0.86
+        for event in discovery_events
     )
-    for url, status_code in sitemap_hits:
-        add_discovery_event(
-            discovery_events,
-            company,
-            url=url,
-            page_type=page_type_for(url),
-            discovery_source="sitemap",
-            confidence=0.78,
-            http_status=status_code,
-            evidence="career-like URL in sitemap",
-            checked_at=checked_at,
+    if not has_high_confidence_ats:
+        robots_task = asyncio.create_task(
+            discover_robots_sitemap_urls(website, http, warnings=warnings)
         )
+        candidate_sitemap_results = await http.get_many(
+            [urljoin(website.rstrip("/") + "/", path.lstrip("/")) for path in SITEMAP_CANDIDATES]
+        )
+        robots_sitemap_urls = await robots_task
+        sitemap_urls = dedupe(robots_sitemap_urls)[:max_sitemaps]
+        warnings.extend(
+            http_warning(result)
+            for result in candidate_sitemap_results
+            if result.error or result.retryable
+        )
+        successful_candidate_sitemaps = [
+            result
+            for result in candidate_sitemap_results
+            if result.status_code and result.status_code < 400
+        ]
+        sitemap_hits = await discover_sitemap_hits(
+            sitemap_urls,
+            http,
+            successful_results=successful_candidate_sitemaps,
+            max_child_sitemaps=max_child_sitemaps,
+            warnings=warnings,
+        )
+        for url, status_code in sitemap_hits:
+            add_discovery_event(
+                discovery_events,
+                discovery_event_keys,
+                company,
+                url=url,
+                page_type=page_type_for(url),
+                discovery_source="sitemap",
+                confidence=0.78,
+                http_status=status_code,
+                evidence="career-like URL in sitemap",
+                checked_at=checked_at,
+            )
 
     if not has_external_career_event(discovery_events):
-        for path in COMMON_PATHS:
-            probe_url = urljoin(website.rstrip("/") + "/", path.lstrip("/"))
-            result = await http.get(probe_url)
-            if is_valid_probe_hit(result):
-                add_discovery_event(
-                    discovery_events,
-                    company,
-                    url=result.final_url,
-                    page_type=page_type_for(result.final_url),
-                    discovery_source="common_path_probe",
-                    confidence=0.65,
-                    http_status=result.status_code,
-                    evidence=path,
-                    checked_at=checked_at,
-                )
+        probe_results = await http.get_many(
+            [
+                urljoin(website.rstrip("/") + "/", path.lstrip("/"))
+                for path in COMMON_PATHS
+            ]
+        )
+        homepage_signature = page_content_signature(homepage.text)
+        seen_probe_signatures: set[str] = set()
+        for path, result in zip(COMMON_PATHS, probe_results, strict=True):
+            if result.error or result.retryable:
+                warnings.append(http_warning(result))
+            if not is_valid_probe_hit(result):
+                continue
+            signature = page_content_signature(result.text)
+            if signature and (
+                signature == homepage_signature or signature in seen_probe_signatures
+            ):
+                continue
+            if signature:
+                seen_probe_signatures.add(signature)
+            add_discovery_event(
+                discovery_events,
+                discovery_event_keys,
+                company,
+                url=result.final_url,
+                page_type=page_type_for(result.final_url),
+                discovery_source="common_path_probe",
+                confidence=0.65,
+                http_status=result.status_code,
+                evidence=path,
+                checked_at=checked_at,
+            )
 
     return {
         "discovery_events": sorted_discovery_events(discovery_events),
         "career_pages": build_company_career_pages(discovery_events),
+        "warnings": warnings,
+        "failure": None,
     }
 
 
@@ -532,24 +852,47 @@ def extract_homepage_links(html: str) -> list[tuple[str, str]]:
     return parser.anchors
 
 
+def http_warning(result: HttpResult) -> dict[str, Any]:
+    return {
+        "url": result.url,
+        "status_code": result.status_code,
+        "error_class": result.error_class,
+        "message": result.error,
+        "retryable": result.retryable,
+        "attempt_count": result.attempt_count,
+    }
+
+
+async def discover_robots_sitemap_urls(
+    homepage: str,
+    http: CachedHttpClient,
+    *,
+    warnings: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    robots = await http.get(urljoin(homepage.rstrip("/") + "/", "robots.txt"))
+    if (robots.error or robots.retryable) and warnings is not None:
+        warnings.append(http_warning(robots))
+    if not robots.status_code or robots.status_code >= 400:
+        return []
+    urls: list[str] = []
+    for line in robots.text.splitlines():
+        if line.lower().startswith("sitemap:"):
+            sitemap_url = line.split(":", 1)[1].strip()
+            normalized = normalize_url(robots.final_url or homepage, sitemap_url)
+            if normalized:
+                urls.append(normalized)
+    return urls
+
+
 async def discover_sitemap_urls(
     homepage: str,
     http: CachedHttpClient,
     *,
     max_sitemaps: int,
 ) -> list[str]:
-    urls: list[str] = []
-    robots = await http.get(urljoin(homepage.rstrip("/") + "/", "robots.txt"))
-    if robots.status_code and robots.status_code < 400:
-        for line in robots.text.splitlines():
-            if line.lower().startswith("sitemap:"):
-                sitemap_url = line.split(":", 1)[1].strip()
-                if sitemap_url:
-                    urls.append(sitemap_url)
-
+    urls = await discover_robots_sitemap_urls(homepage, http)
     for path in SITEMAP_CANDIDATES:
         urls.append(urljoin(homepage.rstrip("/") + "/", path.lstrip("/")))
-
     return dedupe(urls)[:max_sitemaps]
 
 
@@ -557,23 +900,58 @@ async def discover_sitemap_hits(
     sitemap_urls: list[str],
     http: CachedHttpClient,
     *,
+    successful_results: list[HttpResult] | None = None,
     max_child_sitemaps: int,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, int | None]]:
     hits: list[tuple[str, int | None]] = []
     child_sitemaps: list[str] = []
-    for sitemap_url in sitemap_urls:
-        result = await http.get(sitemap_url)
-        if not result.status_code or result.status_code >= 400:
-            continue
-        locs = extract_sitemap_locs(result.text)
+    parent_results = list(successful_results or [])
+    already_fetched = {
+        normalized
+        for result in parent_results
+        for value in (result.url, result.final_url)
+        if (normalized := normalize_url(value, value))
+    }
+    unfetched_sitemap_urls = [
+        url
+        for url in sitemap_urls
+        if (normalized := normalize_url(url, url)) and normalized not in already_fetched
+    ]
+    fetched_parent_results = await http.get_many(unfetched_sitemap_urls)
+    if warnings is not None:
+        warnings.extend(
+            http_warning(result)
+            for result in fetched_parent_results
+            if result.error or result.retryable
+        )
+    parent_results.extend(
+        result
+        for result in fetched_parent_results
+        if result.status_code and result.status_code < 400
+    )
+    for result in parent_results:
+        if (result.error or result.retryable) and warnings is not None:
+            warnings.append(http_warning(result))
+        locs = [
+            normalized
+            for loc in extract_sitemap_locs(result.text)
+            if (normalized := normalize_url(result.final_url or result.url, loc))
+        ]
         hits.extend((loc, result.status_code) for loc in locs if is_career_url(loc))
-        child_sitemaps.extend(loc for loc in locs if loc.lower().endswith(".xml"))
+        child_sitemaps.extend(loc for loc in locs if urlparse(loc).path.lower().endswith(".xml"))
 
-    for sitemap_url in dedupe(child_sitemaps)[:max_child_sitemaps]:
-        result = await http.get(sitemap_url)
+    child_results = await http.get_many(dedupe(child_sitemaps)[:max_child_sitemaps])
+    for result in child_results:
+        if (result.error or result.retryable) and warnings is not None:
+            warnings.append(http_warning(result))
         if not result.status_code or result.status_code >= 400:
             continue
-        locs = extract_sitemap_locs(result.text)
+        locs = [
+            normalized
+            for loc in extract_sitemap_locs(result.text)
+            if (normalized := normalize_url(result.final_url or result.url, loc))
+        ]
         hits.extend((loc, result.status_code) for loc in locs if is_career_url(loc))
 
     deduped: dict[str, int | None] = {}
@@ -604,6 +982,7 @@ def is_valid_probe_hit(result: HttpResult) -> bool:
 
 def add_discovery_event(
     discovery_events: list[dict[str, Any]],
+    discovery_event_keys: set[tuple[str, str, str, str]],
     company: dict[str, Any],
     *,
     url: str,
@@ -635,10 +1014,10 @@ def add_discovery_event(
         "checked_at": checked_at.isoformat(),
         "raw_json": raw_json or {},
     }
-    if discovery_event_key(event) in {
-        discovery_event_key(existing) for existing in discovery_events
-    }:
+    event_key = discovery_event_key(event)
+    if event_key in discovery_event_keys:
         return
+    discovery_event_keys.add(event_key)
     discovery_events.append(event)
 
 
@@ -719,13 +1098,17 @@ def career_link_score(homepage: str, url: str, text: str) -> float:
     home_domain = clean_domain(parsed_home.netloc)
     link_domain = clean_domain(parsed_url.netloc)
     combined = f"{url} {text}".lower()
-    same_domain = link_domain == home_domain or link_domain.endswith(f".{home_domain}")
-    ats = any(domain in link_domain for domain in ATS_DOMAINS)
+    homepage_is_ats_vendor = is_ats_domain(home_domain) and not is_company_ats_url(homepage)
+    same_domain = (
+        not homepage_is_ats_vendor
+        and (link_domain == home_domain or link_domain.endswith(f".{home_domain}"))
+    )
+    ats = is_company_ats_url(url)
     career_signal = is_career_url(url)
 
     if not same_domain and not ats:
         return 0
-    if any(term in combined for term in LOW_VALUE_TERMS) and not ats:
+    if any(term in combined for term in LOW_VALUE_TERMS):
         return 0
     if ats and (career_signal or has_career_text_signal(text)):
         return 0.92
@@ -741,21 +1124,18 @@ def is_allowed_career_destination(source_url: str, destination_url: str) -> bool
     destination_domain = clean_domain(urlparse(destination_url).netloc)
     if destination_domain == source_domain or destination_domain.endswith(f".{source_domain}"):
         return True
-    return any(ats_domain in destination_domain for ats_domain in ATS_DOMAINS)
+    return is_company_ats_url(destination_url)
 
 
 def career_page_dedupe_key(url: str) -> str:
-    parsed = urlparse(url)
-    domain = clean_domain(parsed.netloc)
-    path = parsed.path.rstrip("/") or "/"
-    return urlunparse(("https", domain, path, "", parsed.query, ""))
+    return canonical_url_key(url) or url
 
 
 def page_type_for(url: str) -> str:
     domain = clean_domain(urlparse(url).netloc)
     if "ycombinator.com" in domain and "/jobs/" in urlparse(url).path:
         return "yc_job"
-    if any(ats_domain in domain for ats_domain in ATS_DOMAINS):
+    if is_ats_domain(domain):
         return "ats"
     if "/jobs/" in urlparse(url).path.lower():
         return "jobs_page"
@@ -776,20 +1156,6 @@ def canonical_homepage(url: str | None) -> str | None:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", "", ""))
 
 
-def normalize_url(base_url: str, href: str) -> str | None:
-    if not href:
-        return None
-    href = href.strip()
-    if href.startswith(("#", "mailto:", "tel:", "javascript:")):
-        return None
-    parsed = urlparse(urljoin(base_url, href))
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None
-    return urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path.rstrip("/") or "/", "", parsed.query, "")
-    )
-
-
 def is_career_like(value: str) -> bool:
     normalized = value.lower().replace("_", "-")
     return any(term in normalized for term in CAREER_TERMS)
@@ -797,8 +1163,7 @@ def is_career_like(value: str) -> bool:
 
 def is_career_url(url: str) -> bool:
     parsed = urlparse(url)
-    domain = clean_domain(parsed.netloc)
-    if any(ats_domain in domain for ats_domain in ATS_DOMAINS):
+    if is_company_ats_url(url):
         return True
     path = parsed.path.lower().replace("_", "-")
     if any(term in path for term in LOW_VALUE_TERMS):
@@ -819,6 +1184,10 @@ def strip_html(html: str) -> str:
     without_scripts = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
     without_tags = re.sub(r"<[^>]+>", " ", without_scripts)
     return re.sub(r"\s+", " ", without_tags).strip()
+
+
+def page_content_signature(html: str) -> str:
+    return strip_html((html or "")[:30_000]).lower()
 
 
 def sorted_discovery_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

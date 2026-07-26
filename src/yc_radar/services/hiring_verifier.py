@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import profile_text
-from yc_radar.services.source_providers import ATS_DOMAINS
+from yc_radar.services.source_providers import is_company_ats_url
 
 HiringStatus = Literal["hiring", "not_hiring", "unknown"]
 
@@ -27,7 +27,6 @@ CAREER_KEYWORDS = (
     "roles",
     "work with us",
 )
-KNOWN_ATS_DOMAINS = ATS_DOMAINS
 LOW_VALUE_LINK_TERMS = (
     "blog",
     "docs",
@@ -234,7 +233,7 @@ def career_link_score(homepage_url: str, url: str, text: str = "") -> int:
     combined = f"{url} {text}".lower()
 
     same_domain = link_domain == home_domain or link_domain.endswith(f".{home_domain}")
-    known_ats = any(domain in link_domain for domain in KNOWN_ATS_DOMAINS)
+    known_ats = is_company_ats_url(url)
     if not same_domain and not known_ats:
         return 0
 
@@ -311,7 +310,7 @@ def is_likely_hiring_page(homepage_url: str, page: ScrapedPage) -> bool:
     parsed_home = urlparse(homepage_url)
     parsed_page = urlparse(page.url)
     page_domain = _clean_domain(parsed_page.netloc)
-    known_ats = any(domain in page_domain for domain in KNOWN_ATS_DOMAINS)
+    known_ats = is_company_ats_url(page.url)
     if known_ats:
         return True
 

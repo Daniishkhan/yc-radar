@@ -1,8 +1,33 @@
 from datetime import UTC, datetime
 
-from yc_radar.services.database import engine_from_url, replace_career_page_data, upsert_companies
+import pytest
+from sqlalchemy import func, select
+
+from yc_radar.services.database import (
+    URL_INVENTORY_ADVISORY_LOCK,
+    engine_from_url,
+    replace_career_page_data,
+    upsert_companies,
+)
 from yc_radar.services.job_repository import JobRepository
 from yc_radar.services.source_discovery import discover_greenhouse_sources
+
+
+def test_greenhouse_registration_conflicts_with_cleanup_lock(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    with engine.connect() as cleanup:
+        assert cleanup.scalar(
+            select(func.pg_try_advisory_lock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
+        ) is True
+        try:
+            with pytest.raises(RuntimeError, match="cleanup apply is active"):
+                discover_greenhouse_sources(engine)
+        finally:
+            cleanup.execute(
+                select(func.pg_advisory_unlock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
+            )
 
 
 def test_greenhouse_discovery_registers_idempotently_and_refuses_reassignment(

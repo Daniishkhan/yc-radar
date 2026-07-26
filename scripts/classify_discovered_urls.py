@@ -21,15 +21,25 @@ import httpx
 
 from yc_radar.core.config import get_settings
 from yc_radar.services.candidate_fit import classify_role_text
-from yc_radar.services.source_providers import ATS_DOMAINS
+from yc_radar.services.http_cache import DiskHttpCache
+from yc_radar.services.run_status import (
+    read_status,
+    stage_checkpoint,
+    stage_finished,
+    stage_started,
+    write_status,
+)
+from yc_radar.services.source_providers import is_ats_domain
 from yc_radar.services.database import (
+    create_schema,
     engine_from_url,
     fetch_discovered_url_rows,
     fetch_page_classification_rows,
-    fetch_source_document_rows,
-    upsert_external_job_postings,
-    upsert_page_classifications,
-    upsert_source_documents,
+    fetch_source_document_rows_connection,
+    upsert_external_job_postings_connection,
+    upsert_page_classifications_connection,
+    upsert_source_documents_connection,
+    url_inventory_writer_lock,
 )
 
 SOURCE_TYPE = "career_url"
@@ -151,6 +161,10 @@ class HttpResult:
     content_type: str
     text: str
     error: str | None = None
+    error_class: str | None = None
+    attempt_count: int = 1
+    retryable: bool = False
+    cache_source: str = "network"
 
 
 @dataclass(frozen=True)
@@ -163,13 +177,31 @@ class PageClassification:
 
 
 class CachedHttpClient:
-    def __init__(self, cache_path: Path, *, concurrency: int) -> None:
-        self.cache_path = cache_path
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache = self._load_cache()
+    """Classification request policy over the shared bounded disk cache."""
+
+    def __init__(
+        self,
+        cache_path: Path | None,
+        *,
+        concurrency: int,
+        cache_dir: Path | None = None,
+        legacy_cache_path: Path | None = None,
+    ) -> None:
+        if cache_path and cache_path.suffix == ".json":
+            cache_dir = cache_path.with_suffix("")
+            legacy_cache_path = cache_path
+        elif cache_path:
+            cache_dir = cache_path
+        if cache_dir is None:
+            raise ValueError("cache_dir or cache_path is required")
+        self.cache = DiskHttpCache(cache_dir, legacy_path=legacy_cache_path)
         self.semaphore = asyncio.Semaphore(concurrency)
         self.client = httpx.AsyncClient(
-            headers={"User-Agent": "yc-radar-page-classifier/0.1"},
+            headers={
+                "User-Agent": "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; read-only research)",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.8",
+            },
             follow_redirects=True,
             timeout=15,
         )
@@ -179,23 +211,45 @@ class CachedHttpClient:
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         await self.client.aclose()
-        self.save()
 
-    async def get(self, url: str) -> HttpResult:
-        if url in self.cache:
-            return HttpResult(**self.cache[url])
+    @property
+    def cache_metrics(self) -> dict[str, int]:
+        return dict(self.cache.metrics)
 
+    async def get(self, url: str, *, bypass_cache: bool = False) -> HttpResult:
+        if not bypass_cache:
+            cached = self.cache.load(url)
+            if cached is not None:
+                return HttpResult(
+                    url=url,
+                    final_url=str(cached.get("final_url") or url),
+                    status_code=cached.get("status_code"),
+                    content_type=str(cached.get("content_type") or ""),
+                    text=str(cached.get("text") or ""),
+                    error=cached.get("error"),
+                    error_class=cached.get("error_class"),
+                    attempt_count=int(cached.get("attempt_count") or 1),
+                    retryable=bool(cached.get("retryable")),
+                    cache_source="disk",
+                )
         async with self.semaphore:
             try:
                 response = await self.client.get(url)
+                retryable = response.status_code in {408, 425, 429, 500, 502, 503, 504}
                 result = HttpResult(
                     url=url,
                     final_url=str(response.url),
                     status_code=response.status_code,
                     content_type=response.headers.get("content-type", ""),
                     text=response.text[:MAX_STORED_TEXT_CHARS],
+                    error_class=(
+                        "RetryableHttpStatus"
+                        if retryable
+                        else "HttpStatusError" if response.status_code >= 400 else None
+                    ),
+                    retryable=retryable,
                 )
-            except Exception as exc:
+            except httpx.RequestError as exc:
                 result = HttpResult(
                     url=url,
                     final_url=url,
@@ -203,19 +257,14 @@ class CachedHttpClient:
                     content_type="",
                     text="",
                     error=str(exc),
+                    error_class=type(exc).__name__,
+                    retryable=not isinstance(exc, httpx.TooManyRedirects),
                 )
-            self.cache[url] = result.__dict__
+            self.cache.store(url, metadata=result.__dict__, text=result.text)
             return result
 
     def save(self) -> None:
-        self.cache_path.write_text(
-            json.dumps(self.cache, indent=2, sort_keys=True), encoding="utf-8"
-        )
-
-    def _load_cache(self) -> dict[str, dict[str, Any]]:
-        if not self.cache_path.exists():
-            return {}
-        return json.loads(self.cache_path.read_text(encoding="utf-8"))
+        """Compatibility no-op; every cache entry is atomically persisted at fetch time."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -226,81 +275,224 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--concurrency", type=int, default=10)
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=50,
+        help="Persist classifications after each batch so interrupted runs can resume.",
+    )
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
         "--force",
         action="store_true",
-        help="Reclassify URLs even when they already have a page classification.",
+        help="Reclassify all active URLs and bypass cache/retry-budget restrictions.",
     )
-    parser.add_argument("--cache-path", type=Path, default=settings.page_fetch_cache_path)
+    selection.add_argument(
+        "--retry-fetch-errors",
+        action="store_true",
+        help="Retry only explicitly retryable fetch errors below the attempt budget.",
+    )
+    parser.add_argument("--max-fetch-attempts", type=int, default=3)
+    parser.add_argument("--cache-dir", type=Path, default=settings.page_fetch_cache_dir)
+    parser.add_argument("--legacy-cache-path", type=Path, default=settings.page_fetch_cache_path)
+    parser.add_argument("--cache-path", type=Path, default=None, help="Deprecated legacy cache path.")
     parser.add_argument("--output-csv", type=Path, default=settings.page_classifications_csv_path)
+    parser.add_argument("--status-file", type=Path, help="Atomic local stage-status JSON output.")
     return parser.parse_args()
 
 
 def main() -> None:
-    asyncio.run(run(parse_args()))
+    args = parse_args()
+    try:
+        asyncio.run(run(args))
+    except BaseException as exc:
+        status_file = getattr(args, "status_file", None)
+        write_status(
+            status_file,
+            stage_finished(
+                read_status(status_file) or stage_started("classification"),
+                state="failed",
+                error=exc,
+            ),
+        )
+        raise
 
 
 async def run(args: argparse.Namespace) -> None:
+    status = stage_started("classification")
+    write_status(getattr(args, "status_file", None), status)
     engine = engine_from_url()
+    with url_inventory_writer_lock(engine):
+        await _run_with_inventory_lock(args, status, engine)
+
+
+async def _run_with_inventory_lock(
+    args: argparse.Namespace,
+    status: dict[str, Any],
+    engine: Any,
+) -> None:
+    force = bool(getattr(args, "force", False))
+    retry_fetch_errors = bool(getattr(args, "retry_fetch_errors", False))
+    max_fetch_attempts = max(1, int(getattr(args, "max_fetch_attempts", 3)))
     discovered_urls = fetch_discovered_url_rows(
         engine,
         limit=args.limit,
-        only_unclassified=not args.force,
+        only_unclassified=not force and not retry_fetch_errors,
+        retry_fetch_errors=retry_fetch_errors,
+        max_fetch_attempts=max_fetch_attempts,
     )
     if not discovered_urls:
         print(
-            "No discovered URLs need classification. Run scripts/discover_career_urls.py "
-            "if the URL inventory is empty, or pass --force to reclassify."
+            "No discovered URLs match this selection. Default mode selects unclassified URLs; "
+            "use --retry-fetch-errors for eligible transient failures or --force to reclassify."
+        )
+        write_status(
+            getattr(args, "status_file", None),
+            stage_finished(status, state="completed", selected=0, processed=0, succeeded=0, failed=0),
         )
         return
 
-    async with CachedHttpClient(args.cache_path, concurrency=args.concurrency) as http:
-        results = await asyncio.gather(
-            *(fetch_and_classify(row, http) for row in discovered_urls)
-        )
-
-    documents = [result["document"] for result in results]
-    upsert_source_documents(engine, documents)
-    document_rows = fetch_source_document_rows(
-        engine,
-        source_type=SOURCE_TYPE,
-        source_keys=[document["source_key"] for document in documents],
+    batch_size = max(1, args.batch_size)
+    page_counts: Counter[str] = Counter()
+    external_job_count = 0
+    processed_count = 0
+    error_classes: Counter[str] = Counter()
+    retry_count = 0
+    cache_path = getattr(args, "cache_path", None)
+    cache_dir = getattr(args, "cache_dir", None)
+    legacy_cache_path = getattr(args, "legacy_cache_path", None)
+    cache_metrics: dict[str, int] = {}
+    write_status(
+        getattr(args, "status_file", None),
+        stage_checkpoint(
+            status,
+            selected=len(discovered_urls),
+            processed=0,
+            succeeded=0,
+            failed=0,
+            retry_mode="force" if force else "fetch_error" if retry_fetch_errors else "pending",
+            error_classes={},
+            retry_count=0,
+        ),
     )
-    documents_by_key = {str(row["source_key"]): row for row in document_rows}
+    async with CachedHttpClient(
+        cache_path or cache_dir,
+        concurrency=args.concurrency,
+        cache_dir=None if cache_path else cache_dir,
+        legacy_cache_path=None if cache_path else legacy_cache_path,
+    ) as http:
+        for start in range(0, len(discovered_urls), batch_size):
+            batch = discovered_urls[start : start + batch_size]
+            results = await asyncio.gather(
+                *(
+                    fetch_and_classify(
+                        row,
+                        http,
+                        bypass_cache=force or retry_fetch_errors,
+                        max_fetch_attempts=max_fetch_attempts,
+                    )
+                    for row in batch
+                )
+            )
+            batch_counts, batch_external_jobs = persist_results(engine, results)
+            page_counts.update(batch_counts)
+            external_job_count += batch_external_jobs
+            for result in results:
+                fetch = result["classification"]["evidence"].get("fetch", {})
+                if fetch.get("error_class"):
+                    error_classes[str(fetch["error_class"])] += 1
+                retry_count += max(0, int(fetch.get("attempt_count") or 0) - 1)
+            processed_count += len(batch)
+            write_status(
+                getattr(args, "status_file", None),
+                stage_checkpoint(
+                    status,
+                    cache=http.cache_metrics,
+                    selected=len(discovered_urls),
+                    processed=processed_count,
+                    succeeded=processed_count - page_counts.get("fetch_error", 0),
+                    failed=page_counts.get("fetch_error", 0),
+                    retry_mode="force" if force else "fetch_error" if retry_fetch_errors else "pending",
+                    error_classes=dict(error_classes),
+                    retry_count=retry_count,
+                ),
+            )
+            print(
+                f"Checkpointed {processed_count} / {len(discovered_urls)} discovered URLs.",
+                flush=True,
+            )
+        cache_metrics = http.cache_metrics
 
-    classifications: list[dict[str, Any]] = []
-    external_jobs: list[dict[str, Any]] = []
-    for result in results:
-        source_key = result["document"]["source_key"]
-        source_document = documents_by_key[source_key]
-        classification = {
-            **result["classification"],
-            "source_document_id": source_document["id"],
-        }
-        classifications.append(classification)
-        if classification["page_kind"] == "job_detail" and classification.get("job_title"):
-            external_jobs.append(external_job_row(classification, source_document))
-
-    upsert_page_classifications(engine, classifications)
-    upsert_external_job_postings(engine, external_jobs)
-
-    recent_rows = fetch_page_classification_rows(engine, limit=max(args.limit, len(classifications)))
+    recent_rows = fetch_page_classification_rows(engine, limit=max(args.limit, processed_count))
     write_csv(args.output_csv, recent_rows, PAGE_CLASSIFICATION_CSV_FIELDS)
 
-    page_counts = Counter(classification["page_kind"] for classification in classifications)
+    fetch_errors = page_counts.get("fetch_error", 0)
     print(f"Selected {len(discovered_urls)} discovered URLs.")
-    print(f"Fetched and stored {len(documents)} source documents.")
+    print(f"Fetched and stored {processed_count} source documents.")
     print(f"Classified page kinds: {format_counts(page_counts)}")
-    print(f"Upserted {len(external_jobs)} external job detail postings.")
+    print(f"Upserted {external_job_count} external job detail postings.")
     print(f"Wrote {args.output_csv}")
     print(f"Updated {engine.url.database}")
+    write_status(
+        getattr(args, "status_file", None),
+        stage_finished(
+            status,
+            state="completed" if not fetch_errors else "partial",
+            cache=cache_metrics,
+            selected=len(discovered_urls),
+            processed=processed_count,
+            succeeded=processed_count - fetch_errors,
+            failed=fetch_errors,
+            retry_mode="force" if force else "fetch_error" if retry_fetch_errors else "pending",
+            error_classes=dict(error_classes),
+            retry_count=retry_count,
+        ),
+    )
 
 
-async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dict[str, Any]:
+def persist_results(engine: Any, results: list[dict[str, Any]]) -> tuple[Counter[str], int]:
+    """Atomically persist every resumable classification consequence in one batch."""
+    documents = [result["document"] for result in results]
+    create_schema(engine)
+    with engine.begin() as connection:
+        upsert_source_documents_connection(connection, documents)
+        document_rows = fetch_source_document_rows_connection(
+            connection,
+            source_type=SOURCE_TYPE,
+            source_keys=[document["source_key"] for document in documents],
+        )
+        documents_by_key = {str(row["source_key"]): row for row in document_rows}
+
+        classifications: list[dict[str, Any]] = []
+        external_jobs: list[dict[str, Any]] = []
+        for result in results:
+            source_key = result["document"]["source_key"]
+            source_document = documents_by_key[source_key]
+            classification = {
+                **result["classification"],
+                "source_document_id": source_document["id"],
+            }
+            classifications.append(classification)
+            if classification["page_kind"] == "job_detail" and classification.get("job_title"):
+                external_jobs.append(external_job_row(classification, source_document))
+
+        upsert_page_classifications_connection(connection, classifications)
+        upsert_external_job_postings_connection(connection, external_jobs)
+    return Counter(classification["page_kind"] for classification in classifications), len(external_jobs)
+
+
+async def fetch_and_classify(
+    row: dict[str, Any],
+    http: CachedHttpClient,
+    *,
+    bypass_cache: bool = False,
+    max_fetch_attempts: int = 3,
+) -> dict[str, Any]:
     requested_url = str(row.get("normalized_url") or row.get("url") or "")
-    result = await http.get(requested_url)
+    result = await http.get(requested_url, bypass_cache=bypass_cache)
     fetched_at = datetime.now(UTC)
-    title = extract_title(result.text)
-    clean_text = strip_html(result.text)
+    raw_text = strip_nul_bytes(result.text)
+    title = extract_title(raw_text)
+    clean_text = strip_html(raw_text)
     classification = classify_page(
         url=result.final_url or requested_url,
         title=title,
@@ -308,6 +500,26 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
         http_status=result.status_code,
         url_kind=str(row.get("url_kind") or ""),
     )
+    previous_attempts = int(row.get("fetch_attempt_count") or 0)
+    fetch_attempt = previous_attempts + 1 if classification.page_kind == "fetch_error" else 0
+    retryable = bool(result.retryable) and fetch_attempt < max(1, max_fetch_attempts)
+    terminal_reason = None
+    if classification.page_kind == "fetch_error" and not retryable:
+        terminal_reason = (
+            "retry_budget_exhausted"
+            if result.retryable
+            else "terminal_request_error_or_http_status"
+        )
+    fetch_evidence = {
+        "attempt_count": fetch_attempt,
+        "retryable": retryable,
+        "terminal_reason": terminal_reason,
+        "error_class": result.error_class,
+        "error": result.error,
+        "requested_url": requested_url,
+        "final_url": result.final_url or requested_url,
+        "cache_source": result.cache_source,
+    }
     source_key = source_key_for(row)
     document = {
         "discovered_url_id": row.get("id"),
@@ -319,7 +531,7 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
         "url": result.final_url or requested_url,
         "normalized_url": result.final_url or requested_url,
         "title": title,
-        "raw_text": result.text[:MAX_STORED_TEXT_CHARS],
+        "raw_text": raw_text[:MAX_STORED_TEXT_CHARS],
         "clean_text": clean_text[:MAX_STORED_TEXT_CHARS],
         "content_hash": content_hash(result, clean_text),
         "http_status": result.status_code,
@@ -332,6 +544,8 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
             "url_kind": row.get("url_kind"),
             "content_type": result.content_type,
             "error": result.error,
+            "error_class": result.error_class,
+            "fetch": fetch_evidence,
             "discovery_sources": row.get("discovery_sources") or [],
         },
     }
@@ -350,12 +564,13 @@ async def fetch_and_classify(row: dict[str, Any], http: CachedHttpClient) -> dic
         "job_title": classification.job_title,
         "role_titles": classification.role_titles,
         "job_count": len(classification.role_titles),
-        "evidence": classification.evidence,
+        "evidence": {**classification.evidence, "fetch": fetch_evidence},
         "classified_at": fetched_at.isoformat(),
         "raw_json": {
             "requested_url": requested_url,
             "url_kind": row.get("url_kind"),
             "source_key": source_key,
+            "fetch": fetch_evidence,
         },
     }
     return {
@@ -377,7 +592,7 @@ def classify_page(
     path = parsed.path.lower()
     normalized_text = text.lower()
     roles = extract_role_titles(title, text, url)
-    is_ats = any(ats_domain in domain for ats_domain in ATS_DOMAINS)
+    is_ats = is_ats_domain(domain)
     generic_path = is_generic_career_path(path)
     role_like_path = is_role_like_path(path)
     listing_hits = marker_hits(normalized_text, LISTING_MARKERS)
@@ -579,6 +794,11 @@ def clean_domain(domain: str) -> str:
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def strip_nul_bytes(value: str) -> str:
+    # Postgres text/jsonb columns reject NUL (0x00) bytes.
+    return (value or "").replace("\x00", "")
 
 
 def dedupe(values: list[str]) -> list[str]:

@@ -64,11 +64,21 @@ class Settings(BaseSettings):
 
     @property
     def career_url_discovery_cache_path(self) -> Path:
+        """Retained read-only compatibility source for the old monolithic cache."""
         return self.local_dir / "cache" / "career_url_discovery.json"
 
     @property
+    def career_url_discovery_cache_dir(self) -> Path:
+        return self.local_dir / "cache" / "career_url_discovery"
+
+    @property
     def page_fetch_cache_path(self) -> Path:
+        """Retained read-only compatibility source for the old monolithic cache."""
         return self.local_dir / "cache" / "page_fetches.json"
+
+    @property
+    def page_fetch_cache_dir(self) -> Path:
+        return self.local_dir / "cache" / "page_fetches"
 
     @property
     def resume_path(self) -> Path:

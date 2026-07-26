@@ -6,20 +6,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 from yc_radar.adapters.greenhouse import GreenhouseAdapter
 from yc_radar.domain.job_sources import SyncResult
 from yc_radar.services.database import create_schema, engine_from_url
 from yc_radar.services.job_repository import JobRepository
 from yc_radar.services.job_sync_service import JobSyncService, RunKeyReuseError
+from yc_radar.services.run_status import stage_finished, stage_started, write_status
 from yc_radar.services.source_discovery import discover_greenhouse_sources
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover or sync read-only public job sources.")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("discover-greenhouse", help="Register Greenhouse boards from career pages.")
+    discover = subcommands.add_parser("discover-greenhouse", help="Register Greenhouse boards from career pages.")
+    discover.add_argument("--status-file", type=str, help="Atomic local stage-status JSON output.")
     sync = subcommands.add_parser("sync", help="Fetch and apply configured sources.")
+    sync.add_argument("--status-file", type=str, help="Atomic local stage-status JSON output.")
     sync.add_argument("--provider", default="greenhouse", choices=("greenhouse",))
     sync.add_argument("--company-id", type=int)
     sync.add_argument("--limit", type=int)
@@ -35,31 +39,63 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    engine = engine_from_url()
-    create_schema(engine)
-    if args.command == "discover-greenhouse":
-        result = discover_greenhouse_sources(engine)
+    status_file = Path(args.status_file) if getattr(args, "status_file", None) else None
+    stage_name = "ats_registration" if args.command == "discover-greenhouse" else "ats_sync"
+    status = stage_started(stage_name)
+    write_status(status_file, status)
+    try:
+        engine = engine_from_url()
+        create_schema(engine)
+        if args.command == "discover-greenhouse":
+            result = discover_greenhouse_sources(engine)
+            print(
+                f"Registered {result['registered']} new Greenhouse sources; "
+                f"already registered {result['existing']}; skipped {result['skipped']}; "
+                f"conflicts {len(result['conflicts'])}."
+            )
+            for conflict in result["conflicts"]:
+                print(f"Conflict: {conflict}")
+            write_status(
+                status_file,
+                stage_finished(
+                    status,
+                    state="completed",
+                    selected=result["registered"] + result["existing"] + result["skipped"],
+                    processed=result["registered"] + result["existing"] + result["skipped"],
+                    succeeded=result["registered"] + result["existing"],
+                    failed=0,
+                    conflicts=len(result["conflicts"]),
+                ),
+            )
+            return
+        results = asyncio.run(sync_sources(engine, args))
+        unsuccessful = [result for result in results if result.status != "completed"]
         print(
-            f"Registered {result['registered']} new Greenhouse sources; "
-            f"already registered {result['existing']}; skipped {result['skipped']}; "
-            f"conflicts {len(result['conflicts'])}."
+            f"Processed {len(results)} {args.provider} sources; "
+            f"non-completed runs: {len(unsuccessful)}."
         )
-        for conflict in result["conflicts"]:
-            print(f"Conflict: {conflict}")
-        return
-    results = asyncio.run(sync_sources(engine, args))
-    unsuccessful = [result for result in results if result.status != "completed"]
-    print(
-        f"Processed {len(results)} {args.provider} sources; "
-        f"non-completed runs: {len(unsuccessful)}."
-    )
-    for result in results:
-        print(
-            f"source={result.career_source_id} status={result.status} "
-            f"added={result.jobs_added} updated={result.jobs_updated} closed={result.jobs_closed}"
+        for result in results:
+            print(
+                f"source={result.career_source_id} status={result.status} "
+                f"added={result.jobs_added} updated={result.jobs_updated} closed={result.jobs_closed}"
+            )
+        write_status(
+            status_file,
+            stage_finished(
+                status,
+                state="completed" if not unsuccessful else "partial",
+                selected=len(results),
+                processed=len(results),
+                succeeded=len(results) - len(unsuccessful),
+                failed=len(unsuccessful),
+                source_run_statuses={result.status: sum(item.status == result.status for item in results) for result in results},
+            ),
         )
-    if unsuccessful:
-        raise SystemExit(1)
+        if unsuccessful:
+            raise SystemExit(1)
+    except Exception as exc:
+        write_status(status_file, stage_finished(status, state="failed", error=exc))
+        raise
 
 
 async def sync_sources(

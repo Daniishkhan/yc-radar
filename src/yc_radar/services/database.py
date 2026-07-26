@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -25,6 +27,8 @@ from sqlalchemy import (
     create_engine,
     delete,
     func,
+    cast,
+    literal,
     inspect,
     select,
     text,
@@ -33,10 +37,12 @@ from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, insert as pg_insert
 from sqlalchemy.engine import Engine, make_url
 
 from yc_radar.core.config import get_settings
+from yc_radar.services.url_quality import canonical_url_key
 
 metadata = MetaData()
 BATCH_SIZE = 100
 EMBEDDING_DIMENSIONS = 1536
+URL_INVENTORY_ADVISORY_LOCK = "yc_radar_url_cleanup_v1"
 
 companies_table = Table(
     "companies",
@@ -550,6 +556,34 @@ def engine_from_url(database_url: str | None = None) -> Engine:
     return create_engine(parsed, future=True, pool_pre_ping=True)
 
 
+@contextmanager
+def url_inventory_writer_lock(engine: Engine) -> Iterator[None]:
+    """Prevent a cleanup apply from racing a discovery/classification writer.
+
+    Pipeline stages retain a shared session lock while they read or mutate URL
+    inventory. Cleanup's exclusive session lock fails fast while either writer is
+    running. Lightweight test doubles do not expose a SQLAlchemy Engine and are
+    intentionally left lock-free.
+    """
+    if not isinstance(engine, Engine):
+        yield
+        return
+    with engine.connect() as connection:
+        locked = connection.scalar(
+            text("SELECT pg_try_advisory_lock_shared(hashtext(:lock_name))"),
+            {"lock_name": URL_INVENTORY_ADVISORY_LOCK},
+        )
+        if not locked:
+            raise RuntimeError("URL cleanup apply is active; retry the pipeline stage later")
+        try:
+            yield
+        finally:
+            connection.execute(
+                text("SELECT pg_advisory_unlock_shared(hashtext(:lock_name))"),
+                {"lock_name": URL_INVENTORY_ADVISORY_LOCK},
+            )
+
+
 def create_schema(engine: Engine, *, checkfirst: bool = True) -> None:
     """Compatibility entry point backed by Alembic, the sole schema authority."""
     del checkfirst
@@ -622,11 +656,18 @@ def upsert_source_documents(engine: Engine, documents: list[dict[str, Any]]) -> 
     create_schema(engine)
     if not documents:
         return
-    rows = [_source_document_row(document) for document in documents]
-    _upsert_rows(
-        engine,
+    with engine.begin() as connection:
+        upsert_source_documents_connection(connection, documents)
+
+
+def upsert_source_documents_connection(connection: Any, documents: list[dict[str, Any]]) -> None:
+    """Upsert source documents into an existing transaction."""
+    if not documents:
+        return
+    _upsert_rows_connection(
+        connection,
         source_documents_table,
-        rows,
+        [_source_document_row(document) for document in documents],
         index_elements=["source_type", "source_key"],
     )
 
@@ -635,11 +676,18 @@ def upsert_page_classifications(engine: Engine, classifications: list[dict[str, 
     create_schema(engine)
     if not classifications:
         return
-    rows = [_page_classification_row(classification) for classification in classifications]
-    _upsert_rows(
-        engine,
+    with engine.begin() as connection:
+        upsert_page_classifications_connection(connection, classifications)
+
+
+def upsert_page_classifications_connection(connection: Any, classifications: list[dict[str, Any]]) -> None:
+    """Upsert classifications into an existing transaction."""
+    if not classifications:
+        return
+    _upsert_rows_connection(
+        connection,
         page_classifications_table,
-        rows,
+        [_page_classification_row(classification) for classification in classifications],
         index_elements=["source_document_id", "parser_name"],
     )
 
@@ -648,11 +696,18 @@ def upsert_external_job_postings(engine: Engine, jobs: list[dict[str, Any]]) -> 
     create_schema(engine)
     if not jobs:
         return
-    rows = [_external_job_row(job) for job in jobs]
-    _upsert_rows(
-        engine,
+    with engine.begin() as connection:
+        upsert_external_job_postings_connection(connection, jobs)
+
+
+def upsert_external_job_postings_connection(connection: Any, jobs: list[dict[str, Any]]) -> None:
+    """Upsert derived URL jobs into an existing transaction."""
+    if not jobs:
+        return
+    _upsert_rows_connection(
+        connection,
         external_job_postings_table,
-        rows,
+        [_external_job_row(job) for job in jobs],
         index_elements=["source", "normalized_url"],
     )
 
@@ -664,9 +719,19 @@ def upsert_career_page_discovery_statuses(
     create_schema(engine)
     if not statuses:
         return
+    with engine.begin() as connection:
+        upsert_career_page_discovery_statuses_connection(connection, statuses)
+
+
+def upsert_career_page_discovery_statuses_connection(
+    connection: Any,
+    statuses: list[dict[str, Any]],
+) -> None:
+    if not statuses:
+        return
     rows = [_career_page_discovery_status_row(status) for status in statuses]
-    _upsert_rows(
-        engine,
+    _upsert_rows_connection(
+        connection,
         career_page_discovery_statuses_table,
         rows,
         index_elements=["company_slug"],
@@ -679,6 +744,7 @@ def replace_career_page_data(
     career_pages: list[dict[str, Any]],
     *,
     company_slugs: list[str] | None = None,
+    statuses: list[dict[str, Any]] | None = None,
 ) -> None:
     create_schema(engine)
     with engine.begin() as connection:
@@ -733,6 +799,8 @@ def replace_career_page_data(
                         set_=update_columns,
                     )
                 )
+        if statuses:
+            upsert_career_page_discovery_statuses_connection(connection, statuses)
 
 
 def drop_legacy_career_surfaces_table(engine: Engine) -> None:
@@ -773,10 +841,24 @@ def fetch_company_row(engine: Engine, slug: str) -> dict[str, Any] | None:
 
 
 def fetch_companies_for_discovery(
-    engine: Engine, *, limit: int | None = None
+    engine: Engine,
+    *,
+    limit: int | None = None,
+    company_slugs: list[str] | None = None,
+    only_pending: bool = False,
 ) -> list[dict[str, Any]]:
+    """Select discovery candidates, applying completed-status exclusion before LIMIT."""
     create_schema(engine)
-    statement = select(companies_table).order_by(companies_table.c.slug)
+    statement = select(companies_table)
+    if company_slugs:
+        statement = statement.where(companies_table.c.slug.in_(company_slugs))
+    if only_pending:
+        completed = select(career_page_discovery_statuses_table.c.id).where(
+            career_page_discovery_statuses_table.c.company_slug == companies_table.c.slug,
+            career_page_discovery_statuses_table.c.status == "completed",
+        )
+        statement = statement.where(~completed.exists())
+    statement = statement.order_by(companies_table.c.slug)
     if limit is not None:
         statement = statement.limit(limit)
     with engine.connect() as connection:
@@ -828,16 +910,44 @@ def fetch_discovered_url_rows(
     company_slugs: list[str] | None = None,
     limit: int | None = None,
     only_unclassified: bool = False,
+    retry_fetch_errors: bool = False,
+    max_fetch_attempts: int = 3,
 ) -> list[dict[str, Any]]:
+    """Return active URL work after its mode-specific eligibility predicate.
+
+    Retry eligibility is intentionally explicit: only classifications that recorded a
+    retryable fetch policy are considered, and the attempt budget is enforced in SQL.
+    """
     create_schema(engine)
     statement = select(discovered_urls_table).where(discovered_urls_table.c.is_active.is_(True))
     if company_slugs:
         statement = statement.where(discovered_urls_table.c.company_slug.in_(company_slugs))
-    if only_unclassified:
+    if retry_fetch_errors:
+        fetch_data = page_classifications_table.c.evidence["fetch"]
+        retryable = fetch_data["retryable"].astext == "true"
+        attempts = cast(fetch_data["attempt_count"].astext, Integer)
+        eligible = select(page_classifications_table.c.id).where(
+            page_classifications_table.c.discovered_url_id == discovered_urls_table.c.id,
+            page_classifications_table.c.page_kind == "fetch_error",
+            retryable,
+            attempts < max(1, max_fetch_attempts),
+        )
+        attempt_count = (
+            select(attempts)
+            .where(page_classifications_table.c.discovered_url_id == discovered_urls_table.c.id)
+            .order_by(page_classifications_table.c.classified_at.desc())
+            .limit(1)
+            .scalar_subquery()
+            .label("fetch_attempt_count")
+        )
+        statement = statement.add_columns(attempt_count).where(eligible.exists())
+    elif only_unclassified:
         classified = select(page_classifications_table.c.id).where(
             page_classifications_table.c.discovered_url_id == discovered_urls_table.c.id
         )
         statement = statement.where(~classified.exists())
+    else:
+        statement = statement.add_columns(literal(0).label("fetch_attempt_count"))
     statement = statement.order_by(
         discovered_urls_table.c.fetch_priority.desc(),
         discovered_urls_table.c.confidence.desc(),
@@ -858,14 +968,28 @@ def fetch_source_document_rows(
     source_keys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     create_schema(engine)
+    with engine.connect() as connection:
+        return fetch_source_document_rows_connection(
+            connection,
+            source_type=source_type,
+            source_keys=source_keys,
+        )
+
+
+def fetch_source_document_rows_connection(
+    connection: Any,
+    *,
+    source_type: str | None = None,
+    source_keys: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read source documents through an existing transaction."""
     statement = select(source_documents_table)
     if source_type:
         statement = statement.where(source_documents_table.c.source_type == source_type)
     if source_keys:
         statement = statement.where(source_documents_table.c.source_key.in_(source_keys))
     statement = statement.order_by(source_documents_table.c.company_slug, source_documents_table.c.id)
-    with engine.connect() as connection:
-        rows = connection.execute(statement).mappings().all()
+    rows = connection.execute(statement).mappings().all()
     return [dict(row) for row in rows]
 
 
@@ -922,15 +1046,25 @@ def _upsert_rows(
     index_elements: list[str],
 ) -> None:
     with engine.begin() as connection:
-        for chunk in _chunks(rows, BATCH_SIZE):
-            statement = pg_insert(table).values(chunk)
-            update_columns = _upsert_update_columns(statement, table)
-            connection.execute(
-                statement.on_conflict_do_update(
-                    index_elements=index_elements,
-                    set_=update_columns,
-                )
+        _upsert_rows_connection(connection, table, rows, index_elements=index_elements)
+
+
+def _upsert_rows_connection(
+    connection: Any,
+    table: Table,
+    rows: list[dict[str, Any]],
+    *,
+    index_elements: list[str],
+) -> None:
+    for chunk in _chunks(rows, BATCH_SIZE):
+        statement = pg_insert(table).values(chunk)
+        update_columns = _upsert_update_columns(statement, table)
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=index_elements,
+                set_=update_columns,
             )
+        )
 
 
 def _upsert_update_columns(statement: Any, table: Table) -> dict[str, Any]:
@@ -1233,10 +1367,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _url_dedupe_key(url: str) -> str:
-    parsed = urlparse(url or "")
-    domain = parsed.netloc.lower().removeprefix("www.")
-    path = parsed.path.rstrip("/") or "/"
-    return urlunparse(("https", domain, path, "", parsed.query, ""))
+    return canonical_url_key(url) or url
 
 
 def _chunks(rows: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:

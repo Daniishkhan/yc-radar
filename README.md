@@ -261,8 +261,8 @@ uv run python scripts/extract_yc_companies.py --write-raw-json
 
 Current checked-in snapshot:
 
-- 5,880 YC companies
-- 4,833 YC job postings
+- 6,080 YC companies
+- 5,343 YC job postings
 
 ## Discover Career Pages
 
@@ -322,7 +322,17 @@ uv run python scripts/discover_career_urls.py --concurrency 10
 ```
 
 Discovery runs checkpoint after each batch, so rerunning the same command skips companies already
-marked completed. Use `--force` to reprocess the selected companies.
+marked completed. `--limit N` is applied after completed companies are excluded. Use `--force` to
+reprocess selected companies and bypass cached responses. A failed homepage request (including HTTP
+errors, redirect loops, and transport errors) records a failed checkpoint without deleting prior
+events, pages, or URL inventory. A no-pending rerun preserves existing snapshot files.
+
+HTTP cache entries now live under `data/local/cache/career_url_discovery/` and
+`data/local/cache/page_fetches/`. They are per-URL metadata plus content-addressed bodies written
+atomically. On the first cache miss, each previous `*.json` file is streamed once into the new
+cache with bounded memory; a file-revision marker prevents repeated full scans. Legacy files remain
+read-only and are never deleted automatically. Use `--cache-dir` and `--legacy-cache-path` to
+override them.
 
 ## Classify Discovered Pages
 
@@ -341,6 +351,19 @@ It writes:
 - `external_job_postings` for pages classified as `job_detail`
 - `data/snapshots/page_classifications.csv`
 
+A normal classification run selects only unclassified active URLs. Fetch failures are deliberately
+not retried implicitly: request errors and HTTP 408/425/429/5xx are recorded as retryable, while
+redirect loops, deterministic 4xx responses, and exhausted budgets are terminal. Retry only the
+eligible bounded set explicitly:
+
+```bash
+uv run python scripts/classify_discovered_urls.py --retry-fetch-errors --max-fetch-attempts 3 --limit 50
+```
+
+`--force` reclassifies all active rows and bypasses cache/retry-budget restrictions. Both discovery
+and classification can write atomic local `--status-file` artifacts containing selected/processed
+counts, cache metrics, and error classes.
+
 Current checked-in classification smoke:
 
 - 73 source documents fetched
@@ -349,6 +372,43 @@ Current checked-in classification smoke:
 - 9 individual job detail pages
 - 3 ATS listing pages
 - 3 fetch errors
+
+## Independent Pipeline Branches and URL Cleanup
+
+Known Greenhouse registration/sync does not depend on bulk URL classification. Run the stages
+independently, or use the local branch runner after discovery:
+
+```bash
+uv run python scripts/run_pipeline.py --discovery-limit 100 --classification-limit 50 --sync-limit 5
+```
+
+The runner starts classification and the `discover-greenhouse -> sync` branch independently. Its
+ignored status files under `data/local/runs/` preserve child raw return codes and map SIGKILL to 137
+and SIGTERM to 143 instead of reporting a generic `1`. Complete provider snapshots still apply the
+canonical lifecycle atomically; failed or partial source scans do not change misses or closures.
+
+URL cleanup is audit-first and must never run concurrently with discovery, classification, or ATS
+registration. It never deletes raw `career_page_discovery_events`; duplicate queue rows are
+deactivated and linked fetched rows remain referenced. It also canonicalizes safe host/query
+variants across career pages, active queue rows, and registered source URLs. Review the generated
+ignored artifacts before the guarded apply:
+
+```bash
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+audit=data/local/debug/url-cleanup/$stamp
+uv run python scripts/cleanup_url_inventory.py --audit-dir "$audit"
+# Review manifest.json, before-counts.json, actions.csv, and actions.jsonl.
+uv run python scripts/cleanup_url_inventory.py --apply --audit-dir "$audit"
+uv run python scripts/cleanup_url_inventory.py --audit-dir "${audit}-post"
+```
+
+`--apply` refuses a missing/stale manifest or changed ordered `actions.jsonl` digest, takes an
+exclusive database advisory lock while discovery, classification, and ATS registration hold a
+shared writer lock, writes complete before-images plus `backup-manifest.json`, uses one transaction,
+verifies raw-event/provider lifecycle and active-primary invariants, and refuses page deletion if a
+`career_sources.discovered_from_url` reference remains. The built-in policy is intentionally
+narrow: canonical query variants plus audited vendor navigation, third-party sitemap fanout, and
+confirmed cross-company redirects; it retains valid company ATS boards and generic career listings.
 
 ## Candidate Profile
 

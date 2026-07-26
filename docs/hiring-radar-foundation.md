@@ -75,6 +75,26 @@ source observation does not change Firecrawl's separate `verified_hiring_status`
 export contains public company/job provenance only; it does not read or emit resume, profile, or
 contact data from ignored `data/local/` paths.
 
+Discovery is the shared prerequisite, but URL classification is not a prerequisite for registering
+or syncing known Greenhouse boards. `uv run python scripts/run_pipeline.py` launches
+classification beside the sequential `discover-greenhouse -> sync` branch and writes ignored local
+stage artifacts with raw child return codes/signals. It does not alter the complete-snapshot
+transaction boundary above.
+
+The URL-inventory cleanup is intentionally separate and dry-run by default:
+
+```bash
+uv run python scripts/cleanup_url_inventory.py --audit-dir data/local/debug/url-cleanup/<timestamp>
+# Review the manifest and actions, then explicitly apply the same reviewed directory.
+uv run python scripts/cleanup_url_inventory.py --apply --audit-dir data/local/debug/url-cleanup/<timestamp>
+```
+
+The apply path takes an exclusive Postgres advisory lock while discovery, classification, and ATS
+registration hold a shared writer lock, binds apply to the reviewed ordered action digest, writes
+complete before-images and a backup digest under ignored `data/local/debug`, canonicalizes safe URL
+variants, deactivates queue losers rather than deleting them, and never deletes raw discovery
+events.
+
 ## Deferred roadmap
 
 Additional ATS adapters, non-YC company onboarding, remote eligibility evidence, hiring-intent

@@ -26,7 +26,15 @@ class GreenhouseAdapter:
 
     provider = "greenhouse"
     adapter_version = "1"
-    user_agent = "yc-radar/0.1 (+local-hiring-research; read-only)"
+    user_agent = (
+        "yc-radar/0.2 "
+        "(+https://github.com/Daniishkhan/yc-radar; read-only research)"
+    )
+    request_headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.8",
+    }
 
     def __init__(
         self,
@@ -79,7 +87,7 @@ class GreenhouseAdapter:
         own_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(self._timeout_seconds),
-            headers={"User-Agent": self.user_agent},
+            headers=self.request_headers,
             follow_redirects=False,
         )
         try:
@@ -104,7 +112,7 @@ class GreenhouseAdapter:
                 response = await client.get(
                     url,
                     params={"content": "true"},
-                    headers={"User-Agent": self.user_agent},
+                    headers=self.request_headers,
                 )
             except httpx.TransportError as exc:
                 transport_error = exc

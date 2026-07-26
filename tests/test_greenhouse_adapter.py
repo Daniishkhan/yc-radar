@@ -90,6 +90,8 @@ def test_adapter_uses_read_only_public_get_and_retries_rate_limits() -> None:
     assert all(request.method == "GET" for request in requests)
     assert str(requests[0].url) == "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true"
     assert requests[0].headers["user-agent"] == GreenhouseAdapter.user_agent
+    assert requests[0].headers["accept"] == "application/json"
+    assert requests[0].headers["accept-language"] == "en-US,en;q=0.8"
     assert sleeps == [1.0]
 
 

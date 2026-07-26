@@ -35,6 +35,10 @@ API_KEY = (
 INDEX_NAME = "YCCompany_production"
 ENDPOINT = f"https://{APP_ID.lower()}-dsn.algolia.net/1/indexes/*/queries"
 COMPANY_PAGE_CONCURRENCY = 8
+USER_AGENT = "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; read-only research)"
+JSON_ACCEPT = "application/json"
+HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+ACCEPT_LANGUAGE = "en-US,en;q=0.8"
 
 
 CSV_FIELDS = [
@@ -118,6 +122,12 @@ def algolia_query(
             "-H",
             "Content-Type: application/json",
             "-H",
+            f"Accept: {JSON_ACCEPT}",
+            "-H",
+            f"Accept-Language: {ACCEPT_LANGUAGE}",
+            "-H",
+            f"User-Agent: {USER_AGENT}",
+            "-H",
             f"X-Algolia-Application-Id: {APP_ID}",
             "-H",
             f"X-Algolia-API-Key: {API_KEY}",
@@ -164,9 +174,11 @@ def fetch_company_page(slug: str) -> str:
             "--compressed",
             f"https://www.ycombinator.com/companies/{slug}",
             "-H",
-            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            f"Accept: {HTML_ACCEPT}",
             "-H",
-            "User-Agent: Mozilla/5.0 yc-radar-export/0.1",
+            f"Accept-Language: {ACCEPT_LANGUAGE}",
+            "-H",
+            f"User-Agent: {USER_AGENT}",
         ],
         text=True,
         capture_output=True,

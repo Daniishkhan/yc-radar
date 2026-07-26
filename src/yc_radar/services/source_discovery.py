@@ -6,12 +6,17 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from yc_radar.adapters.greenhouse import GreenhouseAdapter
-from yc_radar.services.database import fetch_company_career_page_rows
+from yc_radar.services.database import fetch_company_career_page_rows, url_inventory_writer_lock
 from yc_radar.services.job_repository import JobRepository
 
 
 def discover_greenhouse_sources(engine: Engine) -> dict[str, Any]:
-    """Register public Greenhouse board identities from existing career-page evidence."""
+    """Register boards while cleanup cannot invalidate their provenance pages."""
+    with url_inventory_writer_lock(engine):
+        return _discover_greenhouse_sources_locked(engine)
+
+
+def _discover_greenhouse_sources_locked(engine: Engine) -> dict[str, Any]:
     adapter = GreenhouseAdapter()
     repository = JobRepository(engine)
     now = datetime.now(UTC)
