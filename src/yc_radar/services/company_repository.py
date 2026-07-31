@@ -13,7 +13,7 @@ def _company_from_db_row(row: dict[str, Any]) -> Company:
         id=row.get("id"),
         name=row.get("name", ""),
         slug=row.get("slug", ""),
-        yc_url=row.get("yc_url") or f"https://www.ycombinator.com/companies/{row.get('slug', '')}",
+        yc_url=row.get("yc_url"),
         website=row.get("website"),
         one_liner=row.get("one_liner"),
         batch=row.get("batch"),
@@ -72,7 +72,7 @@ class CompanyRepository:
             companies = [
                 company
                 for company in companies
-                if company.team_size is not None and company.team_size <= max_team_size
+                if company.team_size is None or company.team_size <= max_team_size
             ]
         if terms:
             companies = [

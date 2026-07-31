@@ -10,8 +10,8 @@ from yc_radar.services.database import (
     fetch_source_document_rows,
     fetch_yc_job_rows,
     replace_career_page_data,
-    upsert_companies,
     upsert_career_page_discovery_statuses,
+    upsert_yc_companies,
     upsert_page_classifications,
     upsert_source_documents,
     upsert_yc_job_postings,
@@ -42,7 +42,7 @@ def test_postgres_schema_includes_document_intelligence_tables(
 def test_company_repository_reads_from_postgres(postgres_database_url: str) -> None:
     database_url = postgres_database_url
     engine = engine_from_url(database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {
@@ -122,8 +122,6 @@ def test_replace_career_page_data_separates_raw_events_from_canonical_pages(
                 "company_slug": "example",
                 "company_name": "Example",
                 "website": "https://example.com",
-                "yc_is_hiring": True,
-                "yc_job_count": 2,
                 "url": "https://www.ycombinator.com/companies/example/jobs/abc",
                 "normalized_url": "https://www.ycombinator.com/companies/example/jobs/abc",
                 "page_type": "yc_job",
@@ -136,8 +134,6 @@ def test_replace_career_page_data_separates_raw_events_from_canonical_pages(
                 "company_slug": "example",
                 "company_name": "Example",
                 "website": "https://example.com",
-                "yc_is_hiring": True,
-                "yc_job_count": 2,
                 "url": "https://example.com/careers",
                 "normalized_url": "https://example.com/careers",
                 "page_type": "careers_page",
@@ -153,8 +149,6 @@ def test_replace_career_page_data_separates_raw_events_from_canonical_pages(
                 "company_slug": "example",
                 "company_name": "Example",
                 "website": "https://example.com",
-                "yc_is_hiring": True,
-                "yc_job_count": 2,
                 "career_page_url": "https://example.com/careers",
                 "normalized_url": "https://example.com/careers",
                 "page_type": "careers_page",
@@ -266,7 +260,7 @@ def test_pending_discovery_limit_is_applied_after_completed_rows_are_excluded(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {"id": 1, "name": "Done", "slug": "a-done", "regions": [], "industries": [], "tags": []},

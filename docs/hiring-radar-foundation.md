@@ -1,15 +1,24 @@
 # Source-neutral hiring-radar foundation
 
-YC Radar remains a local, script-first workbench. YC supplies the initial company registry and raw
-YC job evidence; it does not define canonical job identity. The first source-neutral vertical slice
-adds public Greenhouse boards without a server, queue, browser, Firecrawl, or application flow.
+YC Radar remains a local, script-first workbench. Companies are standalone local entities. YC is an
+optional company-directory registry and raw job evidence source; it neither seeds nor gates career
+discovery. Independent job-source adapters currently support public Greenhouse and Ashby boards
+without a server, queue, browser, Firecrawl, or application flow.
 
 ## Source truth and lifecycle
 
-`company_career_pages` and `discovered_urls` are URL evidence. Greenhouse discovery extracts a
-validated public board token and registers one `career_sources` row per provider/token. The stable
-canonical job key is `(provider, career_source_id, external_job_id)`. URLs remain mutable public
-attributes and are never identity.
+`companies` is the source-neutral employer registry and does not require a source row.
+`company_sources` maps optional company-directory identities to employers, while
+`yc_company_profiles` stores YC-only values. `career_sources` independently stores public ATS/feed
+boards. Greenhouse and Ashby IDs belong only in `career_sources`; they are not company-directory
+identities. Exact primary-domain plus normalized-name matches may reuse an employer, and ambiguous
+name/domain evidence stops rather than merging.
+
+`company_career_pages` and `discovered_urls` are URL evidence. The provider registry detects a
+supported board, extracts its stable external source ID, and registers one `career_sources` row per
+provider/source pair. The stable canonical job key is
+`(provider, career_source_id, external_job_id)`. URLs remain mutable public attributes and are never
+identity.
 
 A `source_sync_runs` row is committed as `running` before every fetch, so an interrupted request
 remains auditable. Only an HTTP-200, valid complete board snapshot is applied. It creates/updates
@@ -34,13 +43,21 @@ Current jobs retain source published/updated timestamps plus first/last seen, la
 content hash, misses, and closed time. Existing YC tables and URL-derived `external_job_postings`
 remain source-specific/raw workflows and are intentionally not backfilled into canonical jobs.
 
-## Greenhouse boundary
+## Provider boundaries
 
-The supported adapter performs read-only GET requests to
-`https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`. It uses a clear local
-user agent, 15-second bounded httpx timeout, and at most three retry backoffs for 429, 5xx, and
-transient transport errors. It does not use credentials, submit applications, crawl broadly, or
-infer remote/visa eligibility. Tests mock all network responses.
+The Greenhouse adapter performs read-only GET requests to
+`https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`. It uses a transparent
+project user-agent, requests JSON explicitly, fetches boards sequentially with a one-second default
+inter-source delay, honors `Retry-After`, and uses a 15-second bounded timeout with at most three
+retry backoffs for 429, 5xx, and transient transport errors. It does not impersonate a browser, use
+credentials, submit applications, crawl broadly, or infer remote/visa eligibility. Tests mock all
+network responses.
+
+The Ashby adapter performs read-only GET requests to the documented
+[public lightweight endpoint](https://developers.ashbyhq.com/docs/public-job-posting-api) at
+`https://api.ashbyhq.com/posting-api/job-board/{job_board_name}`. It requests public compensation
+data, stores it in the immutable raw payload, and excludes jobs whose public `isListed` flag is
+false. It follows the same pacing, retry, completeness, and no-application rules as Greenhouse.
 
 ## Operations
 
@@ -49,11 +66,23 @@ Fresh database:
 ```bash
 uv sync --extra dev
 docker compose up -d postgres
-uv run alembic upgrade head
+uv run alembic upgrade head  # includes independent company and job-source registries
 uv run python scripts/load_snapshots.py
-uv run python scripts/sync_job_sources.py discover-greenhouse
-uv run python scripts/sync_job_sources.py sync --provider greenhouse --limit 5
+uv run python scripts/sync_job_sources.py discover
+uv run python scripts/sync_job_sources.py sync --limit 5 --delay-seconds 2
 uv run python scripts/generate_job_opportunities.py --limit 50
+```
+
+Standalone company plus independent job-source registration:
+
+```bash
+uv run python scripts/register_company.py \
+  --name "Example, Inc." \
+  --website https://example.com
+
+uv run python scripts/register_job_source.py \
+  --company-slug example-inc \
+  --source-url https://job-boards.greenhouse.io/example
 ```
 
 Existing populated legacy schema:
@@ -67,8 +96,10 @@ uv run alembic current
 ```
 
 Never stamp a legacy database directly to `head`: that would claim the additive source-neutral
-tables exist when they do not. Stop if the verifier reports drift. Destructive migration downgrade
-or reset is only for explicitly confirmed disposable/local data.
+tables exist when they do not. `verify-existing` accepts only the exact unversioned 0001 baseline;
+older, partial, and source-neutral unversioned schemas must not be stamped. Stop if the verifier
+reports drift. Destructive migration downgrade or reset is only for explicitly confirmed
+disposable/local data.
 
 Weekly targets include active canonical job role evidence and public provenance, but canonical
 source observation does not change Firecrawl's separate `verified_hiring_status`. The job-first
@@ -77,7 +108,7 @@ contact data from ignored `data/local/` paths.
 
 Discovery is the shared prerequisite, but URL classification is not a prerequisite for registering
 or syncing known Greenhouse boards. `uv run python scripts/run_pipeline.py` launches
-classification beside the sequential `discover-greenhouse -> sync` branch and writes ignored local
+classification beside the sequential all-provider `discover -> sync` branch and writes ignored local
 stage artifacts with raw child return codes/signals. It does not alter the complete-snapshot
 transaction boundary above.
 
@@ -97,6 +128,6 @@ events.
 
 ## Deferred roadmap
 
-Additional ATS adapters, non-YC company onboarding, remote eligibility evidence, hiring-intent
-signals, VC/company sources, alerting, multi-worker scheduling, reconciliation with URL-derived
+ATS adapters beyond Greenhouse and Ashby, remote eligibility evidence, hiring-intent signals,
+additional company registries, alerting, multi-worker scheduling, reconciliation with URL-derived
 external jobs, and any public product/API are intentionally deferred.

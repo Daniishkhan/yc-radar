@@ -5,7 +5,7 @@ from pathlib import Path
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import DEFAULT_CANDIDATE_PROFILE, score_company, target_record
-from yc_radar.services.database import engine_from_url, upsert_companies
+from yc_radar.services.database import engine_from_url, upsert_yc_companies
 from yc_radar.services.job_repository import JobRepository
 from yc_radar.services.job_sync_service import JobSyncService
 
@@ -20,7 +20,7 @@ def test_active_canonical_jobs_change_shortlist_role_evidence_with_public_proven
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {

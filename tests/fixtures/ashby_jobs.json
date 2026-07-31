@@ -1,0 +1,36 @@
+{
+  "apiVersion": "1",
+  "jobs": [
+    {
+      "id": "8e0d126f-ef56-4af0-a4f7-b008f3792e66",
+      "title": "Senior Backend Engineer",
+      "location": "San Francisco",
+      "secondaryLocations": [
+        {"location": "Remote - US"}
+      ],
+      "department": "Engineering",
+      "team": "Platform",
+      "isListed": true,
+      "isRemote": true,
+      "workplaceType": "Remote",
+      "descriptionHtml": "<p>Build distributed API systems.</p>",
+      "descriptionPlain": "Build distributed API systems.",
+      "publishedAt": "2026-06-01T12:00:00.000+00:00",
+      "employmentType": "FullTime",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/8e0d126f-ef56-4af0-a4f7-b008f3792e66",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/8e0d126f-ef56-4af0-a4f7-b008f3792e66/application",
+      "compensation": {
+        "compensationTierSummary": "$180K - $220K"
+      }
+    },
+    {
+      "id": "1a812043-5ac8-4736-995a-25a9d9a06af6",
+      "title": "Unlisted Role",
+      "location": "New York",
+      "isListed": false,
+      "descriptionPlain": "Available only by direct link.",
+      "jobUrl": "https://jobs.ashbyhq.com/acme/1a812043-5ac8-4736-995a-25a9d9a06af6",
+      "applyUrl": "https://jobs.ashbyhq.com/acme/1a812043-5ac8-4736-995a-25a9d9a06af6/application"
+    }
+  ]
+}

@@ -6,7 +6,21 @@ from typing import Any
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    Integer,
+    MetaData,
+    String,
+    Text,
+    UniqueConstraint,
+    inspect,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.schema import Column, Index, Table
 
@@ -36,6 +50,102 @@ _BASELINE_VIEW_SQL = """
            checked_at
     FROM company_career_pages WHERE is_primary = true
 """
+
+# Stamping 0001 validates the historical schema, not current runtime metadata. Runtime metadata
+# deliberately moves these YC-only columns to yc_company_profiles in revision 0003.
+_legacy_metadata = MetaData()
+LEGACY_COMPANIES_TABLE = Table(
+    "companies",
+    _legacy_metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String, nullable=False),
+    Column("slug", String, nullable=False),
+    Column("yc_url", String, nullable=False),
+    Column("website", String),
+    Column("one_liner", Text),
+    Column("batch", String),
+    Column("status", String),
+    Column("stage", String),
+    Column("team_size", Integer),
+    Column("is_hiring", Boolean, nullable=False),
+    Column("all_locations", Text),
+    Column("regions", JSONB, nullable=False),
+    Column("industry", String),
+    Column("subindustry", String),
+    Column("industries", JSONB, nullable=False),
+    Column("tags", JSONB, nullable=False),
+    Column("prototype_score", Integer),
+    Column("prototype_angle", Text),
+    Column("raw_json", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_companies_slug", LEGACY_COMPANIES_TABLE.c.slug, unique=True)
+
+LEGACY_CAREER_DISCOVERY_EVENTS_TABLE = Table(
+    "career_page_discovery_events",
+    _legacy_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("company_id", Integer),
+    Column("company_slug", String, nullable=False),
+    Column("company_name", String, nullable=False),
+    Column("website", String),
+    Column("yc_is_hiring", Boolean, nullable=False),
+    Column("yc_job_count", Integer, nullable=False),
+    Column("url", Text, nullable=False),
+    Column("normalized_url", Text, nullable=False),
+    Column("page_type", String, nullable=False),
+    Column("discovery_source", String, nullable=False),
+    Column("confidence", Float, nullable=False),
+    Column("http_status", Integer),
+    Column("evidence", Text),
+    Column("checked_at", DateTime(timezone=True), nullable=False),
+    Column("raw_json", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "ix_career_page_discovery_events_company_id",
+    LEGACY_CAREER_DISCOVERY_EVENTS_TABLE.c.company_id,
+)
+Index(
+    "ix_career_page_discovery_events_company_slug",
+    LEGACY_CAREER_DISCOVERY_EVENTS_TABLE.c.company_slug,
+)
+
+LEGACY_COMPANY_CAREER_PAGES_TABLE = Table(
+    "company_career_pages",
+    _legacy_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("company_id", Integer),
+    Column("company_slug", String, nullable=False),
+    Column("company_name", String, nullable=False),
+    Column("website", String),
+    Column("yc_is_hiring", Boolean, nullable=False),
+    Column("yc_job_count", Integer, nullable=False),
+    Column("career_page_url", Text, nullable=False),
+    Column("normalized_url", Text, nullable=False),
+    Column("page_type", String, nullable=False),
+    Column("discovery_source", String, nullable=False),
+    Column("confidence", Float, nullable=False),
+    Column("http_status", Integer),
+    Column("evidence", Text),
+    Column("is_primary", Boolean, nullable=False),
+    Column("observed_source_count", Integer, nullable=False),
+    Column("checked_at", DateTime(timezone=True), nullable=False),
+    Column("raw_json", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("company_slug", "normalized_url", name="uq_company_career_page_url"),
+)
+Index("ix_company_career_pages_company_id", LEGACY_COMPANY_CAREER_PAGES_TABLE.c.company_id)
+Index("ix_company_career_pages_company_slug", LEGACY_COMPANY_CAREER_PAGES_TABLE.c.company_slug)
+
+_BASELINE_TABLE_OVERRIDES = {
+    "companies": LEGACY_COMPANIES_TABLE,
+    "career_page_discovery_events": LEGACY_CAREER_DISCOVERY_EVENTS_TABLE,
+    "company_career_pages": LEGACY_COMPANY_CAREER_PAGES_TABLE,
+}
 
 
 def alembic_config() -> Config:
@@ -274,8 +384,17 @@ def verify_existing_baseline(engine: Engine) -> list[str]:
     actual_tables = set(inspector.get_table_names(schema=schema))
     missing = sorted(BASELINE_TABLES - actual_tables)
     diagnostics = [f"missing table: {name}" for name in missing]
+    unexpected_tables = sorted(actual_tables - BASELINE_TABLES - {"alembic_version"})
+    diagnostics.extend(f"unexpected table: {table_name}" for table_name in unexpected_tables)
+    if "alembic_version" in actual_tables:
+        diagnostics.append("schema is already Alembic-versioned; baseline stamping is not applicable")
+    if "yc_company_profiles" in actual_tables:
+        diagnostics.append(
+            "schema contains yc_company_profiles and is not the known unversioned 0001 baseline"
+        )
     for table_name in sorted(BASELINE_TABLES & actual_tables):
-        diagnostics.extend(_verify_table_contract(engine, metadata.tables[table_name], schema))
+        expected_table = _BASELINE_TABLE_OVERRIDES.get(table_name, metadata.tables[table_name])
+        diagnostics.extend(_verify_table_contract(engine, expected_table, schema))
     with engine.connect() as connection:
         vector_enabled = bool(
             connection.scalar(
@@ -285,6 +404,10 @@ def verify_existing_baseline(engine: Engine) -> list[str]:
     if not vector_enabled:
         diagnostics.append("missing extension: vector")
     views = set(inspector.get_view_names(schema=schema))
+    diagnostics.extend(
+        f"unexpected view: {view_name}"
+        for view_name in sorted(views - {_BASELINE_VIEW})
+    )
     if _BASELINE_VIEW not in views:
         diagnostics.append(f"missing view: {_BASELINE_VIEW}")
     elif _normalize_sql(inspector.get_view_definition(_BASELINE_VIEW, schema=schema)) != _normalize_sql(
@@ -300,12 +423,16 @@ def upgrade_database(engine: Engine, revision: str = "head") -> None:
     table_names = set(inspector.get_table_names(schema=_current_schema(engine)))
     if "alembic_version" not in table_names and BASELINE_TABLES & table_names:
         diagnostics = verify_existing_baseline(engine)
-        detail = "; ".join(diagnostics) if diagnostics else "baseline tables are present"
+        if diagnostics:
+            raise RuntimeError(
+                "Existing unversioned schema does not match the known 0001 baseline; do not stamp it. "
+                "Restore it to a known state or use the explicitly destructive rebuild path. "
+                f"Verification: {'; '.join(diagnostics)}."
+            )
         raise RuntimeError(
-            "Existing unversioned schema detected; do not auto-migrate it. "
+            "Existing unversioned 0001 baseline detected; do not auto-migrate it. "
             "Run `uv run python scripts/migrate_database.py verify-existing`, then "
-            "`uv run alembic stamp 0001_baseline` and `uv run alembic upgrade head`. "
-            f"Verification: {detail}."
+            "`uv run alembic stamp 0001_baseline` and `uv run alembic upgrade head`."
         )
     config = alembic_config()
     config.attributes["connection"] = engine.connect()
@@ -316,15 +443,18 @@ def upgrade_database(engine: Engine, revision: str = "head") -> None:
         connection.close()
 
 
-def _drop_unversioned_legacy_schema(engine: Engine, schema: str) -> None:
-    """Remove only known legacy objects after the caller has confirmed a destructive rebuild."""
+def _drop_managed_schema(engine: Engine, schema: str) -> None:
+    """Remove managed objects after the caller explicitly confirms a destructive rebuild."""
     quoted_schema = engine.dialect.identifier_preparer.quote_schema(schema)
     with engine.begin() as connection:
         connection.execute(text(f"DROP VIEW IF EXISTS {quoted_schema}.{_BASELINE_VIEW}"))
-        for table_name in sorted(BASELINE_TABLES):
+        for table_name in sorted({*metadata.tables, "career_surfaces"}):
             connection.execute(
                 text(f"DROP TABLE IF EXISTS {quoted_schema}.{table_name} CASCADE")
             )
+        connection.execute(
+            text(f"DROP TABLE IF EXISTS {quoted_schema}.alembic_version CASCADE")
+        )
 
 
 def rebuild_database(engine: Engine) -> None:
@@ -332,14 +462,12 @@ def rebuild_database(engine: Engine) -> None:
     schema = _current_schema(engine)
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names(schema=schema))
-    if "alembic_version" not in table_names and BASELINE_TABLES & table_names:
-        _drop_unversioned_legacy_schema(engine, schema)
+    if table_names & ({*metadata.tables, "career_surfaces", "alembic_version"}):
+        _drop_managed_schema(engine, schema)
     config = alembic_config()
     config.attributes["connection"] = engine.connect()
     connection = config.attributes["connection"]
     try:
-        if "alembic_version" in table_names:
-            command.downgrade(config, "base")
         command.upgrade(config, "head")
     finally:
         connection.close()

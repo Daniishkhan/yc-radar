@@ -477,7 +477,7 @@ def score_company(company: Company, profile: dict[str, Any]) -> CandidateScore:
     if score:
         reasons.append(f"Existing prototype score {score}")
 
-    if (company.status or "").lower() == "active":
+    if company.yc_url and (company.status or "").lower() == "active":
         score += 8
         reasons.append("Active YC company")
 
@@ -540,9 +540,12 @@ def rank_companies(
     for company in companies:
         if require_website and not company.website:
             continue
-        if max_team_size is not None:
-            if company.team_size is None or company.team_size > max_team_size:
-                continue
+        if (
+            max_team_size is not None
+            and company.team_size is not None
+            and company.team_size > max_team_size
+        ):
+            continue
         scored.append(score_company(company, profile))
     return sorted(scored, key=lambda item: item.fit_score, reverse=True)
 

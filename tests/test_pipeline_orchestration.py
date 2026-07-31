@@ -32,10 +32,12 @@ def test_process_outcome_preserves_signal_exit_codes() -> None:
 
 def test_ats_branch_runs_when_classification_is_killed(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
+    commands: dict[str, list[str]] = {}
 
     async def fake_run_child(stage: str, command: list[str], status_dir: Path):
-        del command, status_dir
+        del status_dir
         calls.append(stage)
+        commands[stage] = command
         return {"raw_return_code": -9 if stage == "classification" else 0, "shell_exit_code": 137 if stage == "classification" else 0}
 
     monkeypatch.setattr(run_pipeline, "run_child", fake_run_child)
@@ -52,6 +54,9 @@ def test_ats_branch_runs_when_classification_is_killed(monkeypatch, tmp_path: Pa
     assert result == 137
     assert calls[0] == "discovery"
     assert {"ats-registration", "ats-sync", "classification"}.issubset(calls)
+    assert "discover" in commands["ats-registration"]
+    assert "discover-greenhouse" not in commands["ats-registration"]
+    assert "--provider" not in commands["ats-sync"]
 
 
 def test_pipeline_aggregates_zero_exit_partial_stage(monkeypatch, tmp_path: Path) -> None:

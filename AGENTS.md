@@ -1,23 +1,30 @@
 # YC Radar Agent Notes
 
 This repo is a local, script-first hiring-radar workbench. Treat it as a practical pipeline, not
-a web service template. YC is the initial company registry and one raw evidence source, not the
-product boundary. The useful loop is:
+a web service template. Companies are first-class local entities. YC is one optional company
+registry and raw evidence source; it must never gate career discovery or ATS synchronization. The
+useful loop is:
 
-1. Ingest source-specific company/job evidence (currently YC).
-2. Discover public career pages cheaply and deterministically.
-3. Register supported career/ATS sources (currently Greenhouse) and fetch complete snapshots.
-4. Preserve canonical current jobs, immutable content history, and per-run observations in
+1. Register neutral companies directly or ingest them from independent company registries.
+2. Attach optional company-directory identities such as YC through `company_sources`.
+3. Discover public career pages for every company cheaply and deterministically.
+4. Register supported job sources through provider adapters (currently Greenhouse and Ashby).
+5. Fetch complete provider snapshots sequentially and politely.
+6. Preserve canonical current jobs, immutable content history, and per-run observations in
    Docker-backed Postgres.
-5. Fetch/classify URL evidence separately from source-board synchronization.
-6. Rank active jobs and companies against the candidate profile.
-7. Use deterministic logic and optional agents to refine a backend/SWE shortlist.
-8. Write local CSV/JSON and/or Postgres outputs.
+7. Fetch/classify URL evidence separately from source-board synchronization.
+8. Rank active jobs and companies against the candidate profile.
+9. Use deterministic logic and optional agents to refine a backend/SWE shortlist.
+10. Write local CSV/JSON and/or Postgres outputs.
 
 ## Project Shape
 
 - `src/yc_radar/domain/models.py` and `domain/job_sources.py`: Pydantic domain models.
+- `scripts/register_company.py`: creates a verified company with no required source membership.
+- `scripts/register_job_source.py`: attaches a supported public ATS/feed to an existing company.
 - `src/yc_radar/adapters/`: read-only job-source contracts and provider adapters.
+- `src/yc_radar/services/company_registry.py`: standalone companies and directory identities.
+- `src/yc_radar/services/job_source_registry.py`: provider catalog and persistent job-source registry.
 - `src/yc_radar/services/`: data access, lifecycle, candidate fit, profile loading, and hiring verification.
 - `migrations/`: Alembic schema history; it is the schema authority.
 - `src/yc_radar/playbooks/`: deterministic mission and outreach playbook logic.
@@ -28,7 +35,7 @@ product boundary. The useful loop is:
 - `scripts/discover_career_urls.py`: finds career/job/ATS URLs without Firecrawl or browser automation.
 - `scripts/classify_discovered_urls.py`: fetches discovered URLs, stores source documents, and
   classifies pages as career homes, job listings, ATS listings, or job details.
-- `scripts/sync_job_sources.py`: discovers Greenhouse boards and syncs configured sources.
+- `scripts/sync_job_sources.py`: discovers and syncs all configured provider sources.
 - `scripts/generate_weekly_targets.py`: creates local candidate-fit target runs.
 - `scripts/generate_job_opportunities.py`: exports public canonical job opportunities locally.
 - `scripts/ingest_resume.py`: converts the private resume PDF into local structured profile data.
@@ -55,7 +62,10 @@ exports. Raw JSON debug artifacts belong under ignored `data/local/debug/`.
 
 Important tables:
 
-- `companies`
+- `companies`: source-neutral employer identities (local ID, name, website/domain, local slug).
+- `company_sources`: optional company-directory identities mapped to companies. Do not put ATS board
+  tokens here.
+- `yc_company_profiles`: YC-only profile metadata, separate from neutral employer identity.
 - `yc_job_postings`
 - `career_page_discovery_events`: raw evidence, including YC job URL observations.
 - `career_page_discovery_statuses`: per-company checkpoint status for resumable discovery runs.
@@ -70,8 +80,8 @@ Important tables:
 - `document_chunks`: text chunks with generated Postgres full-text vectors.
 - `document_embeddings`: pgvector-backed semantic embeddings.
 - `job_role_signals`: extracted role-fit evidence.
-- `company_sources`: mappings from current companies to source identities.
-- `career_sources`: provider boards/pages with stable external source IDs.
+- `career_sources`: ATS/feed registrations with stable provider-owned source IDs, independent from
+  `company_sources`.
 - `source_sync_runs`: immutable sync audit status, counters, completeness, and bounded errors.
 - `job_postings`: canonical current state identified by provider + career source + external job ID.
 - `job_posting_versions`: immutable public content history, inserted only on content change.
@@ -92,9 +102,16 @@ Use this mental model:
 raw clues -> clean career URLs -> discovered URL inventory -> fetched source document
     -> page classification -> URL-derived external job posting, only for individual job pages
 
-public career URLs -> career source -> complete sync run -> canonical current job
+neutral company -> public career URLs -> provider registry -> career source
+    -> complete sync run -> canonical current job
     -> immutable content version on change + per-run seen/missed observation
 ```
+
+`companies` must not receive source-specific attributes and may exist without any source row. Put
+YC-only fields in `yc_company_profiles`. Put YC, curated-list, and future directory identities in
+`company_sources`. Put Greenhouse, Ashby, and future ATS/feed identities only in `career_sources`.
+Register companies and job sources separately. Ambiguous identity evidence must stop instead of
+merging.
 
 `career_page_discovery_events` can be noisy because it preserves evidence. `discovered_urls` is the
 queue that future sources such as Apollo or Bright Data should feed. `source_documents` is the
@@ -105,14 +122,17 @@ jobs: canonical identity requires provider + board + external job ID, not a muta
 
 Only complete, valid provider snapshots can apply lifecycle changes. First complete absence retains
 an active job; second consecutive complete absence closes it. Failed or partial scans must never
-increment misses or close jobs. A reappearing ID reactivates the same row. Greenhouse uses only its
-unauthenticated public GET board endpoint; never submit applications or use browser automation.
+increment misses or close jobs. A reappearing ID reactivates the same row. Greenhouse and Ashby use
+only their documented unauthenticated public GET endpoints. Keep source fetches sequential and
+politely paced, send a transparent project user-agent plus JSON accept header, honor `Retry-After`,
+and never submit applications, spoof browser identity, or use browser automation. Ashby sync must
+exclude postings whose public `isListed` flag is false.
 
-Current smoke after a schema rebuild and 200-company discovery:
+Current checked-in discovery inventory:
 
-- 278 discovery events
-- 73 `company_career_pages`
-- 73 `discovered_urls`
+- 27,569 discovery events
+- 21,560 `company_career_pages`
+- 21,560 `discovered_urls`
 - 73 `source_documents`
 - 73 `page_classifications`
 - 9 promoted `external_job_postings`
@@ -140,6 +160,8 @@ uv run pytest
 uv run ruff check src tests scripts migrations
 uv run python scripts/extract_yc_companies.py
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
+uv run python scripts/sync_job_sources.py discover
+uv run python scripts/sync_job_sources.py sync --limit 5 --delay-seconds 2
 uv run python scripts/classify_discovered_urls.py --limit 50 --concurrency 10
 uv run python scripts/generate_weekly_targets.py --no-verify-hiring --no-llm --limit 5 --candidate-pool 10
 ```
@@ -155,7 +177,9 @@ uv run python scripts/classify_discovered_urls.py --limit 100 --concurrency 10
 
 Use `uv`; do not add pip workflows back into the docs.
 
-For an existing populated schema created before Alembic, back up first and verify before adoption:
+For an existing populated schema created before Alembic that exactly matches the known 0001
+baseline, back up first and verify before adoption. Older, partial, and source-neutral unversioned
+schemas must fail closed and must not be stamped:
 
 ```bash
 uv run python scripts/migrate_database.py verify-existing
@@ -165,7 +189,7 @@ uv run alembic current
 ```
 
 Never stamp an existing schema directly to `head`; stop on verifier drift. Fresh databases use
-`uv run alembic upgrade head`. Further roadmap work—additional adapters, remote eligibility
+`uv run alembic upgrade head`. Further roadmap work—additional provider adapters, remote eligibility
 claims, hiring-intent signals, VC/company sources, and any public product—is explicitly deferred.
 
 ## Implementation Preferences

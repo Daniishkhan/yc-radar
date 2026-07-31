@@ -19,7 +19,7 @@ from yc_radar.core.config import get_settings
 from yc_radar.services.database import (
     create_schema,
     engine_from_url,
-    upsert_companies,
+    upsert_yc_companies,
     upsert_yc_job_postings,
 )
 
@@ -403,10 +403,23 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     with tmp_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
+        writer = csv.DictWriter(file, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(
+            {
+                key: _clean_csv_value(value)
+                for key, value in row.items()
+            }
+            for row in rows
+        )
     tmp_path.replace(path)
+
+
+def _clean_csv_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in normalized.split("\n"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -461,7 +474,7 @@ def main() -> None:
         if isinstance(job, dict)
     ]
 
-    upsert_companies(engine, companies)
+    upsert_yc_companies(engine, companies)
     upsert_yc_job_postings(engine, job_postings)
 
     write_csv(

@@ -39,7 +39,7 @@ def outreach_for(company: Company, mission: PrototypeMission) -> OutreachBrief:
     body = (
         f"Hi {{founder_first_name}},\n\n"
         f"I came across {company.name} and liked the wedge: "
-        f"{company.one_liner or 'the product direction on your YC profile'}.\n\n"
+        f"{company.one_liner or 'the product direction on your public company profile'}.\n\n"
         f"I built a small prototype around one workflow I think could matter: "
         f"{mission.artifact}. The goal was to make the value obvious in under a minute, "
         f"not to pitch a generic application.\n\n"
@@ -90,7 +90,7 @@ def _ai_workflow_mission(company: Company) -> PrototypeMission:
         ),
         artifact="an agent that automates one painful product or customer workflow end to end",
         build_steps=[
-            "Extract the core user workflow from their homepage, docs, and YC profile.",
+            "Extract the core user workflow from their homepage, docs, and public profiles.",
             "Create a synthetic but realistic dataset for that workflow.",
             "Build an agent with tool calls, trace logs, eval cases, and failure states.",
             "Package it as a local demo command with clear setup notes.",
@@ -187,7 +187,7 @@ def _customer_workflow_mission(company: Company) -> PrototypeMission:
         ),
         artifact="a mini customer demo that turns their one-liner into a working workflow",
         build_steps=[
-            "Turn the YC one-liner into a concrete user story.",
+            "Turn the public company description into a concrete user story.",
             "Create a tiny realistic dataset.",
             "Build the smallest useful workflow with one clear before/after moment.",
             "Ship a repo, screenshots, and a Loom.",

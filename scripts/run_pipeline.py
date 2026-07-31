@@ -78,7 +78,7 @@ async def run_pipeline(args: argparse.Namespace) -> int:
     registration_command = [
         sys.executable,
         str(SCRIPTS_DIR / "sync_job_sources.py"),
-        "discover-greenhouse",
+        "discover",
     ]
     classification_task = asyncio.create_task(
         run_child("classification", classification_command, status_dir)
@@ -90,8 +90,6 @@ async def run_pipeline(args: argparse.Namespace) -> int:
             sys.executable,
             str(SCRIPTS_DIR / "sync_job_sources.py"),
             "sync",
-            "--provider",
-            "greenhouse",
         ]
         if args.sync_limit is not None:
             sync_command.extend(["--limit", str(args.sync_limit)])

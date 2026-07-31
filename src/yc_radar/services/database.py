@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -43,15 +44,31 @@ metadata = MetaData()
 BATCH_SIZE = 100
 EMBEDDING_DIMENSIONS = 1536
 URL_INVENTORY_ADVISORY_LOCK = "yc_radar_url_cleanup_v1"
+_DOMAIN_PATTERN = re.compile(
+    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+    re.IGNORECASE,
+)
 
 companies_table = Table(
     "companies",
     metadata,
     Column("id", Integer, primary_key=True),
     Column("name", String, nullable=False),
+    Column("normalized_name", String, nullable=False),
     Column("slug", String, nullable=False),
-    Column("yc_url", String, nullable=False),
     Column("website", String),
+    Column("primary_domain", String),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+yc_company_profiles_table = Table(
+    "yc_company_profiles",
+    metadata,
+    Column("company_id", Integer, ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True),
+    Column("yc_company_id", Integer, nullable=False),
+    Column("yc_url", String, nullable=False),
     Column("one_liner", Text),
     Column("batch", String),
     Column("status", String),
@@ -69,6 +86,7 @@ companies_table = Table(
     Column("raw_json", JSONB, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("yc_company_id", name="uq_yc_company_profiles_yc_company_id"),
 )
 
 yc_job_postings_table = Table(
@@ -110,8 +128,6 @@ career_page_discovery_events_table = Table(
     Column("company_slug", String, nullable=False, index=True),
     Column("company_name", String, nullable=False),
     Column("website", String),
-    Column("yc_is_hiring", Boolean, nullable=False, default=False),
-    Column("yc_job_count", Integer, nullable=False, default=0),
     Column("url", Text, nullable=False),
     Column("normalized_url", Text, nullable=False),
     Column("page_type", String, nullable=False),
@@ -133,8 +149,6 @@ company_career_pages_table = Table(
     Column("company_slug", String, nullable=False, index=True),
     Column("company_name", String, nullable=False),
     Column("website", String),
-    Column("yc_is_hiring", Boolean, nullable=False, default=False),
-    Column("yc_job_count", Integer, nullable=False, default=0),
     Column("career_page_url", Text, nullable=False),
     Column("normalized_url", Text, nullable=False),
     Column("page_type", String, nullable=False),
@@ -521,6 +535,9 @@ job_posting_observations_table = Table(
 )
 
 Index("ix_companies_slug", companies_table.c.slug, unique=True)
+Index("ix_companies_normalized_name", companies_table.c.normalized_name)
+Index("ix_companies_primary_domain", companies_table.c.primary_domain)
+Index("ix_yc_company_profiles_yc_company_id", yc_company_profiles_table.c.yc_company_id, unique=True)
 Index(
     "ix_career_page_discovery_statuses_company_slug",
     career_page_discovery_statuses_table.c.company_slug,
@@ -605,43 +622,105 @@ def has_companies(engine: Engine) -> bool:
         return bool(connection.scalar(select(func.count()).select_from(companies_table)))
 
 
-def upsert_companies(engine: Engine, companies: list[dict[str, Any]]) -> None:
+def upsert_yc_companies(engine: Engine, companies: list[dict[str, Any]]) -> None:
+    """Upsert YC data without treating YC's external numeric ID as a local company ID.
+
+    Existing YC provider identity determines the local company row. A new YC identity may reuse a
+    source-neutral employer only when the verified primary domain and normalized name identify one
+    non-YC company unambiguously; otherwise it receives a new local ID.
+    """
     create_schema(engine)
     if not companies:
         return
-    rows = [_company_row(company) for company in companies]
-    _upsert_rows(engine, companies_table, rows, index_elements=["id"])
     now = datetime.now(UTC)
-    source_rows = [
-        {
-            "company_id": row["id"],
-            "provider": "yc",
-            "external_company_id": str(row["id"]),
-            "source_url": row["yc_url"],
-            "raw_json": {"provider": "yc"},
-            "first_seen_at": now,
-            "last_seen_at": now,
-            "created_at": now,
-            "updated_at": now,
-        }
-        for row in rows
-        if row["id"] is not None
-    ]
-    if source_rows:
-        with engine.begin() as connection:
-            statement = pg_insert(company_sources_table).values(source_rows)
+    with engine.begin() as connection:
+        for company in companies:
+            yc_company_id = _yc_company_id(company)
+            existing_source = connection.execute(
+                select(company_sources_table).where(
+                    company_sources_table.c.provider == "yc",
+                    company_sources_table.c.external_company_id == str(yc_company_id),
+                )
+            ).mappings().first()
+            local_company_id = (
+                int(existing_source["company_id"])
+                if existing_source is not None
+                else _matching_neutral_company_id(connection, company)
+            )
+            desired_slug = (
+                str(
+                    connection.scalar(
+                        select(companies_table.c.slug).where(
+                            companies_table.c.id == local_company_id
+                        )
+                    )
+                )
+                if local_company_id is not None
+                else _available_company_slug(
+                    connection,
+                    requested_slug=str(company.get("slug") or ""),
+                    yc_company_id=yc_company_id,
+                )
+            )
+            if local_company_id is None:
+                neutral_values = _company_row(company, slug=desired_slug, now=now)
+                local_company_id = int(
+                    connection.execute(
+                        companies_table.insert().values(neutral_values).returning(companies_table.c.id)
+                    ).scalar_one()
+                )
+            else:
+                neutral_values = _company_row(
+                    company,
+                    local_company_id=local_company_id,
+                    slug=desired_slug,
+                    now=now,
+                )
+                statement = pg_insert(companies_table).values(neutral_values)
+                connection.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=["id"],
+                        set_=_upsert_update_columns(statement, companies_table),
+                    )
+                )
+
+            profile = _yc_company_profile_row(
+                company,
+                local_company_id=local_company_id,
+                yc_company_id=yc_company_id,
+                now=now,
+            )
+            profile_statement = pg_insert(yc_company_profiles_table).values(profile)
             connection.execute(
-                statement.on_conflict_do_update(
+                profile_statement.on_conflict_do_update(
+                    index_elements=["company_id"],
+                    set_=_upsert_update_columns(profile_statement, yc_company_profiles_table),
+                )
+            )
+            source_values = {
+                "company_id": local_company_id,
+                "provider": "yc",
+                "external_company_id": str(yc_company_id),
+                "source_url": profile["yc_url"],
+                "raw_json": {"provider": "yc"},
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+            source_statement = pg_insert(company_sources_table).values(source_values)
+            connection.execute(
+                source_statement.on_conflict_do_update(
                     index_elements=["provider", "external_company_id"],
                     set_={
-                        "company_id": statement.excluded.company_id,
-                        "source_url": statement.excluded.source_url,
-                        "raw_json": statement.excluded.raw_json,
-                        "last_seen_at": statement.excluded.last_seen_at,
-                        "updated_at": statement.excluded.updated_at,
+                        "source_url": source_statement.excluded.source_url,
+                        "raw_json": source_statement.excluded.raw_json,
+                        "last_seen_at": source_statement.excluded.last_seen_at,
+                        "updated_at": source_statement.excluded.updated_at,
                     },
                 )
             )
+        _reset_companies_id_sequence(connection)
 
 
 def upsert_yc_job_postings(engine: Engine, jobs: list[dict[str, Any]]) -> None:
@@ -820,10 +899,35 @@ def truncate_database(engine: Engine) -> None:
         connection.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
 
 
+def _company_profile_statement(*, require_yc_profile: bool = False):
+    profile_columns = (
+        yc_company_profiles_table.c.yc_company_id,
+        yc_company_profiles_table.c.yc_url,
+        yc_company_profiles_table.c.one_liner,
+        yc_company_profiles_table.c.batch,
+        yc_company_profiles_table.c.status,
+        yc_company_profiles_table.c.stage,
+        yc_company_profiles_table.c.team_size,
+        yc_company_profiles_table.c.is_hiring,
+        yc_company_profiles_table.c.all_locations,
+        yc_company_profiles_table.c.regions,
+        yc_company_profiles_table.c.industry,
+        yc_company_profiles_table.c.subindustry,
+        yc_company_profiles_table.c.industries,
+        yc_company_profiles_table.c.tags,
+        yc_company_profiles_table.c.prototype_score,
+        yc_company_profiles_table.c.prototype_angle,
+        yc_company_profiles_table.c.raw_json,
+    )
+    statement = select(companies_table, *profile_columns)
+    join = companies_table.c.id == yc_company_profiles_table.c.company_id
+    return statement.join(yc_company_profiles_table, join) if require_yc_profile else statement.outerjoin(yc_company_profiles_table, join)
+
+
 def fetch_company_rows(engine: Engine) -> list[dict[str, Any]]:
     create_schema(engine)
     with engine.connect() as connection:
-        rows = connection.execute(select(companies_table)).mappings().all()
+        rows = connection.execute(_company_profile_statement()).mappings().all()
     return [dict(row) for row in rows]
 
 
@@ -832,7 +936,7 @@ def fetch_company_row(engine: Engine, slug: str) -> dict[str, Any] | None:
     with engine.connect() as connection:
         row = (
             connection.execute(
-                select(companies_table).where(companies_table.c.slug == slug.lower())
+                _company_profile_statement().where(companies_table.c.slug == slug.lower())
             )
             .mappings()
             .first()
@@ -846,10 +950,12 @@ def fetch_companies_for_discovery(
     limit: int | None = None,
     company_slugs: list[str] | None = None,
     only_pending: bool = False,
+    hiring_only: bool = False,
+    source_provider: str | None = None,
 ) -> list[dict[str, Any]]:
     """Select discovery candidates, applying completed-status exclusion before LIMIT."""
     create_schema(engine)
-    statement = select(companies_table)
+    statement = _company_profile_statement()
     if company_slugs:
         statement = statement.where(companies_table.c.slug.in_(company_slugs))
     if only_pending:
@@ -858,6 +964,14 @@ def fetch_companies_for_discovery(
             career_page_discovery_statuses_table.c.status == "completed",
         )
         statement = statement.where(~completed.exists())
+    if hiring_only:
+        statement = statement.where(yc_company_profiles_table.c.is_hiring.is_(True))
+    if source_provider:
+        source_exists = select(company_sources_table.c.id).where(
+            company_sources_table.c.company_id == companies_table.c.id,
+            company_sources_table.c.provider == source_provider.lower(),
+        )
+        statement = statement.where(source_exists.exists())
     statement = statement.order_by(companies_table.c.slug)
     if limit is not None:
         statement = statement.limit(limit)
@@ -1067,6 +1181,16 @@ def _upsert_rows_connection(
         )
 
 
+def _reset_companies_id_sequence(connection: Any) -> None:
+    connection.execute(
+        text(
+            "SELECT setval(pg_get_serial_sequence('companies', 'id'), "
+            "COALESCE((SELECT MAX(id) FROM companies), 1), "
+            "(SELECT MAX(id) IS NOT NULL FROM companies))"
+        )
+    )
+
+
 def _upsert_update_columns(statement: Any, table: Table) -> dict[str, Any]:
     return {
         column.name: getattr(statement.excluded, column.name)
@@ -1075,14 +1199,118 @@ def _upsert_update_columns(statement: Any, table: Table) -> dict[str, Any]:
     }
 
 
-def _company_row(company: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    return {
-        "id": _to_int(company.get("id")) or _to_int(company.get("objectID")),
-        "name": company.get("name") or "",
-        "slug": str(company.get("slug") or "").lower(),
-        "yc_url": f"https://www.ycombinator.com/companies/{company.get('slug', '')}",
+def normalize_company_name(value: str) -> str:
+    return " ".join(value.lower().split())
+
+
+def primary_domain_for_website(website: str | None) -> str | None:
+    if not website:
+        return None
+    try:
+        host = (urlparse(website).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    domain = host.removeprefix("www.")
+    return domain if _DOMAIN_PATTERN.fullmatch(domain) else None
+
+
+def _yc_company_id(company: dict[str, Any]) -> int:
+    yc_company_id = _to_int(company.get("id")) or _to_int(company.get("objectID"))
+    if yc_company_id is None:
+        raise ValueError("YC company requires id or objectID")
+    return yc_company_id
+
+
+def _matching_neutral_company_id(connection: Any, company: dict[str, Any]) -> int | None:
+    """Return one safe non-YC identity match, never a best-effort merge."""
+    domain = primary_domain_for_website(company.get("website"))
+    normalized_name = normalize_company_name(str(company.get("name") or "").strip())
+    if not domain or not normalized_name:
+        return None
+    domain_matches = list(
+        connection.execute(
+            select(companies_table).where(companies_table.c.primary_domain == domain)
+        ).mappings()
+    )
+    if len(domain_matches) != 1:
+        return None
+    candidate = domain_matches[0]
+    if candidate["normalized_name"] != normalized_name:
+        return None
+    existing_profile = connection.scalar(
+        select(yc_company_profiles_table.c.company_id).where(
+            yc_company_profiles_table.c.company_id == candidate["id"]
+        )
+    )
+    existing_yc_source = connection.scalar(
+        select(company_sources_table.c.id).where(
+            company_sources_table.c.company_id == candidate["id"],
+            company_sources_table.c.provider == "yc",
+        )
+    )
+    if existing_profile is not None or existing_yc_source is not None:
+        return None
+    return int(candidate["id"])
+
+
+def _available_company_slug(
+    connection: Any,
+    *,
+    requested_slug: str,
+    yc_company_id: int,
+) -> str:
+    base = requested_slug.strip().lower() or f"yc-{yc_company_id}"
+    for candidate in (base, f"{base}-yc-{yc_company_id}"):
+        owner = connection.scalar(
+            select(companies_table.c.id).where(companies_table.c.slug == candidate)
+        )
+        if owner is None:
+            return candidate
+    suffix = 2
+    while True:
+        candidate = f"{base}-yc-{yc_company_id}-{suffix}"
+        owner = connection.scalar(
+            select(companies_table.c.id).where(companies_table.c.slug == candidate)
+        )
+        if owner is None:
+            return candidate
+        suffix += 1
+
+
+def _company_row(
+    company: dict[str, Any],
+    *,
+    slug: str,
+    now: datetime,
+    local_company_id: int | None = None,
+) -> dict[str, Any]:
+    name = str(company.get("name") or "").strip()
+    row: dict[str, Any] = {
+        "name": name,
+        "normalized_name": normalize_company_name(name),
+        "slug": slug,
         "website": company.get("website"),
+        "primary_domain": primary_domain_for_website(company.get("website")),
+        "created_at": now,
+        "updated_at": now,
+    }
+    if local_company_id is not None:
+        row["id"] = local_company_id
+    return row
+
+
+def _yc_company_profile_row(
+    company: dict[str, Any],
+    *,
+    local_company_id: int,
+    yc_company_id: int,
+    now: datetime,
+) -> dict[str, Any]:
+    slug = str(company.get("slug") or "").lower()
+    return {
+        "company_id": local_company_id,
+        "yc_company_id": yc_company_id,
+        "yc_url": f"https://www.ycombinator.com/companies/{slug}",
         "one_liner": company.get("one_liner"),
         "batch": company.get("batch"),
         "status": company.get("status"),
@@ -1145,8 +1373,6 @@ def _career_page_discovery_event_row(event: dict[str, Any]) -> dict[str, Any]:
         "company_slug": str(event.get("company_slug") or "").lower(),
         "company_name": event.get("company_name") or "",
         "website": event.get("website"),
-        "yc_is_hiring": bool(event.get("yc_is_hiring")),
-        "yc_job_count": _to_int(event.get("yc_job_count")) or 0,
         "url": event.get("url") or event.get("normalized_url") or "",
         "normalized_url": event.get("normalized_url") or event.get("url") or "",
         "page_type": event.get("page_type") or "unknown",
@@ -1169,8 +1395,6 @@ def _company_career_page_row(page: dict[str, Any]) -> dict[str, Any]:
         "company_slug": str(page.get("company_slug") or "").lower(),
         "company_name": page.get("company_name") or "",
         "website": page.get("website"),
-        "yc_is_hiring": bool(page.get("yc_is_hiring")),
-        "yc_job_count": _to_int(page.get("yc_job_count")) or 0,
         "career_page_url": page.get("career_page_url") or page.get("url") or "",
         "normalized_url": page.get("normalized_url") or page.get("career_page_url") or "",
         "page_type": page.get("page_type") or "unknown",

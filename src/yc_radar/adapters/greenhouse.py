@@ -25,10 +25,11 @@ class GreenhouseAdapter:
     """Read-only client for Greenhouse's unauthenticated public job-board API."""
 
     provider = "greenhouse"
-    adapter_version = "1"
+    adapter_version = "2"
+    source_kind = "ats_board"
     user_agent = (
-        "yc-radar/0.2 "
-        "(+https://github.com/Daniishkhan/yc-radar; read-only research)"
+        "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; "
+        "read-only-public-job-sync)"
     )
     request_headers = {
         "User-Agent": user_agent,
@@ -79,6 +80,15 @@ class GreenhouseAdapter:
             return None
         return candidate
 
+    def extract_source_id(self, url: str) -> str | None:
+        """Return the stable board identity required by the provider registry."""
+        return self.extract_board_token(url)
+
+    def canonical_source_url(self, external_source_id: str) -> str:
+        if not _TOKEN_RE.fullmatch(external_source_id):
+            raise ValueError("invalid Greenhouse board token")
+        return f"https://job-boards.greenhouse.io/{quote(external_source_id, safe='')}"
+
     async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
         token = external_source_id if _TOKEN_RE.fullmatch(external_source_id) else None
         if token is None:
@@ -123,7 +133,13 @@ class GreenhouseAdapter:
                 break
             if attempts < 4:
                 await self._sleeper(self._retry_delay(response, attempts))
-        metadata = {"url": url, "attempts": attempts}
+        metadata = {
+            "url": url,
+            "attempts": attempts,
+            "request_method": "GET",
+            "user_agent": self.user_agent,
+            "accept": self.request_headers["Accept"],
+        }
         if response is None:
             assert transport_error is not None
             return self._failure_snapshot(

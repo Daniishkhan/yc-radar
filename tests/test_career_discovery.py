@@ -126,6 +126,64 @@ def test_normalize_url_drops_tracking_and_generic_listing_filters() -> None:
     ) is None
 
 
+def test_linked_career_page_discovers_public_ats_board() -> None:
+    async def run() -> dict[str, list[dict]]:
+        company = {
+            "id": 1,
+            "slug": "example",
+            "name": "Example",
+            "website": "https://example.com",
+            "is_hiring": True,
+            "raw_json": {"jobPostings": []},
+        }
+        http = FakeHttp(
+            {
+                "https://example.com/": HttpResult(
+                    url="https://example.com/",
+                    final_url="https://example.com/",
+                    status_code=200,
+                    content_type="text/html",
+                    text='<a href="/careers">Careers</a>',
+                ),
+                "https://example.com/robots.txt": HttpResult(
+                    url="https://example.com/robots.txt",
+                    final_url="https://example.com/robots.txt",
+                    status_code=404,
+                    content_type="text/plain",
+                    text="",
+                ),
+                "https://example.com/careers": HttpResult(
+                    url="https://example.com/careers",
+                    final_url="https://example.com/careers",
+                    status_code=200,
+                    content_type="text/html",
+                    text=(
+                        '<a href="https://job-boards.greenhouse.io/example">'
+                        "See open positions</a>"
+                    ),
+                ),
+            }
+        )
+        return await discover_career_urls.discover_company_career_data(
+            company,
+            [],
+            http,
+            max_sitemaps=0,
+            max_child_sitemaps=0,
+        )
+
+    import asyncio
+
+    result = asyncio.run(run())
+
+    assert any(
+        event["normalized_url"] == "https://job-boards.greenhouse.io/example"
+        and event["discovery_source"] == "career_page_link"
+        for event in result["discovery_events"]
+    )
+    assert any(page["page_type"] == "ats" for page in result["career_pages"])
+
+
 def test_one_level_sitemap_index_expansion_finds_career_urls() -> None:
     async def run() -> list[tuple[str, int | None]]:
         http = FakeHttp(

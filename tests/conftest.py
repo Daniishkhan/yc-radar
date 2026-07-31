@@ -34,19 +34,17 @@ def postgres_database_url() -> str:
     separator = "&" if "?" in database_url else "?"
     scoped_url = f"{database_url}{separator}options={quote(f'-csearch_path={schema},public')}"
     engine = engine_from_url(scoped_url)
-    create_schema(engine, checkfirst=False)
-    with engine.connect() as connection:
-        assert connection.scalar(text("SELECT current_schema()")) == schema
-        assert connection.scalar(
-            text("SELECT to_regclass(:qualified_name)"),
-            {"qualified_name": f"{schema}.companies"},
-        ) == "companies"
-        assert connection.scalar(
-            text(f'SELECT version_num FROM "{schema}".alembic_version')
-        ) == "0002_source_neutral_jobs"
-    engine.dispose()
-
     try:
+        create_schema(engine, checkfirst=False)
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT current_schema()")) == schema
+            assert connection.scalar(
+                text("SELECT to_regclass(:qualified_name)"),
+                {"qualified_name": f"{schema}.companies"},
+            ) == "companies"
+            assert connection.scalar(
+                text(f'SELECT version_num FROM "{schema}".alembic_version')
+            ) == "0004_source_registries"
         yield scoped_url
     finally:
         engine.dispose()

@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
+from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.database import (
     engine_from_url,
     career_sources_table,
@@ -15,9 +16,13 @@ from yc_radar.services.database import (
     job_posting_versions_table,
     job_postings_table,
     source_sync_runs_table,
-    upsert_companies,
+    upsert_yc_companies,
 )
 from yc_radar.services.job_repository import JobRepository
+from yc_radar.services.job_source_registry import (
+    JobSourceProviderRegistry,
+    JobSourceRegistry,
+)
 from yc_radar.services.job_sync_service import JobSyncService, RunKeyReuseError
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "sync_job_sources.py"
@@ -56,7 +61,7 @@ def snapshot(*jobs: NormalizedJob) -> SourceSnapshot:
 
 def test_complete_snapshot_lifecycle_is_safe_and_idempotent(postgres_database_url: str) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {
@@ -223,7 +228,7 @@ def test_complete_snapshot_lifecycle_is_safe_and_idempotent(postgres_database_ur
 
 def test_running_run_is_committed_before_snapshot_application(postgres_database_url: str) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {
@@ -274,7 +279,7 @@ def test_running_run_is_committed_before_snapshot_application(postgres_database_
 
 def test_failed_run_key_requires_a_new_attempt_key(postgres_database_url: str, capsys) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {
@@ -345,3 +350,143 @@ def test_failed_run_key_requires_a_new_attempt_key(postgres_database_url: str, c
     assert adapter.calls == 0
     assert results[0].status == "failed"
     assert "skipping fetch. Use a new --run-key" in capsys.readouterr().out
+
+
+def test_sync_cli_paces_source_fetches_sequentially(postgres_database_url: str) -> None:
+    engine = engine_from_url(postgres_database_url)
+    upsert_yc_companies(
+        engine,
+        [
+            {
+                "id": company_id,
+                "name": f"Company {company_id}",
+                "slug": f"company-{company_id}",
+                "website": f"https://company-{company_id}.example",
+                "regions": [],
+                "industries": [],
+                "tags": [],
+            }
+            for company_id in (1, 2)
+        ],
+    )
+    repository = JobRepository(engine)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    for company_id, token in ((1, "one"), (2, "two")):
+        _, allowed, _ = repository.register_career_source(
+            company_id=company_id,
+            provider="greenhouse",
+            source_kind="ats_board",
+            external_source_id=token,
+            source_url=f"https://boards.greenhouse.io/{token}",
+            discovered_from_url=f"https://boards.greenhouse.io/{token}",
+            now=now,
+        )
+        assert allowed is True
+
+    class RecordingAdapter:
+        provider = "greenhouse"
+        adapter_version = "test"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
+            self.calls.append(external_source_id)
+            return SourceSnapshot(
+                provider=self.provider,
+                external_source_id=external_source_id,
+                adapter_version=self.adapter_version,
+                is_complete=True,
+                jobs=[],
+                http_status=200,
+            )
+
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+
+    adapter = RecordingAdapter()
+    results = asyncio.run(
+        sync_sources(
+            engine,
+            argparse.Namespace(
+                provider="greenhouse",
+                company_id=None,
+                limit=2,
+                run_key="paced",
+                delay_seconds=2.5,
+            ),
+            adapter=adapter,
+            sleeper=sleeper,
+        )
+    )
+
+    assert adapter.calls == ["one", "two"]
+    assert sleeps == [2.5]
+    assert [result.status for result in results] == ["completed", "completed"]
+
+
+def test_sync_cli_dispatches_every_registered_provider_without_yc_seed(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    companies = CompanyRegistry(engine)
+    one = companies.register_company(name="One", website="https://one.example")
+    two = companies.register_company(name="Two", website="https://two.example")
+    sources = JobSourceRegistry(engine)
+    sources.register_url(
+        company_id=one.company_id,
+        source_url="https://job-boards.greenhouse.io/one",
+    )
+    sources.register_url(
+        company_id=two.company_id,
+        source_url="https://jobs.ashbyhq.com/two",
+    )
+
+    class RecordingAdapter:
+        adapter_version = "test"
+        source_kind = "ats_board"
+
+        def __init__(self, provider: str) -> None:
+            self.provider = provider
+            self.calls: list[str] = []
+
+        def extract_source_id(self, url: str) -> str | None:
+            del url
+            return None
+
+        def canonical_source_url(self, external_source_id: str) -> str:
+            return external_source_id
+
+        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
+            self.calls.append(external_source_id)
+            return SourceSnapshot(
+                provider=self.provider,
+                external_source_id=external_source_id,
+                adapter_version=self.adapter_version,
+                is_complete=True,
+                jobs=[],
+                http_status=200,
+            )
+
+    greenhouse = RecordingAdapter("greenhouse")
+    ashby = RecordingAdapter("ashby")
+    providers = JobSourceProviderRegistry([greenhouse, ashby])
+    results = asyncio.run(
+        sync_sources(
+            engine,
+            argparse.Namespace(
+                provider=None,
+                company_id=None,
+                limit=None,
+                run_key="all-providers",
+                delay_seconds=0,
+            ),
+            providers=providers,
+        )
+    )
+
+    assert greenhouse.calls == ["one"]
+    assert ashby.calls == ["two"]
+    assert [result.status for result in results] == ["completed", "completed"]

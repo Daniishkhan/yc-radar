@@ -7,7 +7,7 @@ class Company(BaseModel):
     id: int | None = None
     name: str
     slug: str
-    yc_url: str
+    yc_url: str | None = None
     website: str | None = None
     one_liner: str | None = None
     batch: str | None = None

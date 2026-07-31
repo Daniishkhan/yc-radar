@@ -92,6 +92,9 @@ def test_adapter_uses_read_only_public_get_and_retries_rate_limits() -> None:
     assert requests[0].headers["user-agent"] == GreenhouseAdapter.user_agent
     assert requests[0].headers["accept"] == "application/json"
     assert requests[0].headers["accept-language"] == "en-US,en;q=0.8"
+    assert snapshot.request_metadata["request_method"] == "GET"
+    assert snapshot.request_metadata["user_agent"] == GreenhouseAdapter.user_agent
+    assert snapshot.request_metadata["accept"] == "application/json"
     assert sleeps == [1.0]
 
 

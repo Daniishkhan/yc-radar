@@ -32,19 +32,21 @@ class JobRepository:
         source_url: str,
         discovered_from_url: str | None,
         now: datetime,
+        raw_json: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool, bool]:
-        """Return the source plus whether registration is allowed and whether it was created."""
+        """Register one provider board without coupling it to a company-directory source."""
         with self.engine.begin() as connection:
             existing = self.get_career_source_by_external(connection, provider, external_source_id)
+            if existing and int(existing["company_id"]) != company_id:
+                return existing, False, False
             if existing:
-                if existing["company_id"] != company_id:
-                    return existing, False, False
                 connection.execute(
                     update(career_sources_table)
                     .where(career_sources_table.c.id == existing["id"])
                     .values(
                         source_url=source_url,
                         discovered_from_url=discovered_from_url,
+                        raw_json=raw_json or existing.get("raw_json") or {},
                         updated_at=now,
                     )
                 )
@@ -59,7 +61,7 @@ class JobRepository:
                     source_url=source_url,
                     discovered_from_url=discovered_from_url,
                     status="active",
-                    raw_json={},
+                    raw_json=raw_json or {},
                     created_at=now,
                     updated_at=now,
                 )

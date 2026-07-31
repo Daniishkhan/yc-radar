@@ -186,7 +186,10 @@ def main() -> None:
     )
     write_csv(csv_path, targets)
 
-    print(f"Loaded {len(companies)} YC-seeded companies and {sum(map(len, canonical_jobs_by_slug.values()))} active canonical jobs.")
+    print(
+        f"Loaded {len(companies)} companies and "
+        f"{sum(map(len, canonical_jobs_by_slug.values()))} active canonical jobs."
+    )
     print(f"Ranked candidate pool: {len(pool_scores)} companies.")
     print(f"Wrote {len(targets)} weekly targets: {json_path}")
     print(f"Wrote CSV: {csv_path}")

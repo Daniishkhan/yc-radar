@@ -12,4 +12,8 @@ def test_repo_does_not_expose_a_served_api_surface() -> None:
 
     assert not (repo_root / "src" / "yc_radar" / "api").exists()
     assert not (repo_root / "src" / "yc_radar" / "main.py").exists()
-    assert not (repo_root / "Dockerfile").exists()
+
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+    production_compose = (repo_root / "compose.prod.yml").read_text(encoding="utf-8")
+    assert "\nEXPOSE " not in dockerfile
+    assert "\n    ports:" not in production_compose

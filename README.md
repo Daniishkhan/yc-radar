@@ -1,9 +1,9 @@
 # YC Radar
 
 YC Radar is a personal, script-first hiring-radar workbench for finding high-signal companies
-and senior backend/software engineering roles. YC remains the initial company registry and one
-source of raw company/job evidence; it is not the product boundary. The source-neutral job layer
-currently supports public Greenhouse boards and can add other read-only adapters later.
+and senior backend/software engineering roles. Companies are first-class local entities; YC is one
+optional company-directory source, not the seed for career discovery or ATS synchronization. The
+job-source registry currently supports public Greenhouse and Ashby boards.
 
 The goal is simple:
 
@@ -20,8 +20,7 @@ deciding where I should apply and what proof points I should lead with.
 
 ## What It Does Today
 
-The current implementation uses YC as the initial company source and adds a canonical
-source-neutral job lifecycle for supported career boards:
+The current implementation has independent company, company-source, and job-source registries:
 
 - Pulls YC company data from the same public source used by `ycombinator.com/companies`.
 - Extracts structured YC job postings, including salary, equity, skills, location, and visa fields.
@@ -31,17 +30,20 @@ source-neutral job lifecycle for supported career boards:
 - Fetches discovered URLs into reusable source documents, then classifies whether each page is a
   career home, job listing, ATS listing, individual job detail, fetch error, or irrelevant page.
 - Ingests my resume into a private local profile file.
-- Syncs configured public Greenhouse boards through a read-only, no-key GET endpoint and tracks
+- Registers standalone companies before any optional YC, directory, or ATS association.
+- Detects and syncs configured public Greenhouse and Ashby boards through read-only GET endpoints.
+- Tracks
   canonical current jobs, immutable content versions, and per-run observations.
-- Generates candidate-fit target lists from YC evidence plus active supported canonical jobs.
+- Generates candidate-fit target lists from every registered company plus optional YC evidence and
+  active canonical jobs.
 - Writes shortlist outputs to local CSV/JSON files and Postgres-backed tables.
 
 ## Where It Is Going
 
-The next version should turn YC data into a practical weekly shortlist. After that, the same
-workflow should support non-YC sources without turning the repo into a service.
+The next version should turn the provider-neutral registry into a practical weekly shortlist
+without turning the repo into a service.
 
-- Search all YC companies, not only the ones YC marks as hiring.
+- Expand company registries and supported ATS/feed adapters without privileging YC membership.
 - Verify live career pages and hidden jobs.
 - Use agents to inspect company websites, products, docs, GitHub repos, and job pages when that
   improves the output.
@@ -51,8 +53,8 @@ workflow should support non-YC sources without turning the repo into a service.
 - Return roughly 50 to 100 companies worth actioning in a CSV or DB table.
 - For each company, suggest a demo or contribution I can ship in a few hours.
 - Help draft founder/CTO outreach tied to the actual artifact.
-- Add additional source feeds, such as Apollo or Bright Data, without mixing them into the raw YC
-  tables.
+- Add additional company feeds, such as Apollo or Bright Data, through `company_sources` without
+  mixing them into YC-specific tables.
 
 The output should answer: "Which backend/senior SWE companies should I apply to or build for this
 week, and why am I a credible fit?"
@@ -89,7 +91,10 @@ machine-level Postgres install.
 
 Important tables:
 
-- `companies`: YC company profiles and raw YC payloads.
+- `companies`: standalone source-neutral employer identities.
+- `company_sources`: optional company-directory identities such as YC or a curated list. ATS board
+  identities do not belong here.
+- `yc_company_profiles`: YC-only metadata attached to companies that happen to be in YC.
 - `yc_job_postings`: YC job posts with title, URL, salary, equity, location, visa, skills, and
   raw payloads.
 - `career_page_discovery_events`: raw evidence from YC job URLs, homepage links, sitemaps, and
@@ -108,8 +113,8 @@ Important tables:
 - `document_embeddings`: pgvector-backed embeddings for semantic retrieval.
 - `job_role_signals`: extracted role-fit evidence such as backend, infra, data, seniority, remote,
   and visa signals.
-- `company_sources`: source-specific identities for the current company registry.
-- `career_sources`: configured public career/ATS boards, identified by provider board identity.
+- `career_sources`: independently configured public ATS/feed boards, identified by provider plus
+  stable external source ID.
 - `source_sync_runs`: persisted fetch status, completeness, counters, and bounded errors.
 - `job_postings`: canonical current jobs, uniquely identified by provider + career source + external
   job ID (never by URL).
@@ -135,7 +140,7 @@ Private local data is ignored by git:
 - `data/local/cache/`
 - `data/local/debug/`
 
-## Source-Neutral Job Lifecycle
+## Source-Neutral Company and Job Lifecycle
 
 Alembic is the schema authority. For a fresh local database, use:
 
@@ -144,13 +149,14 @@ uv sync --extra dev
 docker compose up -d postgres
 uv run alembic upgrade head
 uv run python scripts/load_snapshots.py
-uv run python scripts/sync_job_sources.py discover-greenhouse
-uv run python scripts/sync_job_sources.py sync --provider greenhouse --limit 5
+uv run python scripts/sync_job_sources.py discover
+uv run python scripts/sync_job_sources.py sync --limit 5 --delay-seconds 2
 ```
 
-For an existing populated pre-Alembic database, back it up, run the verifier, and only stamp the
-legacy baseline if verification succeeds. Do **not** stamp directly to `head`, and do not use the
-destructive reset path for adoption:
+For an existing populated pre-Alembic database that exactly matches the known **0001 baseline**, back
+it up, run the verifier, and only then stamp that baseline. Do **not** stamp an older, partial, or
+source-neutral unversioned schema: the verifier fails closed, so restore it to a known state or use
+the explicitly destructive rebuild path instead.
 
 ```bash
 uv run python scripts/migrate_database.py verify-existing
@@ -159,16 +165,50 @@ uv run alembic upgrade head
 uv run alembic current
 ```
 
+`companies` is the root employer registry (local ID, name, stable slug, website, and verified
+primary domain). `company_sources` only maps company-directory identities to those employers;
+`yc_company_profiles` contains optional YC-only metadata; `career_sources` independently registers
+public ATS/feed boards. A company can exist with no company source and no job source.
+
+Register a company independently, then attach any supported job source:
+
+```bash
+uv run python scripts/register_company.py \
+  --name "Example, Inc." \
+  --website https://example.com
+
+uv run python scripts/register_job_source.py \
+  --company-slug example-inc \
+  --source-url https://job-boards.greenhouse.io/example
+
+uv run python scripts/register_job_source.py \
+  --company-slug another-company \
+  --source-url https://jobs.ashbyhq.com/another-company
+```
+
+Company registration only reuses an exact verified primary-domain and normalized-name match.
+Job-source registration detects the provider from the public URL and refuses to move an existing
+board identity between companies. Ambiguous identity evidence stops rather than silently merging.
+
 Greenhouse uses only the unauthenticated public GET endpoint documented by the
 [Greenhouse Job Board API](https://developers.greenhouse.io/job-board.html):
-`https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`. This workbench never
-submits applications. A sync run is committed as `running` before its provider request, so an
+`https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`. Requests are
+sequential, use a transparent project user-agent plus `Accept: application/json`, respect
+`Retry-After`, back off on transient errors, and default to a one-second inter-source delay. The
+client does not impersonate a browser and this workbench never submits applications. A sync run is
+committed as `running` before its provider request, so an
 interrupted fetch remains auditable. A valid complete snapshot adds/updates jobs and records
 observations. An unchanged body creates no new version. A job is retained after its first
 consecutive complete absence and closes only after its second; failed or partial scans never change
 job lifecycle state. `career_sources.last_synced_at` advances only after a complete snapshot is
 applied; `last_sync_status` records failed/partial attempts. A returning job reactivates the same
 canonical row.
+
+Ashby uses its documented
+[public lightweight posting endpoint](https://developers.ashbyhq.com/docs/public-job-posting-api):
+`GET https://api.ashbyhq.com/posting-api/job-board/{job_board_name}`. Only jobs with public listing
+visibility are synchronized. Ashby follows the same sequential pacing, bounded retry, complete
+snapshot, and no-application rules as Greenhouse.
 
 Inspect active canonical jobs without profile/contact data:
 
@@ -181,13 +221,14 @@ uv run python scripts/generate_job_opportunities.py --limit 50
 The persistence model is intentionally split by confidence and processing stage:
 
 ```text
-YC/raw company clues -> career-page evidence -> career_sources -> source_sync_runs
-                                                -> job_postings (current state)
-                                                -> job_posting_versions (immutable history)
-                                                -> job_posting_observations (per-run evidence)
+company registry -> career-page evidence -> provider registry -> career_sources
+                                                           -> source_sync_runs
+                                                           -> job_postings (current state)
+                                                           -> job_posting_versions (history)
+                                                           -> job_posting_observations (evidence)
 
-Legacy YC discovery -> discovered_urls -> source_documents -> page_classifications
-                    -> external_job_postings
+URL evidence -> discovered_urls -> source_documents -> page_classifications
+             -> external_job_postings
 ```
 
 `career_page_discovery_events` is raw evidence. It should be allowed to contain duplicate-looking
@@ -225,8 +266,9 @@ uv run python scripts/discover_career_urls.py --limit 200 --concurrency 10 --bat
 uv run python scripts/classify_discovered_urls.py --limit 100 --concurrency 10
 ```
 
-Expected current smoke shape: 200 companies produce 278 discovery events, 73 deduped discovered
-URLs, 73 fetched source documents/classifications, and 9 external job detail postings.
+The checked-in URL inventory is intentionally broader than the classified subset. Run
+classification in bounded batches instead of assuming every discovered URL has already been
+fetched or understood.
 
 Reset local Postgres when you want a clean rebuild:
 
@@ -259,10 +301,10 @@ Raw JSON debug files are not committed. Write them only when needed:
 uv run python scripts/extract_yc_companies.py --write-raw-json
 ```
 
-Current checked-in snapshot:
+Current checked-in YC source snapshot:
 
-- 6,080 YC companies
-- 5,343 YC job postings
+- 6,079 YC companies
+- 5,342 YC job postings
 
 ## Discover Career Pages
 
@@ -270,7 +312,9 @@ Current checked-in snapshot:
 uv run python scripts/discover_career_urls.py --limit 100 --concurrency 10
 ```
 
-This finds external career/jobs/ATS pages without Firecrawl or browser automation. It checks:
+This finds external career/jobs/ATS pages for every registered company without Firecrawl or browser
+automation. Use `--source-provider yc` only when intentionally limiting a run to YC-backed
+companies. It checks:
 
 - YC job posting URLs as raw evidence.
 - Homepage links.
@@ -288,12 +332,11 @@ It writes:
 - `data/snapshots/discovered_urls.csv`
 - `data/snapshots/career_page_discovery_events.csv`
 
-Current checked-in sample:
+Current checked-in discovery inventory:
 
-- 200 companies checked
-- 278 raw discovery events
-- 73 clean external career/job/ATS URLs
-- 73 discovered URLs queued for classification
+- 27,569 raw discovery events
+- 21,560 clean external career/job/ATS URLs
+- 21,560 discovered URLs queued for classification
 
 Inspect clean career pages:
 
@@ -315,7 +358,7 @@ docker compose exec postgres psql -U yc_radar -d yc_radar -c "
 "
 ```
 
-Run the full YC directory:
+Run every registered company:
 
 ```bash
 uv run python scripts/discover_career_urls.py --concurrency 10
@@ -382,7 +425,7 @@ independently, or use the local branch runner after discovery:
 uv run python scripts/run_pipeline.py --discovery-limit 100 --classification-limit 50 --sync-limit 5
 ```
 
-The runner starts classification and the `discover-greenhouse -> sync` branch independently. Its
+The runner starts classification and the all-provider `discover -> sync` branch independently. Its
 ignored status files under `data/local/runs/` preserve child raw return codes and map SIGKILL to 137
 and SIGTERM to 143 instead of reporting a generic `1`. Complete provider snapshots still apply the
 canonical lifecycle atomically; failed or partial source scans do not change misses or closures.
@@ -462,18 +505,18 @@ backend platform ownership.
 
 ## Deferred Roadmap
 
-The current foundation intentionally defers additional ATS adapters, non-YC company onboarding,
-remote/visa eligibility inference, hiring-intent signals, VC/company-list sources, alerting,
+The current foundation intentionally defers ATS adapters beyond Greenhouse and Ashby,
+remote/visa eligibility inference, hiring-intent signals, more company-list registries, alerting,
 multi-worker operation, and any public web product. Location and other source text are preserved
 without making eligibility claims. Resume, profile, contact, cache, and run files remain under
 ignored `data/local/` paths and are not emitted by canonical-job exports.
 
 ## Product Direction
 
-Build toward one concrete workflow, starting with YC and expanding to other company sources later:
+Build toward one concrete workflow where no company directory is privileged:
 
 ```text
-company source -> live company/job verification -> fit score -> shortlist table/CSV -> demo idea -> outreach
+company registry -> source registries -> live job evidence -> fit score -> shortlist -> outreach
 ```
 
 The final product should help me decide:

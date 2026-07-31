@@ -175,6 +175,24 @@ def test_target_record_uses_yc_is_hiring_and_live_unknown_defaults() -> None:
     assert "application_angle" in target
 
 
+def test_non_yc_company_with_unknown_team_size_remains_in_candidate_pool() -> None:
+    company = Company(
+        name="Independent Backend Co",
+        slug="independent-backend-co",
+        website="https://independent.example",
+        one_liner="Backend infrastructure for high-volume API teams",
+    )
+
+    ranked = rank_companies(
+        [company],
+        DEFAULT_CANDIDATE_PROFILE,
+        max_team_size=25,
+    )
+
+    assert [score.company.slug for score in ranked] == ["independent-backend-co"]
+    assert "Active YC company" not in ranked[0].fit_reasons
+
+
 def test_rerank_verified_targets_boosts_live_role_fit() -> None:
     targets = [
         {"rank": 1, "fit_score": 50, "verified_hiring_status": "unknown", "role_fit": "unknown"},

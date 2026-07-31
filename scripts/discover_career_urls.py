@@ -95,13 +95,16 @@ SITEMAP_CANDIDATES = (
     "/sitemap_index.xml",
     "/sitemap-index.xml",
 )
+MAX_LINKED_CAREER_PAGES = 3
+DISCOVERY_USER_AGENT = (
+    "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; "
+    "read-only-career-discovery)"
+)
 DISCOVERY_EVENT_CSV_FIELDS = [
     "company_id",
     "company_slug",
     "company_name",
     "website",
-    "yc_is_hiring",
-    "yc_job_count",
     "url",
     "normalized_url",
     "page_type",
@@ -116,8 +119,6 @@ CAREER_PAGE_CSV_FIELDS = [
     "company_slug",
     "company_name",
     "website",
-    "yc_is_hiring",
-    "yc_job_count",
     "career_page_url",
     "normalized_url",
     "page_type",
@@ -220,8 +221,8 @@ class CachedHttpClient:
         self._host_semaphores = [asyncio.Semaphore(host_concurrency) for _ in range(64)]
         self.client = httpx.AsyncClient(
             headers={
-                "User-Agent": "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; read-only research)",
-                "Accept": "text/html,application/xhtml+xml,application/xml,text/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": DISCOVERY_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.5",
                 "Accept-Language": "en-US,en;q=0.8",
             },
             follow_redirects=True,
@@ -334,13 +335,22 @@ class CachedHttpClient:
 
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
-    parser = argparse.ArgumentParser(description="Discover YC company career/job pages.")
+    parser = argparse.ArgumentParser(description="Discover career/job pages for neutral companies.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--company-slug",
         action="append",
         default=[],
         help="Process only this company slug; repeat the option for multiple companies.",
+    )
+    parser.add_argument(
+        "--hiring-only",
+        action="store_true",
+        help="Only inspect companies currently marked as hiring in their YC profile.",
+    )
+    parser.add_argument(
+        "--source-provider",
+        help="Optionally limit companies to a directory source such as yc; defaults to all.",
     )
     parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=25)
@@ -424,9 +434,20 @@ async def _run_with_inventory_lock(
     status: dict[str, Any],
     engine: Any,
 ) -> None:
-    requested_slugs = sorted({str(slug).strip().lower() for slug in args.company_slug if slug})
+    requested_slugs = sorted(
+        {
+            str(slug).strip().lower()
+            for slug in getattr(args, "company_slug", [])
+            if slug
+        }
+    )
     if requested_slugs:
-        known = fetch_companies_for_discovery(engine, company_slugs=requested_slugs)
+        known = fetch_companies_for_discovery(
+            engine,
+            company_slugs=requested_slugs,
+            hiring_only=getattr(args, "hiring_only", False),
+            source_provider=getattr(args, "source_provider", None),
+        )
         missing_slugs = sorted(set(requested_slugs) - {str(row["slug"]) for row in known})
         if missing_slugs:
             raise SystemExit(f"Unknown company slug(s): {', '.join(missing_slugs)}")
@@ -435,6 +456,8 @@ async def _run_with_inventory_lock(
         limit=args.limit,
         company_slugs=requested_slugs or None,
         only_pending=not args.force,
+        hiring_only=getattr(args, "hiring_only", False),
+        source_provider=getattr(args, "source_provider", None),
     )
     selected_slugs = [str(company["slug"]) for company in companies]
     completed_slugs = set() if args.force else fetch_completed_career_discovery_slugs(engine)
@@ -838,12 +861,72 @@ async def discover_company_career_data(
                 checked_at=checked_at,
             )
 
+    await discover_linked_ats_events(
+        company,
+        discovery_events,
+        discovery_event_keys,
+        http,
+        checked_at=checked_at,
+        max_pages=MAX_LINKED_CAREER_PAGES,
+    )
+
     return {
         "discovery_events": sorted_discovery_events(discovery_events),
         "career_pages": build_company_career_pages(discovery_events),
         "warnings": warnings,
         "failure": None,
     }
+
+
+async def discover_linked_ats_events(
+    company: dict[str, Any],
+    discovery_events: list[dict[str, Any]],
+    discovery_event_keys: set[tuple[str, str, str, str]],
+    http: CachedHttpClient,
+    *,
+    checked_at: datetime,
+    max_pages: int,
+) -> None:
+    """Follow a few known career pages once to capture linked public ATS boards."""
+    candidates: dict[str, dict[str, Any]] = {}
+    for event in discovery_events:
+        if not is_external_career_event(event) or event.get("page_type") == "ats":
+            continue
+        normalized_url = str(event.get("normalized_url") or "")
+        if not normalized_url:
+            continue
+        existing = candidates.get(normalized_url)
+        if existing is None or float(event["confidence"]) > float(existing["confidence"]):
+            candidates[normalized_url] = event
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda event: (
+            0 if event.get("page_type") == "careers_page" else 1,
+            -float(event.get("confidence") or 0),
+            str(event.get("normalized_url") or ""),
+        ),
+    )
+    for event in ordered[:max_pages]:
+        result = await http.get(str(event["normalized_url"]))
+        if not result.status_code or result.status_code >= 400:
+            continue
+        for href, text in extract_homepage_links(result.text):
+            url = normalize_url(result.final_url, href)
+            if not url or page_type_for(url) != "ats":
+                continue
+            add_discovery_event(
+                discovery_events,
+                discovery_event_keys,
+                company,
+                url=url,
+                page_type="ats",
+                discovery_source="career_page_link",
+                confidence=0.9,
+                http_status=result.status_code,
+                evidence=text or href,
+                checked_at=checked_at,
+            )
 
 
 def extract_homepage_links(html: str) -> list[tuple[str, str]]:
@@ -1002,8 +1085,6 @@ def add_discovery_event(
         "company_slug": company.get("slug"),
         "company_name": company.get("name"),
         "website": company.get("website"),
-        "yc_is_hiring": bool(company.get("is_hiring")),
-        "yc_job_count": len(company.get("raw_json", {}).get("jobPostings") or []),
         "url": url,
         "normalized_url": normalized_url,
         "page_type": page_type,
@@ -1039,8 +1120,6 @@ def build_company_career_pages(discovery_events: list[dict[str, Any]]) -> list[d
                 "company_slug": best.get("company_slug"),
                 "company_name": best.get("company_name"),
                 "website": best.get("website"),
-                "yc_is_hiring": best.get("yc_is_hiring"),
-                "yc_job_count": best.get("yc_job_count"),
                 "career_page_url": best.get("url"),
                 "normalized_url": best.get("normalized_url"),
                 "page_type": best.get("page_type"),
@@ -1230,7 +1309,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     with tmp_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field) for field in fieldnames})

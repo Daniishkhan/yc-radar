@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from yc_radar.core.config import get_settings
-from yc_radar.services.database import engine_from_url, upsert_companies, upsert_yc_job_postings
+from yc_radar.services.database import engine_from_url, upsert_yc_companies, upsert_yc_job_postings
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +28,7 @@ def main() -> None:
     jobs = [job_payload(row) for row in read_csv(jobs_path)]
 
     engine = engine_from_url()
-    upsert_companies(engine, companies)
+    upsert_yc_companies(engine, companies)
     upsert_yc_job_postings(engine, jobs)
 
     print(f"Loaded {len(companies)} companies from {companies_path}")

@@ -1,10 +1,10 @@
 from yc_radar.services.company_repository import CompanyRepository
-from yc_radar.services.database import engine_from_url, upsert_companies
+from yc_radar.services.database import engine_from_url, upsert_yc_companies
 
 
 def test_repository_loads_companies_from_postgres(postgres_database_url: str) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {
@@ -36,7 +36,7 @@ def test_repository_loads_companies_from_postgres(postgres_database_url: str) ->
 
 def test_search_returns_small_hiring_targets(postgres_database_url: str) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {

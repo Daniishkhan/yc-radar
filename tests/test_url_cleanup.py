@@ -16,7 +16,7 @@ from yc_radar.services.database import (
     URL_INVENTORY_ADVISORY_LOCK,
     engine_from_url,
     replace_career_page_data,
-    upsert_companies,
+    upsert_yc_companies,
     url_inventory_writer_lock,
 )
 from yc_radar.services.job_repository import JobRepository
@@ -303,7 +303,7 @@ def test_cleanup_apply_canonicalizes_page_queue_and_registered_source_urls(
     tracked = "https://job-boards.greenhouse.io/example?gh_src=campaign"
     canonical = "https://job-boards.greenhouse.io/example"
     now = datetime.now(UTC)
-    upsert_companies(
+    upsert_yc_companies(
         engine,
         [
             {
