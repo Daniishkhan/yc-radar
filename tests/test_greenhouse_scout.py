@@ -214,3 +214,28 @@ def test_board_page_logo_or_external_redirect_supplies_verified_origin(tmp_path:
     resolution = resolve_company(evidence, companies=[])
     assert resolution.status == "new_company_domain_candidate"
     assert resolution.website_candidate == "https://acme.com"
+
+
+def test_board_page_redirect_loop_is_a_failed_enrichment_not_a_process_error(
+    tmp_path: Path,
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(302, headers={"Location": str(request.url)})
+        )
+    )
+    evidence = GreenhouseBoardEvidence(
+        board_token="loop",
+        verification_status="verified",
+        http_status=200,
+        company_name="Loop",
+        job_count=1,
+        external_job_origins=(),
+    )
+
+    with GreenhouseBoardScout(tmp_path / "cache", client=client, delay_seconds=0) as scout:
+        enriched = scout.enrich_from_board_page(evidence)
+
+    assert enriched.verification_status == "verified"
+    assert enriched.error is not None
+    assert enriched.error.startswith("TooManyRedirects:")

@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import importlib.util
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -277,6 +278,46 @@ def test_running_run_is_committed_before_snapshot_application(postgres_database_
         ) == "completed"
 
 
+def test_resumed_batch_marks_an_orphaned_running_attempt_failed(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    company = CompanyRegistry(engine).register_company(
+        name="Interrupted Company", website="https://interrupted.example"
+    )
+    source = JobSourceRegistry(engine).register_url(
+        company_id=company.company_id,
+        source_url="https://job-boards.greenhouse.io/interrupted-company",
+    )
+    service = JobSyncService(engine)
+    service.start_run(
+        career_source_id=source.career_source_id,
+        run_key="interrupted-batch:attempt-1",
+        provider="greenhouse",
+        adapter_version="test",
+    )
+
+    result = service.interrupt_running_run(
+        career_source_id=source.career_source_id,
+        run_key="interrupted-batch:attempt-1",
+    )
+
+    assert result is not None
+    assert result.status == "failed"
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(source_sync_runs_table).where(
+                source_sync_runs_table.c.run_key == "interrupted-batch:attempt-1"
+            )
+        ).mappings().one()
+    assert row["errors"] == [
+        {
+            "kind": "interrupted",
+            "message": "worker restarted before the source attempt completed",
+        }
+    ]
+
+
 def test_failed_run_key_requires_a_new_attempt_key(postgres_database_url: str, capsys) -> None:
     engine = engine_from_url(postgres_database_url)
     upsert_yc_companies(
@@ -490,3 +531,127 @@ def test_sync_cli_dispatches_every_registered_provider_without_yc_seed(
     assert greenhouse.calls == ["one"]
     assert ashby.calls == ["two"]
     assert [result.status for result in results] == ["completed", "completed"]
+
+
+def test_checkpointed_sync_resumes_at_the_first_unfinished_source(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    companies = CompanyRegistry(engine)
+    registry = JobSourceRegistry(engine)
+    for number in range(1, 4):
+        company = companies.register_company(
+            name=f"Company {number}", website=f"https://company-{number}.example"
+        )
+        registry.register_url(
+            company_id=company.company_id,
+            source_url=f"https://job-boards.greenhouse.io/board-{number}",
+        )
+
+    class RecordingAdapter:
+        provider = "greenhouse"
+        adapter_version = "test"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
+            self.calls.append(external_source_id)
+            return SourceSnapshot(
+                provider=self.provider,
+                external_source_id=external_source_id,
+                adapter_version=self.adapter_version,
+                is_complete=True,
+                jobs=[],
+                http_status=200,
+            )
+
+    checkpoint = tmp_path / "sync-checkpoint.json"
+    args = argparse.Namespace(
+        provider="greenhouse",
+        company_id=None,
+        source_ids=None,
+        min_source_id=None,
+        limit=2,
+        run_key="resume-batch",
+        delay_seconds=0,
+        checkpoint_file=checkpoint,
+        max_attempts=4,
+        status_file=None,
+    )
+    adapter = RecordingAdapter()
+
+    first = asyncio.run(sync_sources(engine, args, adapter=adapter))
+    second = asyncio.run(sync_sources(engine, args, adapter=adapter))
+
+    assert len(first) == 2
+    assert len(second) == 1
+    assert adapter.calls == ["board-1", "board-2", "board-3"]
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert {entry["state"] for entry in payload["sources"].values()} == {"completed"}
+
+
+def test_checkpointed_sync_retries_a_failed_source_with_a_new_attempt_key(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    company = CompanyRegistry(engine).register_company(
+        name="Retry Company", website="https://retry-company.example"
+    )
+    source = JobSourceRegistry(engine).register_url(
+        company_id=company.company_id,
+        source_url="https://job-boards.greenhouse.io/retry-company",
+    )
+
+    class RetryAdapter:
+        provider = "greenhouse"
+        adapter_version = "test"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
+            self.calls += 1
+            return SourceSnapshot(
+                provider=self.provider,
+                external_source_id=external_source_id,
+                adapter_version=self.adapter_version,
+                is_complete=self.calls > 1,
+                jobs=[],
+                http_status=200 if self.calls > 1 else 503,
+                errors=[] if self.calls > 1 else [{"kind": "http_status", "message": "503"}],
+            )
+
+    args = argparse.Namespace(
+        provider="greenhouse",
+        company_id=None,
+        source_ids=[source.career_source_id],
+        min_source_id=None,
+        limit=None,
+        run_key="retry-batch",
+        delay_seconds=0,
+        checkpoint_file=tmp_path / "retry-checkpoint.json",
+        max_attempts=4,
+        status_file=None,
+    )
+    adapter = RetryAdapter()
+
+    first = asyncio.run(sync_sources(engine, args, adapter=adapter))
+    second = asyncio.run(sync_sources(engine, args, adapter=adapter))
+
+    assert first[0].status == "failed"
+    assert second[0].status == "completed"
+    with engine.connect() as connection:
+        keys = list(
+            connection.scalars(
+                select(source_sync_runs_table.c.run_key)
+                .where(source_sync_runs_table.c.career_source_id == source.career_source_id)
+                .order_by(source_sync_runs_table.c.id)
+            )
+        )
+    assert keys == [
+        f"retry-batch:{source.career_source_id}:attempt-1",
+        f"retry-batch:{source.career_source_id}:attempt-2",
+    ]

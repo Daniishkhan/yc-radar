@@ -92,6 +92,40 @@ class JobSyncService:
             return None
         return self._result_from_run(existing_run, idempotent_replay=True)
 
+    def interrupt_running_run(
+        self,
+        *,
+        career_source_id: int,
+        run_key: str,
+        reason: str = "worker restarted before the source attempt completed",
+    ) -> SyncResult | None:
+        """Close a durable orphaned attempt before a resumed batch creates another one."""
+        now = self._clock()
+        with self.repository.engine.begin() as connection:
+            run = self.repository.get_run(connection, career_source_id, run_key)
+            if run is None:
+                return None
+            if run["status"] == "running":
+                self.repository.finalize_run(
+                    connection,
+                    int(run["id"]),
+                    {
+                        "status": "failed",
+                        "errors_count": 1,
+                        "errors": [{"kind": "interrupted", "message": reason[:500]}],
+                        "completed_at": now,
+                    },
+                )
+                self.repository.update_career_source_sync_state(
+                    connection,
+                    career_source_id,
+                    status="failed",
+                    now=now,
+                )
+                run = self.repository.get_run(connection, career_source_id, run_key)
+                assert run is not None
+            return self._result_from_run(run, idempotent_replay=True)
+
     def sync_snapshot(
         self,
         *,

@@ -245,6 +245,7 @@ class GreenhouseBoardScout:
 
         response: httpx.Response | None = None
         error: str | None = None
+        retryable_request_error = False
         attempts = 0
         for attempts in range(1, 5):
             self._pace_request()
@@ -255,9 +256,12 @@ class GreenhouseBoardScout:
                     follow_redirects=follow_redirects,
                 )
                 self._last_request_at = self._clock()
-            except httpx.TransportError as exc:
+            except httpx.RequestError as exc:
                 self._last_request_at = self._clock()
                 error = f"{type(exc).__name__}:{exc}"
+                if not isinstance(exc, httpx.TransportError):
+                    break
+                retryable_request_error = True
                 if attempts < 4:
                     self._sleeper(float(2 ** (attempts - 1)))
                 continue
@@ -274,7 +278,9 @@ class GreenhouseBoardScout:
         if truncated:
             error = f"response_too_large:{len(response_text)}"
         final_url = str(response.url) if response is not None else url
-        retryable = status_code in RETRYABLE_STATUS_CODES or status_code is None or truncated
+        retryable = (
+            status_code in RETRYABLE_STATUS_CODES or retryable_request_error or truncated
+        )
         self.cache.store(
             url,
             metadata={

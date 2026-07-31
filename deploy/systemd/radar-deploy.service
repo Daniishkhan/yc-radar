@@ -1,0 +1,15 @@
+[Unit]
+Description=Deploy YC Radar and start its persistent Postgres service
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+RequiresMountsFor=/srv/radar
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/radar-deploy --no-fetch
+RemainAfterExit=yes
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

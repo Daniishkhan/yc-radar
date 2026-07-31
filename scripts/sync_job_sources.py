@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import text
+
 from yc_radar.adapters.base import JobSourceAdapter
 from yc_radar.domain.job_sources import SyncResult
 from yc_radar.services.database import create_schema, engine_from_url
@@ -18,7 +20,13 @@ from yc_radar.services.job_source_registry import (
     default_job_source_providers,
 )
 from yc_radar.services.job_sync_service import JobSyncService, RunKeyReuseError
-from yc_radar.services.run_status import stage_finished, stage_started, write_status
+from yc_radar.services.run_status import (
+    read_status,
+    stage_checkpoint,
+    stage_finished,
+    stage_started,
+    write_status,
+)
 from yc_radar.services.source_discovery import discover_job_sources
 
 
@@ -63,9 +71,23 @@ def parse_args() -> argparse.Namespace:
     sync.add_argument(
         "--run-key",
         help=(
-            "Optional stable idempotency prefix. Completed keys replay without a fetch; "
-            "failed, partial, or running keys require a new prefix for a new attempt."
+            "Optional logical batch key. With --checkpoint-file, retries receive distinct "
+            "audited attempt keys under this batch."
         ),
+    )
+    sync.add_argument(
+        "--checkpoint-file",
+        type=Path,
+        help=(
+            "Durable batch manifest. Restarts reuse the original source set, skip completed "
+            "sources, and retry failed/interrupted sources."
+        ),
+    )
+    sync.add_argument(
+        "--max-attempts",
+        type=positive_int,
+        default=4,
+        help="Maximum process-level attempts for each source in a checkpointed batch.",
     )
     return parser.parse_args()
 
@@ -74,6 +96,13 @@ def non_negative_float(value: str) -> float:
     parsed = float(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be positive")
     return parsed
 
 
@@ -111,9 +140,17 @@ def main() -> None:
             return
         results = asyncio.run(sync_sources(engine, args))
         unsuccessful = [result for result in results if result.status != "completed"]
+        batch_checkpoint = read_status(getattr(args, "checkpoint_file", None))
+        batch_incomplete = bool(
+            batch_checkpoint
+            and any(
+                entry.get("state") != "completed"
+                for entry in batch_checkpoint.get("sources", {}).values()
+            )
+        )
         print(
             f"Processed {len(results)} {args.provider or 'supported'} sources; "
-            f"non-completed runs: {len(unsuccessful)}."
+            f"non-completed runs: {len(unsuccessful)}; batch_incomplete={batch_incomplete}."
         )
         for result in results:
             print(
@@ -124,7 +161,7 @@ def main() -> None:
             status_file,
             stage_finished(
                 status,
-                state="completed" if not unsuccessful else "partial",
+                state="completed" if not unsuccessful and not batch_incomplete else "partial",
                 selected=len(results),
                 processed=len(results),
                 succeeded=len(results) - len(unsuccessful),
@@ -132,7 +169,7 @@ def main() -> None:
                 source_run_statuses={result.status: sum(item.status == result.status for item in results) for result in results},
             ),
         )
-        if unsuccessful:
+        if unsuccessful or batch_incomplete:
             raise SystemExit(1)
     except Exception as exc:
         write_status(status_file, stage_finished(status, state="failed", error=exc))
@@ -158,56 +195,255 @@ async def sync_sources(
     if provider_filter is not None:
         providers.adapter_for(provider_filter)
     results: list[SyncResult] = []
-    prefix = args.run_key or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    checkpoint_file = getattr(args, "checkpoint_file", None)
+    checkpoint = read_status(checkpoint_file)
+    prefix = (
+        str(checkpoint["batch_key"])
+        if checkpoint and checkpoint.get("batch_key")
+        else args.run_key or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    )
     delay_seconds = float(getattr(args, "delay_seconds", 1.0))
+    max_attempts = int(getattr(args, "max_attempts", 4))
     fetched_source = False
-    for source in repository.active_career_sources(
+    sources = repository.active_career_sources(
         provider=provider_filter,
         company_id=args.company_id,
         source_ids=getattr(args, "source_ids", None),
         min_source_id=getattr(args, "min_source_id", None),
-        limit=args.limit,
-    ):
+        limit=None if checkpoint_file else args.limit,
+    )
+    if checkpoint_file:
+        checkpoint = prepare_sync_checkpoint(
+            checkpoint_file,
+            checkpoint=checkpoint,
+            prefix=prefix,
+            args=args,
+            source_ids=[int(source["id"]) for source in sources],
+        )
+        source_by_id = {int(source["id"]): source for source in sources}
+        pending_ids = [
+            source_id
+            for source_id in checkpoint["source_ids"]
+            if checkpoint["sources"].get(str(source_id), {}).get("state") != "completed"
+            and int(checkpoint["sources"].get(str(source_id), {}).get("attempts") or 0)
+            < max_attempts
+        ]
+        if args.limit is not None:
+            pending_ids = pending_ids[: args.limit]
+        sources = [source_by_id[source_id] for source_id in pending_ids if source_id in source_by_id]
+
+    for source in sources:
         source_adapter = providers.adapter_for(str(source["provider"]))
         source_id = int(source["id"])
-        run_key = f"{prefix}:{source_id}"
-        existing = service.existing_run_result(career_source_id=source_id, run_key=run_key)
-        if existing is not None:
-            if existing.status == "completed":
-                print(f"source={source_id} run_key={run_key} already completed; replaying without fetch.")
-            else:
-                print(
-                    f"source={source_id} run_key={run_key} already {existing.status}; "
-                    "skipping fetch. Use a new --run-key for a new attempt."
-                )
-            results.append(existing)
-            continue
-        try:
-            started = service.start_run(
-                career_source_id=source_id,
-                run_key=run_key,
-                provider=source_adapter.provider,
-                adapter_version=source_adapter.adapter_version,
+        source_state = (
+            checkpoint["sources"].setdefault(str(source_id), {"attempts": 0, "state": "pending"})
+            if checkpoint_file and checkpoint is not None
+            else None
+        )
+        if source_state is not None and source_state.get("state") == "running":
+            if recover_completed_attempt(
+                service,
+                checkpoint_file,
+                checkpoint,
+                source_id=source_id,
+                source_state=source_state,
+            ):
+                continue
+        attempt = int(source_state.get("attempts") or 0) + 1 if source_state is not None else 1
+        run_key = (
+            f"{prefix}:{source_id}:attempt-{attempt}"
+            if source_state is not None
+            else f"{prefix}:{source_id}"
+        )
+        if source_state is not None:
+            source_state.update({"attempts": attempt, "state": "running", "run_key": run_key})
+            write_status(checkpoint_file, checkpoint)
+
+        lock_connection = engine.connect()
+        lock_key = 1_380_007_321 * 4_294_967_296 + source_id
+        acquired = bool(
+            lock_connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_key)"),
+                {"lock_key": lock_key},
             )
-        except RunKeyReuseError as exc:
-            print(str(exc))
-            existing = service.existing_run_result(career_source_id=source_id, run_key=run_key)
-            if existing is not None:
-                results.append(existing)
+        )
+        if not acquired:
+            lock_connection.close()
+            if source_state is not None:
+                source_state.update(
+                    {
+                        "state": "failed",
+                        "error": "another worker is already syncing this source",
+                    }
+                )
+                write_status(checkpoint_file, checkpoint)
+            else:
+                raise RuntimeError(f"another worker is already syncing source {source_id}")
             continue
-        if isinstance(started, SyncResult):
-            results.append(started)
-            continue
-        if fetched_source and delay_seconds:
-            await sleeper(delay_seconds)
-        fetched_source = True
         try:
-            snapshot = await source_adapter.fetch_snapshot(str(source["external_source_id"]))
-        except Exception as exc:
-            results.append(service.fail_started_run(started=started, error=exc))
-            continue
-        results.append(service.apply_snapshot(started=started, snapshot=snapshot))
+            result = await sync_one_source(
+                service=service,
+                source=source,
+                source_adapter=source_adapter,
+                run_key=run_key,
+                fetched_source=fetched_source,
+                delay_seconds=delay_seconds,
+                sleeper=sleeper,
+            )
+        finally:
+            lock_connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+            lock_connection.close()
+        fetched_source = True
+        results.append(result)
+        if source_state is not None:
+            source_state["state"] = result.status
+            source_state["result"] = sync_result_counts(result)
+            write_status(checkpoint_file, checkpoint)
+            write_sync_stage_checkpoint(
+                getattr(args, "status_file", None),
+                checkpoint,
+                max_attempts=max_attempts,
+            )
     return results
+
+
+async def sync_one_source(
+    *,
+    service: JobSyncService,
+    source: dict,
+    source_adapter: JobSourceAdapter,
+    run_key: str,
+    fetched_source: bool,
+    delay_seconds: float,
+    sleeper: Callable[[float], Awaitable[None]],
+) -> SyncResult:
+    source_id = int(source["id"])
+    existing = service.existing_run_result(career_source_id=source_id, run_key=run_key)
+    if existing is not None:
+        if existing.status == "completed":
+            print(f"source={source_id} run_key={run_key} already completed; replaying without fetch.")
+        else:
+            print(
+                f"source={source_id} run_key={run_key} already {existing.status}; "
+                "skipping fetch. Use a new --run-key for a new attempt."
+            )
+        return existing
+    try:
+        started = service.start_run(
+            career_source_id=source_id,
+            run_key=run_key,
+            provider=source_adapter.provider,
+            adapter_version=source_adapter.adapter_version,
+        )
+    except RunKeyReuseError as exc:
+        print(str(exc))
+        existing = service.existing_run_result(career_source_id=source_id, run_key=run_key)
+        if existing is None:
+            raise
+        return existing
+    if isinstance(started, SyncResult):
+        return started
+    if fetched_source and delay_seconds:
+        await sleeper(delay_seconds)
+    try:
+        snapshot = await source_adapter.fetch_snapshot(str(source["external_source_id"]))
+    except Exception as exc:
+        return service.fail_started_run(started=started, error=exc)
+    return service.apply_snapshot(started=started, snapshot=snapshot)
+
+
+def recover_completed_attempt(
+    service: JobSyncService,
+    checkpoint_file: Path,
+    checkpoint: dict,
+    *,
+    source_id: int,
+    source_state: dict,
+) -> bool:
+    prior_run_key = str(source_state.get("run_key") or "")
+    prior = (
+        service.existing_run_result(career_source_id=source_id, run_key=prior_run_key)
+        if prior_run_key
+        else None
+    )
+    if prior is not None and prior.status == "completed":
+        source_state["state"] = "completed"
+        source_state["result"] = sync_result_counts(prior)
+        write_status(checkpoint_file, checkpoint)
+        return True
+    if prior_run_key:
+        service.interrupt_running_run(career_source_id=source_id, run_key=prior_run_key)
+    return False
+
+
+def prepare_sync_checkpoint(
+    path: Path,
+    *,
+    checkpoint: dict | None,
+    prefix: str,
+    args: argparse.Namespace,
+    source_ids: list[int],
+) -> dict:
+    scope = {
+        "provider": getattr(args, "provider", None),
+        "company_id": getattr(args, "company_id", None),
+        "source_ids": getattr(args, "source_ids", None),
+        "min_source_id": getattr(args, "min_source_id", None),
+    }
+    if checkpoint is not None:
+        if checkpoint.get("schema_version") != 1 or checkpoint.get("scope") != scope:
+            raise ValueError(f"sync checkpoint scope does not match this command: {path}")
+        return checkpoint
+    checkpoint = {
+        "schema_version": 1,
+        "batch_key": prefix,
+        "scope": scope,
+        "source_ids": source_ids,
+        "sources": {
+            str(source_id): {"attempts": 0, "state": "pending"} for source_id in source_ids
+        },
+    }
+    write_status(path, checkpoint)
+    return checkpoint
+
+
+def sync_result_counts(result: SyncResult) -> dict[str, int | str]:
+    return {
+        "status": result.status,
+        "jobs_added": result.jobs_added,
+        "jobs_updated": result.jobs_updated,
+        "jobs_closed": result.jobs_closed,
+    }
+
+
+def write_sync_stage_checkpoint(
+    status_file: Path | None,
+    checkpoint: dict,
+    *,
+    max_attempts: int,
+) -> None:
+    prior = read_status(status_file) or stage_started("ats_sync")
+    entries = list(checkpoint["sources"].values())
+    states = [entry.get("state") for entry in entries]
+    write_status(
+        status_file,
+        stage_checkpoint(
+            prior,
+            selected=len(states),
+            processed=sum(state != "pending" for state in states),
+            succeeded=states.count("completed"),
+            failed=sum(
+                state in {"failed", "partial"}
+                and int(entry.get("attempts") or 0) >= max_attempts
+                for state, entry in zip(states, entries, strict=True)
+            ),
+            batch_key=checkpoint["batch_key"],
+            checkpointed_sources=len(states),
+        ),
+    )
 
 
 if __name__ == "__main__":

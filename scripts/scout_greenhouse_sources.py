@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
 import tempfile
+import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,13 @@ from yc_radar.services.greenhouse_scout import (
     resolve_company,
 )
 from yc_radar.services.job_source_registry import JobSourceRegistry
+from yc_radar.services.run_status import (
+    read_status,
+    stage_checkpoint,
+    stage_finished,
+    stage_started,
+    write_status,
+)
 from yc_radar.services.source_providers import is_ats_domain
 
 OUTPUT_FIELDS = [
@@ -81,6 +90,12 @@ def parse_args() -> argparse.Namespace:
         help="Minimum delay between network requests. Cached reads do not wait.",
     )
     parser.add_argument("--checkpoint-every", type=int, default=25)
+    parser.add_argument("--status-file", type=Path, help="Atomic local stage-status JSON output.")
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore an existing partial/final output and verify the selected tokens again.",
+    )
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -110,10 +125,16 @@ def main() -> None:
     selected = candidates[args.offset :]
     if args.limit is not None:
         selected = selected[: args.limit]
+    ensure_checkpoint_manifest(args, selected)
+    status = stage_started("greenhouse_scout")
+    write_status(args.status_file, status)
     engine = engine_from_url()
     companies, existing_sources = load_registry_state(engine)
+    resume_path = existing_resume_path(args.output) if not args.no_resume else None
+    resume_rows = load_resume_rows(resume_path) if resume_path else {}
     rows: list[dict[str, Any]] = []
     crawl = crawl_from_path(args.input)
+    resumed = 0
 
     with GreenhouseBoardScout(
         args.cache_dir,
@@ -121,6 +142,13 @@ def main() -> None:
     ) as scout:
         for index, candidate in enumerate(selected, start=1):
             token = candidate["board_token"]
+            prior = resume_rows.get(token)
+            if prior is not None and can_resume_row(prior, candidate=candidate, apply=args.apply):
+                rows.append(prior)
+                resumed += 1
+                if index % args.checkpoint_every == 0:
+                    checkpoint(args, status, rows, selected=len(selected), resumed=resumed)
+                continue
             existing_company_id = existing_sources.get(token)
             if existing_company_id is not None:
                 evidence = GreenhouseBoardEvidence(
@@ -163,12 +191,115 @@ def main() -> None:
                 )
             rows.append(row)
             if index % args.checkpoint_every == 0:
-                write_csv_atomic(args.output.with_suffix(".partial.csv"), rows)
-                print_progress(index, len(selected), rows)
+                checkpoint(args, status, rows, selected=len(selected), resumed=resumed)
 
     write_csv_atomic(args.output, rows)
+    write_csv_atomic(args.output.with_suffix(".partial.csv"), rows)
     print_progress(len(selected), len(selected), rows)
+    write_status(
+        args.status_file,
+        stage_finished(
+            status,
+            state="completed",
+            selected=len(selected),
+            processed=len(rows),
+            succeeded=sum(row["verification_status"] != "failed" for row in rows),
+            failed=sum(row["verification_status"] == "failed" for row in rows),
+            resumed=resumed,
+            output=str(args.output),
+        ),
+    )
     print(f"Wrote {len(rows)} verification rows to {args.output}")
+
+
+def existing_resume_path(output: Path) -> Path | None:
+    partial = output.with_suffix(".partial.csv")
+    if partial.exists():
+        return partial
+    return output if output.exists() else None
+
+
+def ensure_checkpoint_manifest(
+    args: argparse.Namespace,
+    selected: list[dict[str, str]],
+) -> None:
+    selected_identity = "\n".join(
+        f"{row['board_token']}\t{row['canonical_source_url']}" for row in selected
+    ).encode()
+    payload = {
+        "schema_version": 1,
+        "input_path": str(args.input.resolve()),
+        "input_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
+        "selected_sha256": hashlib.sha256(selected_identity).hexdigest(),
+        "selected_count": len(selected),
+        "offset": args.offset,
+        "limit": args.limit,
+        "apply": args.apply,
+    }
+    manifest_path = args.output.with_suffix(".checkpoint.json")
+    prior = None if args.no_resume else read_status(manifest_path)
+    if prior is not None and prior != payload:
+        raise SystemExit(
+            f"checkpoint manifest does not match this input/scope: {manifest_path}; "
+            "use a different --output or --no-resume"
+        )
+    write_status(manifest_path, payload)
+
+
+def load_resume_rows(path: Path) -> dict[str, dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    if rows and set(OUTPUT_FIELDS) - set(rows[0]):
+        return {}
+    return {
+        row["board_token"].strip().lower(): row
+        for row in rows
+        if row.get("board_token", "").strip()
+    }
+
+
+def can_resume_row(
+    row: dict[str, str],
+    *,
+    candidate: dict[str, str],
+    apply: bool,
+) -> bool:
+    if row.get("canonical_source_url") != candidate.get("canonical_source_url"):
+        return False
+    verification = row.get("verification_status")
+    if verification == "failed":
+        return False
+    if not apply or verification != "verified":
+        return True
+    resolution = row.get("resolution_status")
+    registration = row.get("registration_status")
+    if resolution not in {"existing_exact_name", "new_company_domain_candidate"}:
+        return True
+    return registration not in {"not_requested", "homepage_unverified", ""}
+
+
+def checkpoint(
+    args: argparse.Namespace,
+    status: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    selected: int,
+    resumed: int,
+) -> None:
+    write_csv_atomic(args.output.with_suffix(".partial.csv"), rows)
+    print_progress(len(rows), selected, rows)
+    write_status(
+        args.status_file,
+        stage_checkpoint(
+            status,
+            selected=selected,
+            processed=len(rows),
+            succeeded=sum(row["verification_status"] != "failed" for row in rows),
+            failed=sum(row["verification_status"] == "failed" for row in rows),
+            resumed=resumed,
+            checkpoint=str(args.output.with_suffix(".partial.csv")),
+        ),
+    )
 
 
 def load_candidates(path: Path) -> list[dict[str, str]]:
@@ -262,19 +393,30 @@ def apply_registration(
         row["error"] = str(exc)[:500]
 
 
-def verify_homepage(url: str) -> str | None:
+def verify_homepage(url: str, *, sleeper=time.sleep) -> str | None:
     headers = {
         "User-Agent": SCOUT_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
         "Accept-Language": "en-US,en;q=0.8",
     }
-    try:
-        with httpx.Client(timeout=15, follow_redirects=True, headers=headers) as client:
-            with client.stream("GET", url, headers=headers) as response:
-                if not 200 <= response.status_code < 400:
-                    return None
-                final = urlparse(str(response.url))
-    except httpx.HTTPError:
+    final = None
+    with httpx.Client(timeout=15, follow_redirects=True, headers=headers) as client:
+        for attempt in range(1, 5):
+            try:
+                with client.stream("GET", url, headers=headers) as response:
+                    if 200 <= response.status_code < 400:
+                        final = urlparse(str(response.url))
+                        break
+                    if response.status_code not in {408, 425, 429, 500, 502, 503, 504}:
+                        return None
+                    retry_after = response.headers.get("Retry-After", "")
+            except httpx.RequestError as exc:
+                retry_after = ""
+                if not isinstance(exc, httpx.TransportError):
+                    break
+            if attempt < 4:
+                sleeper(float(retry_after) if retry_after.isdigit() else float(2 ** (attempt - 1)))
+    if final is None:
         return None
     host = (final.hostname or "").lower().rstrip(".")
     if (

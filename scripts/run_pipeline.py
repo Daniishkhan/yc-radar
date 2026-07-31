@@ -90,6 +90,8 @@ async def run_pipeline(args: argparse.Namespace) -> int:
             sys.executable,
             str(SCRIPTS_DIR / "sync_job_sources.py"),
             "sync",
+            "--checkpoint-file",
+            str(status_dir / "ats-sync-checkpoint.json"),
         ]
         if args.sync_limit is not None:
             sync_command.extend(["--limit", str(args.sync_limit)])

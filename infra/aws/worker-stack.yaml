@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Private, SSM-managed YC Radar worker with retained EBS and S3 state.
+  The instance has no inbound security-group rules and runs Docker Compose jobs.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC for the worker.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Existing public subnet. It must be in AvailabilityZone.
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Availability Zone of SubnetId; the retained EBS volume is created here.
+  UbuntuAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Canonical Ubuntu 24.04 amd64 AMI parameter.
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+    Description: Worker size. The default is appropriate for network-heavy jobs and local Postgres.
+  DataVolumeSizeGiB:
+    Type: Number
+    Default: 50
+    MinValue: 20
+    MaxValue: 1024
+    Description: Size of the encrypted, retained gp3 data volume.
+  RepositoryUrl:
+    Type: String
+    Default: https://github.com/Daniishkhan/yc-radar.git
+    AllowedPattern: "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\\.git)?$"
+    Description: Public Git repository cloned by cloud-init. Do not put credentials in this value.
+  RepositoryBranch:
+    Type: String
+    Default: main
+    AllowedPattern: "^[A-Za-z0-9._/-]+$"
+    Description: Branch deployed to the worker.
+  AthenaWorkGroup:
+    Type: String
+    Default: radar-commoncrawl
+    AllowedPattern: "^[A-Za-z0-9._-]+$"
+  GlueDatabase:
+    Type: String
+    Default: radar_commoncrawl
+    AllowedPattern: "^[A-Za-z0-9_]+$"
+  AthenaResultsBucketName:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    Description: Existing S3 bucket used by the configured Athena workgroup.
+  StateBucketName:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    Description: Globally unique name for the retained, versioned worker-state bucket.
+
+Resources:
+  WorkerStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref StateBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: yc-radar
+        - Key: Purpose
+          Value: worker-checkpoints
+
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: YC Radar worker; no ingress, outbound web and DNS only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - Description: HTTPS for SSM, AWS APIs, GitHub, and public job providers
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: HTTP for Ubuntu package mirrors and public redirects
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: DNS over UDP
+          IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+        - Description: DNS over TCP
+          IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-worker
+        - Key: Project
+          Value: yc-radar
+
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: SSM access plus bounded YC Radar Athena, Glue, and S3 access.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: radar-athena-query
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: QueryBoundedWorkgroup
+                Effect: Allow
+                Action:
+                  - athena:BatchGetQueryExecution
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:GetWorkGroup
+                  - athena:ListQueryExecutions
+                  - athena:StartQueryExecution
+                  - athena:StopQueryExecution
+                Resource: !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${AthenaWorkGroup}
+              - Sid: ReadCommonCrawlCatalog
+                Effect: Allow
+                Action:
+                  - glue:BatchGetPartition
+                  - glue:BatchCreatePartition
+                  - glue:CreatePartition
+                  - glue:CreateTable
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
+                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}
+                  - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/*
+              - Sid: LocateAthenaResultsBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${AthenaResultsBucketName}
+              - Sid: ReadWriteAthenaResults
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${AthenaResultsBucketName}/*
+              - Sid: ListCommonCrawlIndex
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::commoncrawl
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - cc-index/table/cc-main/warc/*
+              - Sid: ReadCommonCrawlIndex
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::commoncrawl/cc-index/table/cc-main/warc/*
+        - PolicyName: radar-worker-state
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: LocateAndListState
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                Resource: !GetAtt WorkerStateBucket.Arn
+              - Sid: ReadWriteVersionedState
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub ${WorkerStateBucket.Arn}/*
+      Tags:
+        - Key: Project
+          Value: yc-radar
+
+  WorkerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref WorkerRole
+
+  WorkerDataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      Encrypted: true
+      Size: !Ref DataVolumeSizeGiB
+      VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-data
+        - Key: Project
+          Value: yc-radar
+        - Key: Retain
+          Value: "true"
+
+  WorkerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref UbuntuAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref WorkerInstanceProfile
+      EbsOptimized: true
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+        HttpPutResponseHopLimit: 2
+        InstanceMetadataTags: enabled
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          DeviceIndex: "0"
+          GroupSet:
+            - !Ref WorkerSecurityGroup
+          SubnetId: !Ref SubnetId
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            VolumeSize: 20
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-worker
+        - Key: Project
+          Value: yc-radar
+      UserData:
+        Fn::Base64: !Sub |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec > >(tee -a /var/log/radar-bootstrap.log | logger -t radar-bootstrap -s 2>/dev/console) 2>&1
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git
+
+          install -d -m 0755 /etc/radar /opt/radar-bootstrap
+          umask 077
+          cat > /etc/radar/worker.env <<'RADAR_ENV'
+          RADAR_DATA_VOLUME_ID=${WorkerDataVolume}
+          RADAR_REPO_URL=${RepositoryUrl}
+          RADAR_REPO_BRANCH=${RepositoryBranch}
+          RADAR_STATE_BUCKET=${WorkerStateBucket}
+          RADAR_AWS_REGION=${AWS::Region}
+          RADAR_ENV
+
+          if [[ -d /opt/radar-bootstrap/.git ]]; then
+            git -C /opt/radar-bootstrap fetch --depth 1 origin "${RepositoryBranch}"
+            git -C /opt/radar-bootstrap checkout "${RepositoryBranch}"
+            git -C /opt/radar-bootstrap merge --ff-only "origin/${RepositoryBranch}"
+          else
+            rm -rf /opt/radar-bootstrap
+            git clone --depth 1 --branch "${RepositoryBranch}" "${RepositoryUrl}" /opt/radar-bootstrap
+          fi
+
+          /opt/radar-bootstrap/deploy/aws/bootstrap-host.sh
+
+  WorkerDataAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref WorkerInstance
+      VolumeId: !Ref WorkerDataVolume
+
+Outputs:
+  InstanceId:
+    Description: Use this ID with AWS Systems Manager Session Manager or Run Command.
+    Value: !Ref WorkerInstance
+  DataVolumeId:
+    Description: Retained encrypted EBS volume containing Docker, Postgres, and local checkpoints.
+    Value: !Ref WorkerDataVolume
+  StateBucketName:
+    Description: Retained versioned bucket for job specifications and state summaries.
+    Value: !Ref WorkerStateBucket
+  SecurityGroupId:
+    Description: No-ingress worker security group.
+    Value: !Ref WorkerSecurityGroup
+  SsmStartSessionCommand:
+    Value: !Sub aws ssm start-session --target ${WorkerInstance} --region ${AWS::Region}

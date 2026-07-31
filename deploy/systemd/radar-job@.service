@@ -1,0 +1,26 @@
+[Unit]
+Description=YC Radar resumable job %i
+Wants=network-online.target
+After=network-online.target docker.service radar-deploy.service
+Requires=docker.service radar-deploy.service
+RequiresMountsFor=/srv/radar
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/radar-run-job %i
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=infinity
+TimeoutStopSec=2min
+KillSignal=SIGTERM
+KillMode=mixed
+Nice=5
+OOMScoreAdjust=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radar-job-%i
+
+[Install]
+WantedBy=multi-user.target
