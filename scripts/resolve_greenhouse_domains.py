@@ -302,35 +302,49 @@ def run(args: argparse.Namespace) -> int:
                         args,
                         status,
                         rows,
-                        selected=len(selected),
+                        selected_candidates=selected,
                         resumed=resumed,
+                        preserved_rows=resume_rows,
                     )
                 if quota_exhausted:
                     break
     except BaseException as exc:
-        checkpoint(args, status, rows, selected=len(selected), resumed=resumed)
+        checkpoint(
+            args,
+            status,
+            rows,
+            selected_candidates=selected,
+            resumed=resumed,
+            preserved_rows=resume_rows,
+        )
+        durable_rows = merge_checkpoint_rows(selected, rows, resume_rows)
         write_status(
             args.status_file,
             stage_finished(
                 status,
                 state="failed",
                 error=exc,
-                **summary_counts(rows, selected=len(selected), resumed=resumed),
+                **summary_counts(
+                    durable_rows, selected=len(selected), resumed=resumed
+                ),
             ),
         )
         raise
 
     if quota_exhausted:
+        durable_rows = merge_checkpoint_rows(selected, rows, resume_rows)
         write_status(
             args.status_file,
             stage_finished(
                 status,
                 state="quota_exhausted",
-                **summary_counts(rows, selected=len(selected), resumed=resumed),
+                **summary_counts(
+                    durable_rows, selected=len(selected), resumed=resumed
+                ),
                 checkpoint=str(args.output.with_suffix(".partial.csv")),
             ),
         )
-        print_progress(len(rows), len(selected), rows)
+        print_progress(len(durable_rows), len(selected), durable_rows)
         print("Vertex quota exhausted; checkpoint saved for a later resume.", flush=True)
         # Quota is a durable, resumable terminal state for this invocation. Returning
         # success prevents systemd Restart=on-failure from immediately hammering the
@@ -683,17 +697,41 @@ def checkpoint(
     status: dict[str, Any],
     rows: list[dict[str, Any]],
     *,
-    selected: int,
+    selected_candidates: list[dict[str, str]],
     resumed: int,
+    preserved_rows: dict[str, dict[str, str]],
 ) -> None:
     partial = args.output.with_suffix(".partial.csv")
-    write_csv_atomic(partial, rows)
-    summary = summary_counts(rows, selected=selected, resumed=resumed)
+    durable_rows = merge_checkpoint_rows(selected_candidates, rows, preserved_rows)
+    write_csv_atomic(partial, durable_rows)
+    selected_count = len(selected_candidates)
+    summary = summary_counts(durable_rows, selected=selected_count, resumed=resumed)
     write_status(
         args.status_file,
         stage_checkpoint(status, **summary, checkpoint=str(partial)),
     )
-    print_progress(len(rows), selected, rows)
+    print_progress(len(durable_rows), selected_count, durable_rows)
+
+
+def merge_checkpoint_rows(
+    selected_candidates: list[dict[str, str]],
+    rows: list[dict[str, Any]],
+    preserved_rows: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Overlay visited rows without dropping the unvisited tail of a prior checkpoint."""
+
+    merged: dict[str, dict[str, Any]] = {
+        token: dict(row) for token, row in preserved_rows.items()
+    }
+    for row in rows:
+        token = str(row.get("board_token") or "").strip().lower()
+        if token:
+            merged[token] = row
+    return [
+        merged[token]
+        for candidate in selected_candidates
+        if (token := candidate["board_token"].strip().lower()) in merged
+    ]
 
 
 def summary_counts(

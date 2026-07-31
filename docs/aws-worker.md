@@ -371,9 +371,11 @@ If the process or VM stops, use `retry domain-resolver-full`; systemd reuses the
 resolver advances from its CSV/cache checkpoint. Each company also has a 120-second wall-clock
 budget by default. A company that exceeds it is immediately checkpointed as a retryable
 `request_failed` row so one bad site cannot block the remaining queue; a later retry revisits that
-row while resuming completed rows. Do not delete the partial output or change input, model, prompt,
-or scope mid-run. Re-run the status and cost checks against the full-run paths. Registry writes
-remain a separate reviewed `--apply` decision.
+row while resuming completed rows. Replay checkpoints overlay updated rows onto the longer saved
+checkpoint, so another interruption during replay does not discard its unvisited tail. Do not
+delete the partial output or change input, model, prompt, or scope mid-run. Re-run the status and
+cost checks against the full-run paths. Registry writes remain a separate reviewed `--apply`
+decision.
 
 The manifest also fingerprints the resolver prompt and deterministic evidence versions. A prompt
 change intentionally creates new Vertex cache keys; an evidence-only change can reuse raw model

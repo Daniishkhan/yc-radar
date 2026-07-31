@@ -134,6 +134,97 @@ def test_resume_retries_request_failures_and_apply_pending_acceptance() -> None:
     )
 
 
+def test_checkpoint_merge_preserves_unvisited_prior_rows() -> None:
+    selected = [
+        scout_row("one"),
+        scout_row("two"),
+        scout_row("three"),
+        scout_row("four"),
+    ]
+    prior = {
+        "one": {"board_token": "one", "domain_resolution_status": "unresolved"},
+        "two": {"board_token": "two", "domain_resolution_status": "accepted"},
+        "three": {"board_token": "three", "domain_resolution_status": "manual_review"},
+        "outside": {"board_token": "outside", "domain_resolution_status": "accepted"},
+    }
+    visited = [
+        {"board_token": "one", "domain_resolution_status": "request_failed"},
+        {"board_token": "four", "domain_resolution_status": "accepted"},
+    ]
+
+    merged = resolver_script.merge_checkpoint_rows(selected, visited, prior)
+
+    assert [row["board_token"] for row in merged] == ["one", "two", "three", "four"]
+    assert merged[0]["domain_resolution_status"] == "request_failed"
+    assert merged[1:] == [prior["two"], prior["three"], visited[1]]
+
+
+def test_interrupted_resume_does_not_truncate_prior_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "scout.csv"
+    candidates = [
+        scout_row("one", board_name="One"),
+        scout_row("two", board_name="Two"),
+        scout_row("three", board_name="Three"),
+        scout_row("four", board_name="Four"),
+    ]
+    write_scout_csv(path, candidates)
+    args = args_for(tmp_path, path)
+    resolver_script.ensure_checkpoint_manifest(args, candidates)
+    prior_rows = [
+        {**candidates[0], "domain_resolution_status": "unresolved", "retryable": "false"},
+        {**candidates[1], "domain_resolution_status": "request_failed", "retryable": "true"},
+        {**candidates[2], "domain_resolution_status": "request_failed", "retryable": "true"},
+        {**candidates[3], "domain_resolution_status": "accepted", "retryable": "false"},
+    ]
+    partial = args.output.with_suffix(".partial.csv")
+    resolver_script.write_csv_atomic(partial, prior_rows)
+
+    class FakeResolver:
+        def __init__(self, *args, **kwargs) -> None:
+            self.cache = type("Cache", (), {"hits": 0, "stores": 0})()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def resolve(self, *, company_name: str, **kwargs) -> DomainResolutionResult:
+            if company_name == "Three":
+                raise RuntimeError("interrupted retry")
+            assert company_name == "Two"
+            return DomainResolutionResult(
+                status="unresolved",
+                model="gemini-3.5-flash-lite",
+                location="global",
+                cache_source="disk",
+            )
+
+    monkeypatch.setattr(resolver_script, "GoogleDomainResolver", FakeResolver)
+
+    with pytest.raises(RuntimeError, match="interrupted retry"):
+        resolver_script.run(args)
+
+    with partial.open(newline="", encoding="utf-8") as source:
+        checkpoint_rows = list(csv.DictReader(source))
+    assert [row["board_token"] for row in checkpoint_rows] == [
+        "one",
+        "two",
+        "three",
+        "four",
+    ]
+    assert checkpoint_rows[1]["domain_resolution_status"] == "unresolved"
+    assert checkpoint_rows[2]["domain_resolution_status"] == "request_failed"
+    status = json.loads(args.status_file.read_text(encoding="utf-8"))
+    assert status["state"] == "failed"
+    assert status["processed"] == 4
+
+
 def test_quota_checkpoint_is_durable_and_returns_success_to_avoid_restart_loop(
     tmp_path: Path, monkeypatch
 ) -> None:
