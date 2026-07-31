@@ -15,6 +15,7 @@ Actions:
   shell
   health
   tailscale
+  exit-node
   deploy
   run NAME -- COMMAND [ARG ...]
   pipeline NAME [PIPELINE ARG ...]
@@ -155,6 +156,10 @@ case "${action}" in
   tailscale)
     [[ $# -eq 0 ]] || usage
     send_command 'sudo systemctl status --no-pager tailscaled.service; sudo tailscale status --peers=false; sudo tailscale ip -4; sudo tailscale netcheck'
+    ;;
+  exit-node)
+    [[ $# -eq 0 ]] || usage
+    send_command 'sudo /usr/local/sbin/radar-configure-tailscale-exit-node --advertise; sudo tailscale status --peers=false'
     ;;
   deploy)
     [[ $# -eq 0 ]] || usage

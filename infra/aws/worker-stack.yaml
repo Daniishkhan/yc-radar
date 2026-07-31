@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Private, SSM-managed YC Radar worker with retained EBS and S3 state.
-  The instance has no inbound security-group rules and runs Docker Compose jobs.
+  Private, SSM-managed YC Radar worker with retained EBS, S3 state, a static
+  public egress address, and optional Tailscale exit-node routing.
 
 Parameters:
   VpcId:
@@ -123,6 +123,14 @@ Resources:
           Value: !Sub ${AWS::StackName}-worker
         - Key: Project
           Value: yc-radar
+
+  WorkerExitNodeEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: All outbound traffic for Tailscale exit-node forwarding
+      GroupId: !GetAtt WorkerSecurityGroup.GroupId
+      IpProtocol: "-1"
+      CidrIp: 0.0.0.0/0
 
   WorkerRole:
     Type: AWS::IAM::Role
@@ -251,6 +259,7 @@ Resources:
       InstanceType: !Ref InstanceType
       IamInstanceProfile: !Ref WorkerInstanceProfile
       EbsOptimized: true
+      SourceDestCheck: false
       MetadataOptions:
         HttpEndpoint: enabled
         HttpTokens: required
@@ -306,6 +315,24 @@ Resources:
 
           /opt/radar-bootstrap/deploy/aws/bootstrap-host.sh
 
+  WorkerElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-worker
+        - Key: Project
+          Value: yc-radar
+        - Key: Purpose
+          Value: tailscale-exit-node
+
+  WorkerElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt WorkerElasticIp.AllocationId
+      NetworkInterfaceId: !GetAtt WorkerInstance.PrimaryNetworkInterfaceId
+
   WorkerDataAttachment:
     Type: AWS::EC2::VolumeAttachment
     Properties:
@@ -326,5 +353,11 @@ Outputs:
   SecurityGroupId:
     Description: No-ingress worker security group.
     Value: !Ref WorkerSecurityGroup
+  ElasticIpAddress:
+    Description: Static public IPv4 address used for worker and Tailscale exit-node egress.
+    Value: !Ref WorkerElasticIp
+  ElasticIpAllocationId:
+    Description: Allocation ID of the stack-owned Elastic IP address.
+    Value: !GetAtt WorkerElasticIp.AllocationId
   SsmStartSessionCommand:
     Value: !Sub aws ssm start-session --target ${WorkerInstance} --region ${AWS::Region}

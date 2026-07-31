@@ -2,11 +2,12 @@
 
 The production worker is one on-demand EC2 instance running Docker Compose. It has no inbound
 security-group rules, no public port 22, and no EC2 SSH key. Tailscale SSH is the primary human
-access path after one-time device enrollment; AWS Systems Manager remains the no-inbound path for
-automation, initial enrollment, and break-glass recovery. Postgres, Docker state, caches, job
-checkpoints, and ignored `data/local/` artifacts live on a separate encrypted 50 GiB gp3 volume
-mounted at `/srv/radar`. CloudFormation retains that volume and the versioned state bucket if the
-instance or stack is removed.
+access path after one-time device enrollment; the same node can optionally provide stable public
+egress as a Tailscale exit node through its Elastic IP. AWS Systems Manager remains the no-inbound
+path for automation, initial enrollment, and break-glass recovery. Postgres, Docker state, caches,
+job checkpoints, and ignored `data/local/` artifacts live on a separate encrypted 50 GiB gp3
+volume mounted at `/srv/radar`. CloudFormation retains that volume and the versioned state bucket
+if the instance or stack is removed, but releases the stack-owned Elastic IP automatically.
 
 This is intentionally a worker, not a served application. Nothing listens on a public port.
 
@@ -34,6 +35,8 @@ aws cloudformation deploy \
     AthenaResultsBucketName=radar-athena-results-211236627350-us-east-1 \
     StateBucketName=radar-worker-state-211236627350-us-east-1
 ```
+
+The stack output named `ElasticIpAddress` is the worker's stable public egress address.
 
 The default is Ubuntu 24.04 amd64 on `t3.medium`, a 20 GiB encrypted disposable root disk, and a
 50 GiB encrypted retained data disk. The bootstrap installs Docker, the Compose plugin, AWS CLI,
@@ -119,12 +122,66 @@ sudo systemctl restart tailscaled
 Re-run the one-time `tailscale up` command if re-authentication is required. Never open public
 port 22 as a recovery shortcut.
 
-The worker security group allows outbound UDP for Tailscale NAT traversal and direct peer
-connections while retaining zero ingress rules. Inspect Tailscale health without opening a shell:
+The worker security group allows all outbound traffic, including the UDP Tailscale uses for NAT
+traversal and direct peer connections. That broader egress also makes exit-node forwarding
+possible while the group retains zero ingress rules. Inspect Tailscale health without opening a
+shell:
 
 ```bash
 ./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 tailscale
 ```
+
+## Optional Tailscale exit node
+
+The Elastic IP makes the worker's internet egress address stable, which is useful when an external
+service allowlists the exit node's public IP. It does not open the instance to the internet. Keep
+the worker security group at zero ingress and keep public SSH disabled; SSM is still the recovery
+path if Tailscale routing or authentication fails.
+
+Exit-node support changes the outbound security boundary. Forwarded tailnet traffic can target
+arbitrary protocols and ports, so the worker security group must allow arbitrary outbound traffic
+while the exit-node capability is enabled. Only intended tailnet identities should be permitted to
+use the node.
+
+AWS charges `$0.005` per hour for each public IPv4 address, whether the Elastic IP is attached and
+in use or idle. That is roughly `$3.60` for 30 days; verify the current amount on
+[AWS VPC pricing](https://aws.amazon.com/vpc/pricing/). AWS currently includes the first 100 GB per
+month of internet data transfer out in aggregate across eligible services, then charges current
+data-transfer-out rates. Browsing, downloads, streaming, and every other client flow routed through
+the worker can contribute to that total; check
+[EC2 data-transfer pricing](https://aws.amazon.com/ec2/pricing/on-demand/#Data_Transfer) before
+using it for high-volume traffic.
+
+Bootstrap persists Linux IPv4 and IPv6 forwarding in `/etc/sysctl.d/99-tailscale.conf` but does not
+advertise an unauthenticated device. The template also disables EC2 source/destination checking so
+AWS permits the instance to forward traffic. After completing the interactive enrollment above,
+advertise the worker with the checked-in SSM action:
+
+```bash
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  exit-node
+```
+
+That action invokes `sudo radar-configure-tailscale-exit-node --advertise`, which reapplies the
+forwarding sysctls and runs `sudo tailscale set --advertise-exit-node`. It is safe to rerun after a
+deployment or Tailscale re-authentication.
+
+In the Tailscale admin console, approve the exit-node route advertised by `radar-worker`. Each
+client must then explicitly select `radar-worker` as its exit node in the Tailscale UI or CLI:
+
+```bash
+tailscale set --exit-node=radar-worker
+```
+
+Node-key expiry is intentionally fail-closed. If the worker's key expires while a client still
+selects it, that client may lose internet connectivity until it selects another exit node, turns
+exit-node use off, or the worker re-authenticates. For a dedicated, locked-down server that must
+route continuously, a tailnet administrator can disable key expiry in the Tailscale admin console
+after accepting the longer-lived credential risk. Preserve SSM access and use it to inspect
+`tailscale status`, restart `tailscaled`, check the forwarding sysctls, or re-authenticate without
+opening public port 22.
 
 ## Deploy a new commit
 

@@ -205,8 +205,12 @@ install_worker_services() {
   install -m 0755 "${APP_DIR}/deploy/aws/deploy-host.sh" /usr/local/sbin/radar-deploy
   install -m 0755 "${APP_DIR}/deploy/aws/run-job.sh" /usr/local/sbin/radar-run-job
   install -m 0755 "${APP_DIR}/deploy/aws/jobctl.sh" /usr/local/sbin/radar-jobctl
+  install -m 0755 \
+    "${APP_DIR}/deploy/aws/configure-tailscale-exit-node.sh" \
+    /usr/local/sbin/radar-configure-tailscale-exit-node
   install -m 0644 "${APP_DIR}/deploy/systemd/radar-deploy.service" /etc/systemd/system/radar-deploy.service
   install -m 0644 "${APP_DIR}/deploy/systemd/radar-job@.service" /etc/systemd/system/radar-job@.service
+  /usr/local/sbin/radar-configure-tailscale-exit-node
   systemctl daemon-reload
   systemctl enable radar-deploy.service
 }
