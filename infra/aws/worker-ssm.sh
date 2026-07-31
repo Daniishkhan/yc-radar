@@ -193,7 +193,7 @@ PY
     remote_command='set -e; sudo test -r /srv/radar/config/gcp/gcp-wif.json; '
     remote_command+="sudo jq '{type, audience, service_account_impersonation_url, "
     remote_command+='credential_source: {environment_id: .credential_source.environment_id, '
-    remote_command+='imdsv2: (.credential_source.imdsv2_session_token_url != null)}}'
+    remote_command+="imdsv2: (.credential_source.imdsv2_session_token_url != null)}}'"
     remote_command+=' /srv/radar/config/gcp/gcp-wif.json; '
     remote_command+="sudo grep -E '^(GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|"
     remote_command+="YC_RADAR_VERTEX_MODEL|GOOGLE_APPLICATION_CREDENTIALS)='"
