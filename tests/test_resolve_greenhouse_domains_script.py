@@ -91,6 +91,9 @@ def test_manifest_fails_closed_when_limit_changes(tmp_path: Path) -> None:
     candidates = resolver_script.load_candidates(path)
     calibration = args_for(tmp_path, path, limit=1)
     resolver_script.ensure_checkpoint_manifest(calibration, candidates[:1])
+    manifest = json.loads(calibration.output.with_suffix(".checkpoint.json").read_text())
+    assert manifest["prompt_version"] == resolver_script.PROMPT_VERSION
+    assert manifest["evidence_version"] == resolver_script.EVIDENCE_VERSION
 
     full = args_for(tmp_path, path, limit=None)
     with pytest.raises(SystemExit, match="checkpoint manifest does not match"):
@@ -170,6 +173,8 @@ def test_quota_checkpoint_is_durable_and_returns_success_to_avoid_restart_loop(
     assert status["processed"] == 1
     assert status["failed"] == 1
     assert status["request_attempt_count"] == 3
+    assert status["prompt_version"] == resolver_script.PROMPT_VERSION
+    assert status["evidence_version"] == resolver_script.EVIDENCE_VERSION
 
 
 def test_result_row_and_registration_proof_retain_auditable_fields() -> None:
@@ -200,6 +205,8 @@ def test_result_row_and_registration_proof_retain_auditable_fields() -> None:
                 pages=(brand_page, careers_page),
                 brand_valid=True,
                 reciprocal_link_valid=True,
+                company_domain_compatible=True,
+                company_domain_matches=("domain_label:name_prefix:acme",),
                 passed=True,
             ),
         ),
@@ -210,6 +217,9 @@ def test_result_row_and_registration_proof_retain_auditable_fields() -> None:
 
     assert row["job_count"] == "7"
     assert row["domain_resolution_status"] == "accepted"
+    assert resolver_script.accepted_company_domain_matches(result) == [
+        "domain_label:name_prefix:acme"
+    ]
     assert proof == [
         {
             "page_url": "https://www.acme.test/",

@@ -292,7 +292,14 @@ The calibration artifacts are retained on EBS:
 For the 100 rows, inspect result/error distributions, citations and deterministic evidence, request
 attempts, input/output/total tokens, and `search_query_count` plus the recorded `search_queries`
 from Vertex `webSearchQueries`. Search-query count matters independently of request count: one
-Gemini request can issue multiple billable searches. Inspect the atomic aggregate status directly:
+Gemini request can issue multiple billable searches. Google output and generated search queries
+only propose domains. Automatic acceptance additionally requires all three deterministic signals:
+compatible company/domain naming, brand evidence on the fetched company site, and an exact board
+token in a public Greenhouse link or active inline integration script. A branded third-party job
+page must remain unresolved. Page redirects are followed only through bounded HTTP(S) hops with
+validated ports and public literal hosts. Inspect `company_domain_matches`, page-level errors, and
+the exact Greenhouse proof in `candidate_evidence`, then inspect the atomic aggregate status
+directly:
 
 ```bash
 sudo jq '{
@@ -363,6 +370,11 @@ If the process or VM stops, use `retry domain-resolver-full`; systemd reuses the
 resolver advances from its CSV/cache checkpoint. Do not delete the partial output or change input,
 model, prompt, or scope mid-run. Re-run the status and cost checks against the full-run paths.
 Registry writes remain a separate reviewed `--apply` decision.
+
+The manifest also fingerprints the resolver prompt and deterministic evidence versions. A prompt
+change intentionally creates new Vertex cache keys; an evidence-only change can reuse raw model
+responses but must not resume CSV rows produced by the older acceptance rules. Use a new output
+path when comparing resolver versions so the prior calibration remains auditable.
 
 As of 2026-07-31, standard global `gemini-3.5-flash-lite` pricing is `$0.30` per million input
 tokens and `$2.50` per million output tokens. Gemini 3 grounding includes 5,000 Google Web/Image

@@ -23,6 +23,8 @@ from yc_radar.services.database import career_sources_table, companies_table, en
 from yc_radar.services.google_domain_resolver import (
     DEFAULT_LOCATION,
     DEFAULT_MODEL,
+    EVIDENCE_VERSION,
+    PROMPT_VERSION,
     DomainResolutionResult,
     GoogleDomainResolver,
     citations_json,
@@ -167,6 +169,8 @@ def run(args: argparse.Namespace) -> int:
             "model": args.model,
             "location": args.location,
             "project": args.project,
+            "prompt_version": PROMPT_VERSION,
+            "evidence_version": EVIDENCE_VERSION,
             "dry_run": not args.apply,
         }
     )
@@ -347,6 +351,8 @@ def ensure_checkpoint_manifest(
         "model": args.model,
         "location": args.location,
         "project": args.project,
+        "prompt_version": PROMPT_VERSION,
+        "evidence_version": EVIDENCE_VERSION,
         "max_pages_per_domain": args.max_pages_per_domain,
     }
     manifest_path = args.output.with_suffix(".checkpoint.json")
@@ -518,6 +524,9 @@ def apply_registration(
                 "search_query_count": result.search_query_count,
                 "citation_count": result.citation_count,
                 "model": result.model,
+                "prompt_version": PROMPT_VERSION,
+                "evidence_version": EVIDENCE_VERSION,
+                "company_domain_matches": accepted_company_domain_matches(result),
                 "accepted_proof": accepted_proof(result),
             },
         )
@@ -568,6 +577,18 @@ def accepted_proof(result: DomainResolutionResult) -> list[dict[str, Any]]:
             }
         )
     return proof[:3]
+
+
+def accepted_company_domain_matches(result: DomainResolutionResult) -> list[str]:
+    accepted = next(
+        (
+            evidence
+            for evidence in result.candidate_evidence
+            if evidence.domain == result.accepted_domain and evidence.passed
+        ),
+        None,
+    )
+    return list(accepted.company_domain_matches) if accepted else []
 
 
 def sanitized_url(value: str, *, keep_query: bool) -> str:
