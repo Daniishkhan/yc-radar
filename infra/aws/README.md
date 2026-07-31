@@ -13,7 +13,7 @@ This stack creates one private operational worker, not a served application:
 - IMDSv2 and an instance role scoped to SSM, the `radar-commoncrawl` Athena workgroup,
   the `radar_commoncrawl` Glue database, Common Crawl's index prefix, the Athena result bucket,
   and the worker state bucket;
-- a 50 GiB encrypted gp3 EBS volume mounted at `/srv/radar`, retained when the stack is deleted;
+- a 100 GiB encrypted gp3 EBS volume mounted at `/srv/radar`, retained when the stack is deleted;
 - Docker's data root, Postgres, the repository, job specifications, checkpoints, and local outputs
   on that retained volume;
 - a private, encrypted, versioned S3 bucket retained for job/deployment state summaries.

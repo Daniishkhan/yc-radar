@@ -5,7 +5,7 @@ security-group rules, no public port 22, and no EC2 SSH key. Tailscale SSH is th
 access path after one-time device enrollment; the same node can optionally provide stable public
 egress as a Tailscale exit node through its Elastic IP. AWS Systems Manager remains the no-inbound
 path for automation, initial enrollment, and break-glass recovery. Postgres, Docker state, caches,
-job checkpoints, and ignored `data/local/` artifacts live on a separate encrypted 50 GiB gp3
+job checkpoints, and ignored `data/local/` artifacts live on a separate encrypted 100 GiB gp3
 volume mounted at `/srv/radar`. CloudFormation retains that volume and the versioned state bucket
 if the instance or stack is removed, but releases the stack-owned Elastic IP automatically.
 
@@ -39,7 +39,7 @@ aws cloudformation deploy \
 The stack output named `ElasticIpAddress` is the worker's stable public egress address.
 
 The default is Ubuntu 24.04 amd64 on `t3.medium`, a 20 GiB encrypted disposable root disk, and a
-50 GiB encrypted retained data disk. The bootstrap installs Docker, the Compose plugin, AWS CLI,
+100 GiB encrypted retained data disk. The bootstrap installs Docker, the Compose plugin, AWS CLI,
 SSM Agent, Tailscale from its official Ubuntu repository, the systemd units, and the repository.
 It starts `tailscaled` without enrolling the device and generates the Postgres password locally on
 the retained disk; it never copies workstation AWS credentials or private profile/resume files.

@@ -27,7 +27,7 @@ Parameters:
     Description: Worker size. The default is appropriate for network-heavy jobs and local Postgres.
   DataVolumeSizeGiB:
     Type: Number
-    Default: 50
+    Default: 100
     MinValue: 20
     MaxValue: 1024
     Description: Size of the encrypted, retained gp3 data volume.

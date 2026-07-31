@@ -14,7 +14,7 @@ Options:
   --region REGION               AWS region (default: configured region or us-east-1)
   --stack-name NAME             CloudFormation stack (default: radar-worker)
   --instance-type TYPE          EC2 type (default: t3.medium)
-  --volume-size-gib SIZE        Retained gp3 size (default: 50)
+  --volume-size-gib SIZE        Retained gp3 size (default: 100)
   --repo-url URL                Public GitHub repository
   --repo-branch BRANCH          Branch to deploy (default: main)
   --athena-results-bucket NAME  Existing Athena output bucket
@@ -31,7 +31,7 @@ profile=
 region=
 stack_name=radar-worker
 instance_type=t3.medium
-volume_size=50
+volume_size=100
 repo_url=https://github.com/Daniishkhan/yc-radar.git
 repo_branch=main
 athena_results_bucket=
