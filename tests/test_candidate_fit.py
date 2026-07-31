@@ -1,6 +1,7 @@
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import (
     DEFAULT_CANDIDATE_PROFILE,
+    classify_remote_eligibility,
     classify_role_text,
     rank_companies,
     rerank_verified_targets,
@@ -40,6 +41,12 @@ def test_role_classifier_excludes_non_backend_role_lanes() -> None:
     assert classify_role_text("Software Engineering Intern").status == "exclude"
     assert classify_role_text("ML Research Scientist").status == "exclude"
     assert classify_role_text("Data Analyst").status == "exclude"
+    assert classify_role_text("Chief of Staff", "Own our API platform").status == "exclude"
+    assert (
+        classify_role_text("Senior Product Manager", "Own backend infrastructure").status
+        == "exclude"
+    )
+    assert classify_role_text("Solutions Engineer", "Build integrations").status == "exclude"
 
 
 def test_role_classifier_marks_frontend_heavy_full_stack_as_weak() -> None:
@@ -203,3 +210,79 @@ def test_rerank_verified_targets_boosts_live_role_fit() -> None:
 
     assert reranked[0]["fit_score"] == 74
     assert reranked[0]["rank"] == 1
+
+
+def test_remote_eligibility_distinguishes_global_pakistan_and_restricted_roles() -> None:
+    assert (
+        classify_remote_eligibility(
+            {"location": "Remote", "description_text": "Work from anywhere in the world."}
+        ).status
+        == "global_remote"
+    )
+    assert (
+        classify_remote_eligibility({"location": "Remote - APAC"}).status
+        == "pakistan_compatible"
+    )
+    assert (
+        classify_remote_eligibility({"location": "Remote - United States"}).status
+        == "restricted_remote"
+    )
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "San Francisco, CA",
+                "description_text": "We are remote-first and have teams across APAC.",
+            }
+        ).status
+        == "not_remote"
+    )
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "Santiago, Chile",
+                "description_text": "This position is remote for candidates based in Chile.",
+            }
+        ).status
+        == "restricted_remote"
+    )
+
+
+def test_live_global_remote_backend_role_can_outrank_metadata_rich_company_without_roles() -> None:
+    independent = Company(
+        name="Independent Systems",
+        slug="independent-systems",
+        website="https://independent.example",
+    )
+    metadata_rich = Company(
+        name="Metadata Rich",
+        slug="metadata-rich",
+        yc_url="https://www.ycombinator.com/companies/metadata-rich",
+        website="https://metadata-rich.example",
+        one_liner="AI infrastructure",
+        status="Active",
+        team_size=5,
+        isHiring=True,
+        prototype_score=40,
+    )
+    independent_target = target_record(
+        score_company(independent, DEFAULT_CANDIDATE_PROFILE),
+        rank=1,
+        canonical_jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "location": "Remote - Worldwide",
+                "description_text": "Build distributed APIs. Remote worldwide.",
+                "provider": "greenhouse",
+                "external_job_id": "1",
+            }
+        ],
+    )
+    metadata_target = target_record(
+        score_company(metadata_rich, DEFAULT_CANDIDATE_PROFILE),
+        rank=2,
+        canonical_jobs=[],
+    )
+
+    assert independent_target["best_remote_eligibility"] == "global_remote"
+    assert independent_target["opportunity_score"] > 80
+    assert independent_target["fit_score"] > metadata_target["fit_score"]

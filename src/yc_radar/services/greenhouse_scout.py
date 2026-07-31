@@ -25,7 +25,10 @@ SCOUT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.8",
 }
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
-MAX_SCOUT_TEXT_CHARS = 500_000
+# Large employers can expose thousands of jobs even when Greenhouse omits job
+# descriptions. Keep the response bounded, but high enough to validate those boards
+# instead of silently parsing a truncated JSON document.
+MAX_SCOUT_TEXT_CHARS = 10_000_000
 COMMON_JOB_HOST_PREFIXES = frozenset({"apply", "career", "careers", "job", "jobs", "join"})
 BLOCKED_COMPANY_HOST_SUFFIXES = frozenset(
     {
@@ -75,6 +78,7 @@ class _FetchResult:
     error: str | None
     attempt_count: int
     cache_source: str
+    truncated: bool = False
 
 
 class GreenhouseBoardScout:
@@ -104,9 +108,21 @@ class GreenhouseBoardScout:
         board_token = board_token.lower()
         url = (
             "https://boards-api.greenhouse.io/v1/boards/"
-            f"{quote(board_token, safe='')}/jobs"
+            f"{quote(board_token, safe='')}/jobs?content=false"
         )
         fetched = self._get(url)
+        if fetched.truncated:
+            return GreenhouseBoardEvidence(
+                board_token=board_token,
+                verification_status="failed",
+                http_status=fetched.status_code,
+                company_name=None,
+                job_count=0,
+                external_job_origins=(),
+                error=fetched.error or "response_too_large",
+                cache_source=fetched.cache_source,
+                attempt_count=fetched.attempt_count,
+            )
         if fetched.status_code != 200:
             status = "not_found" if fetched.status_code in {404, 410} else "failed"
             return GreenhouseBoardEvidence(
@@ -215,6 +231,7 @@ class GreenhouseBoardScout:
                 error=_optional_string(cached.get("error")),
                 attempt_count=int(cached.get("attempt_count") or 0),
                 cache_source="disk",
+                truncated=bool(cached.get("truncated")),
             )
 
         client = self._client
@@ -251,9 +268,13 @@ class GreenhouseBoardScout:
                 self._sleeper(_retry_delay(response, attempts))
 
         status_code = response.status_code if response is not None else None
-        text = response.text[:MAX_SCOUT_TEXT_CHARS] if response is not None else ""
+        response_text = response.text if response is not None else ""
+        truncated = len(response_text) > MAX_SCOUT_TEXT_CHARS
+        text = response_text[:MAX_SCOUT_TEXT_CHARS]
+        if truncated:
+            error = f"response_too_large:{len(response_text)}"
         final_url = str(response.url) if response is not None else url
-        retryable = status_code in RETRYABLE_STATUS_CODES or status_code is None
+        retryable = status_code in RETRYABLE_STATUS_CODES or status_code is None or truncated
         self.cache.store(
             url,
             metadata={
@@ -262,6 +283,7 @@ class GreenhouseBoardScout:
                 "error": error,
                 "attempt_count": attempts,
                 "retryable": retryable,
+                "truncated": truncated,
             },
             text=text,
         )
@@ -272,6 +294,7 @@ class GreenhouseBoardScout:
             error=error,
             attempt_count=attempts,
             cache_source="network",
+            truncated=truncated,
         )
 
     def _pace_request(self) -> None:

@@ -544,13 +544,21 @@ engineer, frontend, research, sales, or marketing roles. Strong matches should p
 design, infrastructure, performance, caching, production debugging, security, reliability, or
 backend platform ownership.
 
+The candidate pool is scored across every registered company, not preselected from YC metadata.
+A complete canonical provider snapshot with a current senior backend/SWE opening receives the
+largest opportunity boost. Matching roles that explicitly allow worldwide remote work or name
+Pakistan, South Asia, or APAC receive an additional boost; geographically restricted remote roles
+are retained as evidence but do not count as Pakistan-compatible. The emitted job provenance is
+capped while the aggregate match counts still cover the full active snapshot.
+
 ## Deferred Roadmap
 
-The current foundation intentionally defers ATS adapters beyond Greenhouse and Ashby,
-remote/visa eligibility inference, hiring-intent signals, more company-list registries, alerting,
-multi-worker operation, and any public web product. Location and other source text are preserved
-without making eligibility claims. Resume, profile, contact, cache, and run files remain under
-ignored `data/local/` paths and are not emitted by canonical-job exports.
+The current foundation intentionally defers ATS adapters beyond Greenhouse and Ashby, visa
+eligibility inference, richer hiring-intent signals, more company-list registries, alerting,
+multi-worker operation, and any public web product. Remote eligibility is a conservative,
+deterministic label from explicit posting language, not a legal work-authorization claim. Resume,
+profile, contact, cache, and run files remain under ignored `data/local/` paths and are not emitted
+by canonical-job exports.
 
 ## Product Direction
 

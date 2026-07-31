@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import httpx
+import yc_radar.services.greenhouse_scout as greenhouse_scout_module
 
 from yc_radar.services.greenhouse_scout import (
     GreenhouseBoardEvidence,
@@ -144,8 +145,41 @@ def test_scout_caches_public_get_response(tmp_path: Path) -> None:
     assert second.cache_source == "disk"
     assert len(requests) == 1
     assert requests[0].method == "GET"
-    assert str(requests[0].url) == "https://boards-api.greenhouse.io/v1/boards/acme/jobs"
+    assert (
+        str(requests[0].url)
+        == "https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=false"
+    )
     assert scout.cache.load(str(requests[0].url))["status_code"] == 200
+
+
+def test_scout_fails_explicitly_instead_of_parsing_a_truncated_board(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(greenhouse_scout_module, "MAX_SCOUT_TEXT_CHARS", 20)
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "jobs": [
+                        {
+                            "id": 1,
+                            "company_name": "Large Company",
+                            "absolute_url": "https://large.example/jobs/1",
+                        }
+                    ],
+                    "meta": {"total": 1},
+                },
+            )
+        )
+    )
+
+    with GreenhouseBoardScout(tmp_path / "cache", client=client, delay_seconds=0) as scout:
+        evidence = scout.verify("large")
+
+    assert evidence.verification_status == "failed"
+    assert evidence.error is not None
+    assert evidence.error.startswith("response_too_large:")
 
 
 def test_board_page_logo_or_external_redirect_supplies_verified_origin(tmp_path: Path) -> None:

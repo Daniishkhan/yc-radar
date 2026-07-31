@@ -132,6 +132,12 @@ politely paced, send a transparent project user-agent plus JSON accept header, h
 and never submit applications, spoof browser identity, or use browser automation. Ashby sync must
 exclude postings whose public `isListed` flag is false.
 
+Weekly target ranking must consider every registered company before truncating the candidate pool.
+Current canonical backend/SWE openings should outweigh directory metadata. Remote labels must stay
+conservative and deterministic: distinguish explicit worldwide or Pakistan/APAC eligibility from
+unclear and geographically restricted remote language, and never present them as work-authorization
+or visa conclusions.
+
 Current checked-in discovery inventory:
 
 - 27,569 discovery events
@@ -193,8 +199,9 @@ uv run alembic current
 ```
 
 Never stamp an existing schema directly to `head`; stop on verifier drift. Fresh databases use
-`uv run alembic upgrade head`. Further roadmap work—additional provider adapters, remote eligibility
-claims, hiring-intent signals, VC/company sources, and any public product—is explicitly deferred.
+`uv run alembic upgrade head`. Further roadmap work—additional provider adapters, visa eligibility
+claims, richer hiring-intent signals, VC/company sources, and any public product—is explicitly
+deferred.
 
 ## Implementation Preferences
 

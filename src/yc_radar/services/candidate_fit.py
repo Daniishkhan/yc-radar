@@ -114,6 +114,48 @@ EXCLUDED_ROLE_TERMS = (
     "intern",
     "internship",
     "apprentice",
+    "chief of staff",
+    "product manager",
+    "program manager",
+    "project manager",
+    "finance",
+    "counsel",
+    "legal",
+    "recruiter",
+    "recruiting",
+    "talent acquisition",
+    "human resources",
+    "people partner",
+    "account manager",
+    "partnerships",
+)
+EXCLUDED_ENGINEERING_TITLE_TERMS = (
+    "sales engineer",
+    "solutions engineer",
+    "solution engineer",
+    "support engineer",
+    "customer engineer",
+    "field engineer",
+    "qa engineer",
+    "quality engineer",
+    "test engineer",
+    "engineering manager",
+    "manager, engineering",
+    "director of engineering",
+    "head of engineering",
+    "vp of engineering",
+    "vice president of engineering",
+    "developer advocate",
+    "developer relations",
+)
+ENGINEERING_TITLE_TERMS = (
+    "engineer",
+    "developer",
+    "architect",
+    "site reliability",
+    "sre",
+    "devops",
+    "member of technical staff",
 )
 RESEARCH_ONLY_TERMS = (
     "research scientist",
@@ -191,6 +233,58 @@ SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
 )
 
 REGION_MATCH_TERMS = ("remote", "pakistan", "india", "asia", "south asia", "mena", "middle east")
+REMOTE_GLOBAL_TERMS = (
+    "remote worldwide",
+    "worldwide remote",
+    "work from anywhere",
+    "anywhere in the world",
+    "globally remote",
+    "global remote",
+    "remote anywhere",
+    "remote - anywhere",
+)
+REMOTE_PAKISTAN_COMPATIBLE_TERMS = (
+    "pakistan",
+    "south asia",
+    "asia pacific",
+    "apac",
+)
+REMOTE_RESTRICTED_LOCATION_TERMS = (
+    "united states",
+    "u.s.",
+    "usa",
+    "canada",
+    "north america",
+    "latin america",
+    "latam",
+    "europe",
+    "european union",
+    "united kingdom",
+    "uk only",
+    "australia",
+    "singapore",
+    "india",
+    "emea",
+    "americas",
+)
+REMOTE_DESCRIPTION_TERMS = (
+    "remote role",
+    "remote position",
+    "position is remote",
+    "role is remote",
+    "work remotely",
+    "fully remote",
+    "can be remote",
+    "may be remote",
+)
+REMOTE_ELIGIBILITY_ORDER = {
+    "global_remote": 0,
+    "pakistan_compatible": 1,
+    "remote_unclear": 2,
+    "restricted_remote": 3,
+    "not_remote": 4,
+}
+MAX_MATCHING_JOB_DETAILS = 25
 
 
 @dataclass(frozen=True)
@@ -199,6 +293,12 @@ class CandidateScore:
     fit_score: int
     fit_reasons: list[str]
     candidate_strength_matches: list[str]
+
+
+@dataclass(frozen=True)
+class RemoteEligibility:
+    status: str
+    reasons: list[str]
 
 
 def load_candidate_profile(profile_path: Path) -> dict[str, Any]:
@@ -261,6 +361,8 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
 
     if _has_any_signal(title_text, EXCLUDED_ROLE_TERMS):
         return RoleClassification("exclude", ["Non-engineering or junior/intern role"])
+    if _has_any_signal(title_text, EXCLUDED_ENGINEERING_TITLE_TERMS):
+        return RoleClassification("exclude", ["Engineering-adjacent role is outside the IC SWE lane"])
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
         return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
     if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
@@ -269,6 +371,8 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         )
     if has_frontend_signal and not is_full_stack and not has_backend_signal:
         return RoleClassification("exclude", ["Frontend-only role is outside backend/SWE focus"])
+    if not _has_any_signal(title_text, ENGINEERING_TITLE_TERMS):
+        return RoleClassification("exclude", ["Title is not an engineering role"])
 
     if (
         not is_full_stack
@@ -418,17 +522,46 @@ def role_focus_record(
         target_role_lane = "Outside backend/SWE focus"
         application_angle = "Do not prioritize for the backend/SWE shortlist."
 
-    matching_provenance = [
+    matching_provenance_all = [
         _canonical_job_provenance(job)
         for title, classification, job in classifications
         if job is not None and classification.status in {"strong", "possible"} and title
     ]
+    remote_counts: dict[str, int] = {}
+    for job in matching_provenance_all:
+        remote_status = str(job["remote_eligibility"])
+        remote_counts[remote_status] = remote_counts.get(remote_status, 0) + 1
+    best_remote = min(
+        remote_counts,
+        key=lambda status: REMOTE_ELIGIBILITY_ORDER.get(status, 99),
+        default="not_remote",
+    )
+    matching_provenance = matching_provenance_all[:MAX_MATCHING_JOB_DETAILS]
+    canonical_classifications = [
+        (title, classification)
+        for title, classification, job in classifications
+        if job is not None
+    ]
+    canonical_role_status = (
+        _best_status(canonical_classifications) if canonical_classifications else "none"
+    )
     return {
         "target_role_lane": target_role_lane,
-        "matching_job_titles": _dedupe_preserve_order(matching_titles),
+        "matching_job_titles": _dedupe_preserve_order(matching_titles)[:MAX_MATCHING_JOB_DETAILS],
         "canonical_active_job_count": len(canonical_jobs or []),
+        "canonical_matching_job_count": len(matching_provenance_all),
+        "canonical_role_match_status": canonical_role_status,
         "canonical_matching_jobs": matching_provenance,
         "matching_job_provenance": matching_provenance,
+        "best_remote_eligibility": best_remote,
+        "globally_remote_matching_job_count": remote_counts.get("global_remote", 0),
+        "pakistan_compatible_matching_job_count": remote_counts.get(
+            "pakistan_compatible", 0
+        ),
+        "remote_matching_job_count": sum(
+            remote_counts.get(status, 0)
+            for status in ("global_remote", "pakistan_compatible", "remote_unclear")
+        ),
         "role_match_status": status,
         "role_match_reasons": _dedupe_preserve_order(reasons)[:5],
         "application_angle": application_angle,
@@ -440,6 +573,7 @@ def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
     def iso(value: Any) -> Any:
         return value.isoformat() if hasattr(value, "isoformat") else value
 
+    remote = classify_remote_eligibility(job)
     return {
         "title": job.get("title"),
         "provider": job.get("provider"),
@@ -447,9 +581,118 @@ def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
         "career_source_kind": job.get("career_source_kind"),
         "career_source_url": job.get("career_source_url"),
         "posting_url": job.get("posting_url"),
+        "location": job.get("location"),
+        "department": job.get("department"),
+        "remote_eligibility": remote.status,
+        "remote_reasons": remote.reasons,
         "source_published_at": iso(job.get("source_published_at")),
         "source_updated_at": iso(job.get("source_updated_at")),
     }
+
+
+def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
+    location = str(job.get("location") or "").lower()
+    description = str(job.get("description_text") or "").lower()
+    combined = f"{location} {description}"
+    location_is_remote = bool(re.search(r"\bremote\b", location))
+    description_is_remote = any(
+        term in description for term in REMOTE_DESCRIPTION_TERMS
+    )
+    if not location_is_remote and not description_is_remote:
+        return RemoteEligibility("not_remote", ["No explicit remote signal"])
+    if any(term in combined for term in REMOTE_GLOBAL_TERMS):
+        return RemoteEligibility("global_remote", ["Role explicitly allows worldwide remote work"])
+    if any(term in location for term in REMOTE_PAKISTAN_COMPATIBLE_TERMS) or _remote_region_claim(
+        description, REMOTE_PAKISTAN_COMPATIBLE_TERMS
+    ):
+        return RemoteEligibility(
+            "pakistan_compatible",
+            ["Role explicitly includes Pakistan or an APAC/South Asia region"],
+        )
+    if any(term in location for term in REMOTE_RESTRICTED_LOCATION_TERMS) or _remote_region_claim(
+        description, REMOTE_RESTRICTED_LOCATION_TERMS
+    ):
+        return RemoteEligibility(
+            "restricted_remote",
+            ["Remote location is explicitly restricted outside Pakistan"],
+        )
+    if description_is_remote and location and not location_is_remote:
+        return RemoteEligibility(
+            "restricted_remote",
+            ["Posting pairs remote language with a specific non-Pakistan location"],
+        )
+    return RemoteEligibility(
+        "remote_unclear",
+        ["Role is remote, but eligible countries are not explicit"],
+    )
+
+
+def _remote_region_claim(text: str, terms: tuple[str, ...]) -> bool:
+    claim_terms = ("remote", "based", "located", "reside", "work from", "eligible")
+    for region in terms:
+        region_pattern = re.escape(region)
+        for claim in claim_terms:
+            claim_pattern = re.escape(claim)
+            if re.search(rf"{claim_pattern}.{{0,80}}{region_pattern}", text) or re.search(
+                rf"{region_pattern}.{{0,80}}{claim_pattern}", text
+            ):
+                return True
+    return False
+
+
+def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
+    matching_titles = list(target.get("matching_job_titles") or [])
+    active_count = int(target.get("canonical_active_job_count") or 0)
+    canonical_matching_count = int(target.get("canonical_matching_job_count") or 0)
+    if not canonical_matching_count:
+        if active_count:
+            return -12, ["Has active jobs, but none match the backend/SWE lane"]
+        role_status = str(target.get("role_match_status") or "weak")
+        if matching_titles and role_status in ROLE_STATUS_SCORE_ADJUSTMENTS:
+            score = ROLE_STATUS_SCORE_ADJUSTMENTS[role_status]
+            return score, ["Matching role evidence lacks a complete provider snapshot"]
+        return 0, []
+
+    score = 0
+    reasons: list[str] = []
+    role_status = str(target.get("canonical_role_match_status") or "weak")
+    if role_status == "strong":
+        score += 70
+        reasons.append("Has a current strong senior backend/SWE role")
+    elif role_status == "possible":
+        score += 40
+        reasons.append("Has a current backend-heavy engineering possibility")
+    elif role_status == "exclude":
+        score -= 30
+
+    score += min(canonical_matching_count, 10) * 2
+    if active_count:
+        score += 8
+        reasons.append("Backed by a complete canonical provider snapshot")
+
+    remote_status = str(target.get("best_remote_eligibility") or "not_remote")
+    if remote_status == "global_remote":
+        score += 30
+        reasons.append("At least one matching role is explicitly worldwide remote")
+    elif remote_status == "pakistan_compatible":
+        score += 24
+        reasons.append("At least one matching role explicitly includes Pakistan/APAC")
+    elif remote_status == "remote_unclear":
+        score += 10
+        reasons.append("At least one matching role is remote with unclear country eligibility")
+    elif remote_status == "restricted_remote":
+        score -= 8
+        reasons.append("Matching remote roles appear geographically restricted")
+    return score, reasons
+
+
+def apply_current_opportunity_score(target: dict[str, Any]) -> None:
+    base_score = int(target.get("company_fit_score", target.get("fit_score") or 0))
+    opportunity_score, reasons = current_opportunity_score(target)
+    target["company_fit_score"] = base_score
+    target["opportunity_score"] = opportunity_score
+    target["opportunity_score_reasons"] = reasons
+    target["fit_score"] = max(base_score + opportunity_score, 0)
 
 
 def proof_points_for_role_status(status: str) -> list[str]:
@@ -579,6 +822,9 @@ def target_record(
         "tags": company.tags,
         "prototype_score": company.prototype_score,
         "prototype_angle": company.prototype_angle,
+        "company_fit_score": score.fit_score,
+        "opportunity_score": 0,
+        "opportunity_score_reasons": [],
         "fit_score": score.fit_score,
         "fit_reasons": score.fit_reasons,
         "candidate_strength_matches": score.candidate_strength_matches,
@@ -599,6 +845,7 @@ def target_record(
         "next_action": "",
     }
     record.update(role_focus_record(company, yc_jobs=yc_jobs, canonical_jobs=canonical_jobs))
+    apply_current_opportunity_score(record)
     return record
 
 
@@ -615,7 +862,8 @@ def rerank_verified_targets(targets: list[dict[str, Any]]) -> list[dict[str, Any
             score += 12
         elif role_fit == "possible":
             score += 5
-        score += ROLE_STATUS_SCORE_ADJUSTMENTS.get(str(target.get("role_match_status")), 0)
+        if "opportunity_score" not in target:
+            score += ROLE_STATUS_SCORE_ADJUSTMENTS.get(str(target.get("role_match_status")), 0)
         target["fit_score"] = max(score, 0)
     reranked = sorted(targets, key=lambda item: int(item.get("fit_score") or 0), reverse=True)
     for index, target in enumerate(reranked, start=1):

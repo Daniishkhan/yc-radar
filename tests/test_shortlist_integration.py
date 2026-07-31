@@ -86,9 +86,13 @@ def test_active_canonical_jobs_change_shortlist_role_evidence_with_public_proven
             "provider": "greenhouse",
             "external_job_id": "42",
             "career_source_kind": "ats_board",
-            "career_source_url": "https://boards.greenhouse.io/example",
-            "posting_url": "https://boards.greenhouse.io/example/jobs/42",
-            "source_published_at": None,
+                "career_source_url": "https://boards.greenhouse.io/example",
+                "posting_url": "https://boards.greenhouse.io/example/jobs/42",
+                "location": None,
+                "department": None,
+                "remote_eligibility": "not_remote",
+                "remote_reasons": ["No explicit remote signal"],
+                "source_published_at": None,
             "source_updated_at": None,
         }
     ]

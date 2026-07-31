@@ -13,6 +13,7 @@ from yc_radar.agents.llm import OpenAIResponsesClient
 from yc_radar.core.config import get_settings
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import (
+    apply_current_opportunity_score,
     enrich_targets_with_llm,
     load_candidate_profile,
     rank_companies,
@@ -52,14 +53,23 @@ CSV_FIELDS = [
     "tags",
     "prototype_score",
     "prototype_angle",
+    "company_fit_score",
+    "opportunity_score",
+    "opportunity_score_reasons",
     "fit_score",
     "fit_reasons",
     "candidate_strength_matches",
     "target_role_lane",
     "matching_job_titles",
     "canonical_active_job_count",
+    "canonical_matching_job_count",
+    "canonical_role_match_status",
     "canonical_matching_jobs",
     "matching_job_provenance",
+    "best_remote_eligibility",
+    "globally_remote_matching_job_count",
+    "pakistan_compatible_matching_job_count",
+    "remote_matching_job_count",
     "role_match_status",
     "role_match_reasons",
     "application_angle",
@@ -85,12 +95,12 @@ CSV_FIELDS = [
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     parser = argparse.ArgumentParser(
-        description="Generate a weekly YC target list with cached, exact-page hiring checks."
+        description="Generate a source-neutral weekly target list from current job evidence."
     )
     parser.add_argument("--date", default=date.today().isoformat())
     parser.add_argument("--limit", type=int, default=40)
     parser.add_argument("--candidate-pool", type=int, default=100)
-    parser.add_argument("--max-team-size", type=int, default=25)
+    parser.add_argument("--max-team-size", type=int)
     parser.add_argument("--max-pages-per-company", type=int, default=3)
     parser.add_argument("--firecrawl-concurrency", type=int, default=2)
     parser.add_argument(
@@ -123,16 +133,20 @@ def main() -> None:
     jobs_by_slug = load_yc_jobs_by_slug(settings.database_url)
     canonical_jobs_by_slug = load_canonical_jobs_by_slug(settings.database_url)
     ranked = rank_companies(companies, profile, max_team_size=args.max_team_size)
-    pool_scores = ranked[: args.candidate_pool]
-    targets = [
+    candidate_targets = [
         target_record(
             score,
             rank=index,
             yc_jobs=jobs_by_slug.get(score.company.slug, []),
             canonical_jobs=canonical_jobs_by_slug.get(score.company.slug, []),
         )
-        for index, score in enumerate(pool_scores, start=1)
+        for index, score in enumerate(ranked, start=1)
     ]
+    candidate_targets.sort(key=lambda target: int(target["fit_score"]), reverse=True)
+    targets = candidate_targets[: args.candidate_pool]
+    candidate_pool_size = len(targets)
+    for index, target in enumerate(targets, start=1):
+        target["rank"] = index
 
     verification_cache_path = output_dir / "hiring_verifications.json"
     cache = load_hiring_cache(verification_cache_path)
@@ -142,7 +156,7 @@ def main() -> None:
     new_firecrawl_pages = 0
     cached_verifications = 0
 
-    companies_by_slug = {score.company.slug: score.company for score in pool_scores}
+    companies_by_slug = {company.slug: company for company in companies}
     if verify_hiring and settings.firecrawl_api_key:
         cached_verifications, new_firecrawl_pages = verify_targets(
             targets=targets,
@@ -171,7 +185,7 @@ def main() -> None:
         {
             "schema_version": 2,
             "generated_at": generated_at,
-            "candidate_pool_size": len(pool_scores),
+            "candidate_pool_size": candidate_pool_size,
             "target_count": len(targets),
             "firecrawl": {
                 "enabled": bool(verify_hiring and settings.firecrawl_api_key),
@@ -190,7 +204,7 @@ def main() -> None:
         f"Loaded {len(companies)} companies and "
         f"{sum(map(len, canonical_jobs_by_slug.values()))} active canonical jobs."
     )
-    print(f"Ranked candidate pool: {len(pool_scores)} companies.")
+    print(f"Ranked candidate pool: {candidate_pool_size} companies.")
     print(f"Wrote {len(targets)} weekly targets: {json_path}")
     print(f"Wrote CSV: {csv_path}")
     if verify_hiring and not settings.firecrawl_api_key:
@@ -236,6 +250,7 @@ def refresh_role_focus(
                 verified_roles=target.get("verified_roles") or [],
             )
         )
+        apply_current_opportunity_score(target)
 
 
 def verify_targets(
