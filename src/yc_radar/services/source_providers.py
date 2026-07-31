@@ -11,7 +11,9 @@ ATS_DOMAINS = (
     "jobs.ashbyhq.com",
     "jobs.eu.ashbyhq.com",
     "boards.greenhouse.io",
+    "boards.eu.greenhouse.io",
     "job-boards.greenhouse.io",
+    "job-boards.eu.greenhouse.io",
     "boards-api.greenhouse.io",
     "jobs.lever.co",
     "jobs.eu.lever.co",
@@ -50,7 +52,12 @@ def is_company_ats_url(url: str) -> bool:
         ) or (
             len(parts) >= 3 and parts[:2] == ["dover", "careers"]
         )
-    if host in {"boards.greenhouse.io", "job-boards.greenhouse.io"}:
+    if host in {
+        "boards.greenhouse.io",
+        "boards.eu.greenhouse.io",
+        "job-boards.greenhouse.io",
+        "job-boards.eu.greenhouse.io",
+    }:
         if parts and parts[0] != "embed":
             return True
         return bool(parse_qs(parsed.query).get("for"))

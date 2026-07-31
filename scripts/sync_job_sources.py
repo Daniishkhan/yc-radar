@@ -39,7 +39,20 @@ def parse_args() -> argparse.Namespace:
         choices=supported,
         help="Optionally sync one provider; defaults to every registered provider.",
     )
-    sync.add_argument("--company-id", type=int)
+    source_scope = sync.add_mutually_exclusive_group()
+    source_scope.add_argument("--company-id", type=int)
+    source_scope.add_argument(
+        "--source-id",
+        dest="source_ids",
+        action="append",
+        type=int,
+        help="Sync one career source ID; repeat to select multiple newly registered sources.",
+    )
+    source_scope.add_argument(
+        "--min-source-id",
+        type=int,
+        help="Sync sources at or above this ID; useful after a bulk registration run.",
+    )
     sync.add_argument("--limit", type=int)
     sync.add_argument(
         "--delay-seconds",
@@ -151,6 +164,8 @@ async def sync_sources(
     for source in repository.active_career_sources(
         provider=provider_filter,
         company_id=args.company_id,
+        source_ids=getattr(args, "source_ids", None),
+        min_source_id=getattr(args, "min_source_id", None),
         limit=args.limit,
     ):
         source_adapter = providers.adapter_for(str(source["provider"]))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Iterable
+from typing import Any, Iterable
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -119,6 +119,7 @@ class JobSourceRegistry:
         source_url: str,
         provider: str | None = None,
         discovered_from_url: str | None = None,
+        evidence: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> JobSourceRegistrationResult:
         detected = self.providers.detect(source_url, provider=provider)
@@ -142,6 +143,7 @@ class JobSourceRegistry:
             raw_json={
                 "observed_url": detected.observed_url,
                 "registration": "job_source_registry",
+                "evidence": evidence or {},
             },
         )
         if not allowed:

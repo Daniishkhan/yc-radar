@@ -17,7 +17,13 @@ from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _TAG_RE = re.compile(r"<[^>]+>")
 _GREENHOUSE_HOSTS = frozenset(
-    {"boards.greenhouse.io", "job-boards.greenhouse.io", "boards-api.greenhouse.io"}
+    {
+        "boards.greenhouse.io",
+        "boards.eu.greenhouse.io",
+        "job-boards.greenhouse.io",
+        "job-boards.eu.greenhouse.io",
+        "boards-api.greenhouse.io",
+    }
 )
 
 
@@ -78,7 +84,7 @@ class GreenhouseAdapter:
             candidate = parts[0]
         if not candidate or "/" in candidate or not _TOKEN_RE.fullmatch(candidate):
             return None
-        return candidate
+        return candidate.lower()
 
     def extract_source_id(self, url: str) -> str | None:
         """Return the stable board identity required by the provider registry."""
@@ -87,10 +93,11 @@ class GreenhouseAdapter:
     def canonical_source_url(self, external_source_id: str) -> str:
         if not _TOKEN_RE.fullmatch(external_source_id):
             raise ValueError("invalid Greenhouse board token")
-        return f"https://job-boards.greenhouse.io/{quote(external_source_id, safe='')}"
+        token = external_source_id.lower()
+        return f"https://job-boards.greenhouse.io/{quote(token, safe='')}"
 
     async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-        token = external_source_id if _TOKEN_RE.fullmatch(external_source_id) else None
+        token = external_source_id.lower() if _TOKEN_RE.fullmatch(external_source_id) else None
         if token is None:
             return self._failure_snapshot(external_source_id, "invalid_token")
         url = f"https://boards-api.greenhouse.io/v1/boards/{quote(token, safe='')}/jobs"

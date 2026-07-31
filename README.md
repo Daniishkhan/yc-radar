@@ -190,6 +190,47 @@ Company registration only reuses an exact verified primary-domain and normalized
 Job-source registration detects the provider from the public URL and refuses to move an existing
 board identity between companies. Ambiguous identity evidence stops rather than silently merging.
 
+### Bulk Greenhouse scouting
+
+Common Crawl's public URL Index can seed Greenhouse discovery without guessing board tokens. The
+query script registers only one requested crawl partition in Athena, searches both US and EU board
+hosts, and writes the resulting candidate CSV under ignored `data/local/debug/`:
+
+```bash
+aws login --profile radar-athena
+
+uv run python scripts/query_commoncrawl_greenhouse.py \
+  --profile radar-athena \
+  --workgroup radar-commoncrawl \
+  --database radar_commoncrawl
+```
+
+The AWS side should use `us-east-1`, a private encrypted S3 results bucket with an expiration
+lifecycle, and a dedicated Athena workgroup with an enforced per-query bytes-scanned cutoff. The
+script prints the actual bytes scanned and a rough query-cost estimate. It does not download crawl
+content; it reads the Parquet URL Index and exports only deduplicated board candidates.
+
+Verify candidates without writing to Postgres first:
+
+```bash
+uv run python scripts/scout_greenhouse_sources.py \
+  --input data/local/debug/greenhouse_board_candidates_CC-MAIN-2026-30.csv \
+  --output data/local/debug/greenhouse_board_verification_CC-MAIN-2026-30.csv
+```
+
+Add `--apply` only when registration is intended. The scout is sequential, cached, and resumable.
+It accepts a provider-confirmed company name plus either one unique existing company match or a
+company-controlled domain from Greenhouse's configured board redirect/logo. Empty, conflicting,
+ambiguous, and hosted-board-only identities remain unresolved. New source IDs from the output can
+then be synchronized explicitly:
+
+```bash
+uv run python scripts/sync_job_sources.py sync \
+  --provider greenhouse \
+  --min-source-id 123 \
+  --delay-seconds 1
+```
+
 Greenhouse uses only the unauthenticated public GET endpoint documented by the
 [Greenhouse Job Board API](https://developers.greenhouse.io/job-board.html):
 `https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true`. Requests are

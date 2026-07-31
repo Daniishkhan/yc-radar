@@ -16,6 +16,14 @@ def test_extract_board_token_accepts_common_public_greenhouse_urls() -> None:
         == "stripe"
     )
     assert (
+        adapter.extract_board_token(
+            "https://job-boards.eu.greenhouse.io/stripe-eu/jobs/4012345"
+        )
+        == "stripe-eu"
+    )
+    assert adapter.extract_board_token("https://boards.eu.greenhouse.io/stripe-eu") == "stripe-eu"
+    assert adapter.extract_board_token("https://job-boards.greenhouse.io/Stripe") == "stripe"
+    assert (
         adapter.extract_board_token("https://boards.greenhouse.io/embed/job_board?for=stripe")
         == "stripe"
     )

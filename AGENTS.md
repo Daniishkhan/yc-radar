@@ -36,6 +36,10 @@ useful loop is:
 - `scripts/classify_discovered_urls.py`: fetches discovered URLs, stores source documents, and
   classifies pages as career homes, job listings, ATS listings, or job details.
 - `scripts/sync_job_sources.py`: discovers and syncs all configured provider sources.
+- `scripts/query_commoncrawl_greenhouse.py`: exports public Greenhouse board candidates from one
+  bounded Common Crawl URL Index partition through Athena.
+- `scripts/scout_greenhouse_sources.py`: sequentially verifies, resolves, and optionally registers
+  Common Crawl Greenhouse candidates with cached, fail-closed identity checks.
 - `scripts/generate_weekly_targets.py`: creates local candidate-fit target runs.
 - `scripts/generate_job_opportunities.py`: exports public canonical job opportunities locally.
 - `scripts/ingest_resume.py`: converts the private resume PDF into local structured profile data.

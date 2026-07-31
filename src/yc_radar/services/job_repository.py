@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import Select, and_, insert, select, update
@@ -96,6 +97,8 @@ class JobRepository:
         *,
         provider: str | None = None,
         company_id: int | None = None,
+        source_ids: Iterable[int] | None = None,
+        min_source_id: int | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         statement: Select[Any] = select(career_sources_table).where(
@@ -105,6 +108,13 @@ class JobRepository:
             statement = statement.where(career_sources_table.c.provider == provider)
         if company_id is not None:
             statement = statement.where(career_sources_table.c.company_id == company_id)
+        if source_ids is not None:
+            selected_ids = tuple(source_ids)
+            if not selected_ids:
+                return []
+            statement = statement.where(career_sources_table.c.id.in_(selected_ids))
+        if min_source_id is not None:
+            statement = statement.where(career_sources_table.c.id >= min_source_id)
         statement = statement.order_by(career_sources_table.c.id)
         if limit is not None:
             statement = statement.limit(limit)
