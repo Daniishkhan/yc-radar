@@ -16,6 +16,8 @@ Actions:
   health
   tailscale
   exit-node
+  gcp-wif PROJECT_ID CONFIG_FILE
+  gcp-wif-status
   deploy
   run NAME -- COMMAND [ARG ...]
   pipeline NAME [PIPELINE ARG ...]
@@ -160,6 +162,43 @@ case "${action}" in
   exit-node)
     [[ $# -eq 0 ]] || usage
     send_command 'sudo /usr/local/sbin/radar-configure-tailscale-exit-node --advertise; sudo tailscale status --peers=false'
+    ;;
+  gcp-wif)
+    [[ $# -eq 2 ]] || usage
+    project_id=$1
+    config_file=$2
+    if [[ ! ${project_id} =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ || ! -f ${config_file} ]]; then
+      echo "A valid Google Cloud project ID and readable config file are required" >&2
+      exit 2
+    fi
+    config_size=$(wc -c < "${config_file}")
+    if [[ ${config_size} -gt 12000 ]]; then
+      echo "Credential config is too large for the bounded SSM installer (${config_size} bytes)" >&2
+      exit 2
+    fi
+    encoded=$(python3 - "${config_file}" <<'PY'
+import base64
+from pathlib import Path
+import sys
+
+print(base64.b64encode(Path(sys.argv[1]).read_bytes()).decode())
+PY
+)
+    remote_command="sudo /usr/local/sbin/radar-configure-gcp-wif"
+    remote_command+=" --project '${project_id}' --config-b64 '${encoded}'"
+    send_command "${remote_command}"
+    ;;
+  gcp-wif-status)
+    [[ $# -eq 0 ]] || usage
+    remote_command='set -e; sudo test -r /srv/radar/config/gcp/gcp-wif.json; '
+    remote_command+="sudo jq '{type, audience, service_account_impersonation_url, "
+    remote_command+='credential_source: {environment_id: .credential_source.environment_id, '
+    remote_command+='imdsv2: (.credential_source.imdsv2_session_token_url != null)}}'
+    remote_command+=' /srv/radar/config/gcp/gcp-wif.json; '
+    remote_command+="sudo grep -E '^(GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION|"
+    remote_command+="YC_RADAR_VERTEX_MODEL|GOOGLE_APPLICATION_CREDENTIALS)='"
+    remote_command+=' /srv/radar/config/runtime.env'
+    send_command "${remote_command}"
     ;;
   deploy)
     [[ $# -eq 0 ]] || usage

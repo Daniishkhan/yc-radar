@@ -42,7 +42,8 @@ The default is Ubuntu 24.04 amd64 on `t3.medium`, a 20 GiB encrypted disposable 
 100 GiB encrypted retained data disk. The bootstrap installs Docker, the Compose plugin, AWS CLI,
 SSM Agent, Tailscale from its official Ubuntu repository, the systemd units, and the repository.
 It starts `tailscaled` without enrolling the device and generates the Postgres password locally on
-the retained disk; it never copies workstation AWS credentials or private profile/resume files.
+the retained disk; it never copies workstation AWS credentials, Google service-account keys, or
+private profile/resume files.
 
 Get the instance ID and wait for SSM. This path is needed for initial Tailscale enrollment and
 remains available for recovery:
@@ -194,6 +195,188 @@ sudo radar-deploy
 
 `radar-deploy` refuses a dirty machine checkout and takes a host deployment lock. The persistent
 Postgres volume is not rebuilt by a code deployment.
+
+## Keyless Vertex AI from the AWS worker
+
+The domain resolver uses Vertex AI through AWS-to-Google Workload Identity Federation. The live
+Google Cloud project is `ai-project-jul-19` (`64318475882`), and the only Google identity used by
+the worker is the dedicated `radar-domain-resolver` service account with
+`roles/aiplatform.user`. The `radar-aws/radar-worker` provider accepts account `211236627350` only
+when `GetCallerIdentity` reports the exact assumed-role ARN for the stack's `WorkerRole`. The
+current physical name is `radar-worker-WorkerRole-NOqPlF4c7Z8Z`.
+
+Provisioning is explicit-apply and derives the physical role from CloudFormation, including after
+a role replacement. Run it from an administrator workstation with both `gcloud` and `aws`:
+
+```bash
+./infra/gcp/provision-vertex-wif.sh \
+  --project ai-project-jul-19 \
+  --aws-profile radar-athena \
+  --aws-region us-east-1 \
+  --output data/local/gcp/gcp-wif.json \
+  --apply
+```
+
+This enables the required APIs, reconciles the dedicated service account, grants only Vertex AI
+User plus the exact external principal's Workload Identity User binding, and generates an IMDSv2
+external-account ADC file. It does not create a service-account key. The JSON contains no secret,
+but keep it out of Git and the image so its trusted endpoints and audience remain deployment
+configuration.
+
+After deploying the host helper, atomically validate/install the file over SSM and inspect the
+effective configuration:
+
+```bash
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  gcp-wif ai-project-jul-19 data/local/gcp/gcp-wif.json
+
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  gcp-wif-status
+```
+
+The retained host copy is `/srv/radar/config/gcp/gcp-wif.json`. Compose mounts its directory
+read-only at `/etc/radar`, allowing the UID-1000 app process to read
+`/etc/radar/gcp-wif.json` without baking it into the image. Runtime defaults are:
+
+```dotenv
+GOOGLE_CLOUD_PROJECT=ai-project-jul-19
+GOOGLE_CLOUD_LOCATION=global
+YC_RADAR_VERTEX_MODEL=gemini-3.5-flash-lite
+GOOGLE_APPLICATION_CREDENTIALS=/etc/radar/gcp-wif.json
+```
+
+The container obtains temporary AWS credentials from IMDSv2, exchanges them through Google's STS,
+then impersonates the dedicated service account for a short-lived Google access token. The EC2
+metadata hop limit is two so the container can complete IMDSv2; no AWS or Google long-lived key is
+installed. See [`infra/gcp/README.md`](../infra/gcp/README.md) for reconciliation, trust-boundary,
+and billing-budget details.
+
+### Calibrate domain resolution before the full run
+
+Use the same immutable scout CSV and raw-response cache for both phases, but separate output/status
+paths because the resumability manifest fingerprints the selected limit. Do not add `--apply`
+during calibration or the full evidence-gathering run. Start with 100 pending companies:
+
+```bash
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  run domain-resolver-calibration -- \
+  python scripts/resolve_greenhouse_domains.py \
+  --input /app/data/local/debug/greenhouse_board_verification_CC-MAIN-2026-30.csv \
+  --output /app/data/local/debug/greenhouse_domain_resolution.calibration.csv \
+  --status-file /app/data/local/debug/greenhouse_domain_resolution.calibration.status.json \
+  --cache-file /app/data/local/cache/greenhouse_domain_resolver.json \
+  --limit 100
+```
+
+Follow the managed job and review the durable CSV/status before authorizing more requests:
+
+```bash
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 \
+  status domain-resolver-calibration
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 \
+  logs domain-resolver-calibration 300
+```
+
+The calibration artifacts are retained on EBS:
+
+- `/srv/radar/app/data/local/debug/greenhouse_domain_resolution.calibration.csv`;
+- `/srv/radar/app/data/local/debug/greenhouse_domain_resolution.calibration.status.json`;
+- `/srv/radar/app/data/local/cache/greenhouse_domain_resolver.json`.
+
+For the 100 rows, inspect result/error distributions, citations and deterministic evidence, request
+attempts, input/output/total tokens, and `search_query_count` plus the recorded `search_queries`
+from Vertex `webSearchQueries`. Search-query count matters independently of request count: one
+Gemini request can issue multiple billable searches. Inspect the atomic aggregate status directly:
+
+```bash
+sudo jq '{
+  selected, processed, succeeded, failed, resumed,
+  accepted, ambiguous, manual_review, unresolved,
+  network_requests, cache_hits, request_attempt_count, search_query_count,
+  prompt_token_count, candidates_token_count, thoughts_token_count,
+  cached_content_token_count, total_token_count
+}' /srv/radar/app/data/local/debug/greenhouse_domain_resolution.calibration.status.json
+```
+
+Estimate the calibration's model cost and maximum search overage from the durable per-row metrics:
+
+```bash
+sudo python3 - \
+  /srv/radar/app/data/local/debug/greenhouse_domain_resolution.calibration.csv <<'PY'
+from collections import Counter
+import csv
+import sys
+
+
+def integer(row, key):
+    return int(row.get(key) or 0)
+
+
+with open(sys.argv[1], newline="", encoding="utf-8") as source:
+    rows = list(csv.DictReader(source))
+prompt = sum(integer(row, "prompt_token_count") for row in rows)
+cached = sum(integer(row, "cached_content_token_count") for row in rows)
+candidates = sum(integer(row, "candidates_token_count") for row in rows)
+thoughts = sum(integer(row, "thoughts_token_count") for row in rows)
+queries = sum(integer(row, "search_query_count") for row in rows)
+attempts = sum(integer(row, "request_attempt_count") for row in rows)
+model_usd = max(prompt - cached, 0) * 0.30 / 1_000_000
+model_usd += cached * 0.03 / 1_000_000
+model_usd += (candidates + thoughts) * 2.50 / 1_000_000
+maximum_search_overage_usd = queries * 14 / 1_000
+outcomes = Counter(row.get("domain_resolution_status") or "missing" for row in rows)
+print(f"rows={len(rows)} attempts={attempts} search_queries={queries}")
+print(f"tokens: prompt={prompt} cached={cached} candidates={candidates} thoughts={thoughts}")
+print(f"estimated_model_usd={model_usd:.6f}")
+print(f"maximum_search_overage_usd={maximum_search_overage_usd:.6f}")
+print("outcomes=" + ", ".join(f"{key}:{value}" for key, value in sorted(outcomes.items())))
+PY
+```
+
+The search figure assumes every query is beyond the monthly allowance, so it is a conservative
+upper bound, not an invoice. Confirm the raw `search_queries`, cache behavior, and accepted/rejected
+domains manually before continuing.
+
+When calibration quality and projected spend are acceptable, start a new full-run manifest and
+output while retaining the same cache. The first 100 inputs replay cached raw responses without
+new Vertex calls, then the resolver advances through the remaining input:
+
+```bash
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  run domain-resolver-full -- \
+  python scripts/resolve_greenhouse_domains.py \
+  --input /app/data/local/debug/greenhouse_board_verification_CC-MAIN-2026-30.csv \
+  --output /app/data/local/debug/greenhouse_domain_resolution.csv \
+  --status-file /app/data/local/debug/greenhouse_domain_resolution.status.json \
+  --cache-file /app/data/local/cache/greenhouse_domain_resolver.json
+```
+
+If the process or VM stops, use `retry domain-resolver-full`; systemd reuses the exact argv and the
+resolver advances from its CSV/cache checkpoint. Do not delete the partial output or change input,
+model, prompt, or scope mid-run. Re-run the status and cost checks against the full-run paths.
+Registry writes remain a separate reviewed `--apply` decision.
+
+As of 2026-07-31, standard global `gemini-3.5-flash-lite` pricing is `$0.30` per million input
+tokens and `$2.50` per million output tokens. Gemini 3 grounding includes 5,000 Google Web/Image
+Search queries per month across the project, then charges `$14` per 1,000 individual queries;
+grounding-supplied input tokens are not charged. Verify the current
+[Vertex AI pricing](https://cloud.google.com/vertex-ai/generative-ai/pricing) before each large run.
+Estimate model cost from the recorded token totals and retain the raw query count even while it is
+inside the monthly allowance. Cloud Billing is authoritative because the free query pool is shared
+with every Gemini 3 workload in the project.
+
+A billing budget/alert is recommended, but the current Google user lacks billing-account IAM to
+create or list one. This does not block WIF or the calibration. A billing administrator can add a
+project-scoped budget in the Cloud Billing console; budgets alert on delayed billing data and do
+not cap requests immediately.
 
 ## Run and resume jobs
 

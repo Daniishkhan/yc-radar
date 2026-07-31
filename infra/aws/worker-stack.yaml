@@ -359,5 +359,11 @@ Outputs:
   ElasticIpAllocationId:
     Description: Allocation ID of the stack-owned Elastic IP address.
     Value: !GetAtt WorkerElasticIp.AllocationId
+  WorkerRoleName:
+    Description: Physical IAM role name used to restrict Google Cloud Workload Identity Federation.
+    Value: !Ref WorkerRole
+  WorkerRoleArn:
+    Description: IAM role ARN used to restrict Google Cloud Workload Identity Federation.
+    Value: !GetAtt WorkerRole.Arn
   SsmStartSessionCommand:
     Value: !Sub aws ssm start-session --target ${WorkerInstance} --region ${AWS::Region}

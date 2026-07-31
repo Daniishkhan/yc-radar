@@ -17,6 +17,8 @@ This stack creates one private operational worker, not a served application:
 - Docker's data root, Postgres, the repository, job specifications, checkpoints, and local outputs
   on that retained volume;
 - a private, encrypted, versioned S3 bucket retained for job/deployment state summaries.
+- optional keyless Vertex AI access through an exact-role Google Workload Identity Federation
+  provider, with its non-secret ADC config mounted read-only from retained storage.
 
 The EC2 root volume is disposable. The EBS volume and S3 bucket are the recovery boundary. The
 Elastic IP is not retained: deleting the stack releases it automatically. CloudFormation
@@ -154,6 +156,33 @@ to migrate/rebuild while a managed job is active.
 ```bash
 ./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 deploy
 ```
+
+## Install keyless Vertex AI credentials
+
+Google Cloud trusts only AWS account `211236627350` and the exact physical `WorkerRole` emitted by
+this stack. The checked-in GCP provisioner derives that role name, grants a dedicated
+`radar-domain-resolver` service account only `roles/aiplatform.user`, and creates an AWS
+external-account ADC config without a service-account key:
+
+```bash
+./infra/gcp/provision-vertex-wif.sh \
+  --project ai-project-jul-19 \
+  --aws-profile radar-athena \
+  --aws-region us-east-1 \
+  --output data/local/gcp/gcp-wif.json \
+  --apply
+
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 \
+  gcp-wif ai-project-jul-19 data/local/gcp/gcp-wif.json
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 gcp-wif-status
+```
+
+The worker stores the config at `/srv/radar/config/gcp/gcp-wif.json` and mounts the containing
+directory read-only at `/etc/radar`. Runtime defaults select project `ai-project-jul-19`, location
+`global`, model `gemini-3.5-flash-lite`, and ADC path `/etc/radar/gcp-wif.json`. The file contains
+resource identifiers and metadata endpoints, not a private key or token, and is never baked into
+the app image. Full setup and the required 100-company cost/quality calibration are in
+[`docs/aws-worker.md`](../../docs/aws-worker.md).
 
 ## Run resumable jobs
 
