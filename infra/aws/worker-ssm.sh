@@ -14,6 +14,7 @@ AWS options:
 Actions:
   shell
   health
+  tailscale
   deploy
   run NAME -- COMMAND [ARG ...]
   pipeline NAME [PIPELINE ARG ...]
@@ -150,6 +151,10 @@ case "${action}" in
   health)
     [[ $# -eq 0 ]] || usage
     send_command 'cloud-init status --wait; sudo systemctl status --no-pager radar-deploy.service; sudo docker ps; findmnt /srv/radar'
+    ;;
+  tailscale)
+    [[ $# -eq 0 ]] || usage
+    send_command 'sudo systemctl status --no-pager tailscaled.service; sudo tailscale status --peers=false; sudo tailscale ip -4; sudo tailscale netcheck'
     ;;
   deploy)
     [[ $# -eq 0 ]] || usage

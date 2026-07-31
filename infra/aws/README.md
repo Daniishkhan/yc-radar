@@ -3,7 +3,10 @@
 This stack creates one private operational worker, not a served application:
 
 - Ubuntu 24.04 on `t3.medium` by default.
-- no inbound security-group rules, SSH key, load balancer, or public service;
+- no inbound security-group rules (including no public port 22), EC2 SSH key, load balancer, or
+  public service;
+- Tailscale SSH as the primary human access path after one-time enrollment, with no-inbound SSM
+  retained for automation and break-glass recovery;
 - outbound internet access for SSM, package/image downloads, and polite public-source requests;
 - IMDSv2 and an instance role scoped to SSM, the `radar-commoncrawl` Athena workgroup,
   the `radar_commoncrawl` Glue database, Common Crawl's index prefix, the Athena result bucket,
@@ -34,11 +37,60 @@ public IP but accepts no inbound connections.
   health
 ```
 
-Bootstrap installs Docker Compose and the AWS CLI, mounts the retained volume, generates a random
-local Postgres password in `/srv/radar/config/runtime.env`, builds the app image, and applies
-Alembic migrations. No application API key is copied to the machine. Do not put credentials in
-CloudFormation parameters, job names, commands, or Git. Add future secrets through an explicit
-SSM Parameter Store integration.
+Bootstrap installs Docker Compose, the AWS CLI, and Tailscale from its official Ubuntu repository,
+mounts the retained volume, generates a random local Postgres password in
+`/srv/radar/config/runtime.env`, builds the app image, and applies Alembic migrations. It starts
+`tailscaled` but does not enroll the machine. No application API key is copied to the machine. Do
+not put credentials in CloudFormation parameters, job names, commands, or Git. Add future secrets
+through an explicit SSM Parameter Store integration.
+
+## Human access with Tailscale SSH
+
+Tailscale SSH is the normal path for an operator shell. Keep the worker security group at zero
+ingress: do not expose TCP port 22 or add an EC2 SSH key. SSM continues to provide no-inbound
+automation through `worker-ssm.sh` and is the bootstrap and break-glass path if Tailscale is
+unavailable.
+
+For each new or replacement instance, first open an SSM shell:
+
+```bash
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  shell
+```
+
+The bootstrap has already installed and started Tailscale. Enroll the device once:
+
+```bash
+sudo tailscale up --ssh --hostname=radar-worker --accept-dns=false --accept-routes=false
+```
+
+Open the login URL printed by that command, sign in to the intended tailnet, and have a tailnet
+administrator approve the device when device approval is enabled. The administrator must also
+grant the intended operator identities access to the `ubuntu` account through the tailnet's
+Tailscale SSH policy/grants. Tailnet membership alone does not grant a shell.
+
+From an approved tailnet client, connect with:
+
+```bash
+tailscale ssh ubuntu@radar-worker
+# Or, when the client's ACL/SSH configuration and name resolution permit it:
+ssh ubuntu@radar-worker
+```
+
+Enrollment is deliberately interactive. Never store a Tailscale auth key in this repository,
+CloudFormation UserData, or deployment scripts. If the node is offline, expired, or denied by an
+incorrect policy, recover through SSM, inspect `sudo tailscale status` and the `tailscaled` service,
+then re-authenticate or correct the tailnet policy as needed. Do not solve a Tailscale failure by
+opening public port 22.
+
+The security group permits outbound UDP so Tailscale can attempt NAT traversal and a direct
+WireGuard connection. It still has no inbound rules. Check the node without opening a shell:
+
+```bash
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 tailscale
+```
 
 ## Deploy a pushed revision
 

@@ -54,6 +54,19 @@ install_aws_cli() {
   rm -rf "${installer_dir}"
 }
 
+install_tailscale() {
+  install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+  curl --fail --location --silent --show-error \
+    https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
+    --output /usr/share/keyrings/tailscale-archive-keyring.gpg
+  curl --fail --location --silent --show-error \
+    https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list \
+    --output /etc/apt/sources.list.d/tailscale.list
+  apt-get update
+  apt-get install -y --no-install-recommends tailscale
+  systemctl enable --now tailscaled.service
+}
+
 enable_ssm_agent() {
   if systemctl cat amazon-ssm-agent.service >/dev/null 2>&1; then
     systemctl enable --now amazon-ssm-agent.service
@@ -199,6 +212,7 @@ install_worker_services() {
 }
 
 install_aws_cli
+install_tailscale
 enable_ssm_agent
 mount_data_volume
 configure_docker

@@ -1,10 +1,12 @@
 # AWS worker operations
 
 The production worker is one on-demand EC2 instance running Docker Compose. It has no inbound
-security-group rules, no SSH key, and is managed through AWS Systems Manager. Postgres, Docker
-state, caches, job checkpoints, and ignored `data/local/` artifacts live on a separate encrypted
-50 GiB gp3 volume mounted at `/srv/radar`. CloudFormation retains that volume and the versioned
-state bucket if the instance or stack is removed.
+security-group rules, no public port 22, and no EC2 SSH key. Tailscale SSH is the primary human
+access path after one-time device enrollment; AWS Systems Manager remains the no-inbound path for
+automation, initial enrollment, and break-glass recovery. Postgres, Docker state, caches, job
+checkpoints, and ignored `data/local/` artifacts live on a separate encrypted 50 GiB gp3 volume
+mounted at `/srv/radar`. CloudFormation retains that volume and the versioned state bucket if the
+instance or stack is removed.
 
 This is intentionally a worker, not a served application. Nothing listens on a public port.
 
@@ -35,10 +37,12 @@ aws cloudformation deploy \
 
 The default is Ubuntu 24.04 amd64 on `t3.medium`, a 20 GiB encrypted disposable root disk, and a
 50 GiB encrypted retained data disk. The bootstrap installs Docker, the Compose plugin, AWS CLI,
-SSM Agent, the systemd units, and the repository. It generates the Postgres password locally on
+SSM Agent, Tailscale from its official Ubuntu repository, the systemd units, and the repository.
+It starts `tailscaled` without enrolling the device and generates the Postgres password locally on
 the retained disk; it never copies workstation AWS credentials or private profile/resume files.
 
-Get the instance ID and wait for SSM:
+Get the instance ID and wait for SSM. This path is needed for initial Tailscale enrollment and
+remains available for recovery:
 
 ```bash
 instance_id=$(aws cloudformation describe-stacks \
@@ -69,6 +73,57 @@ sudo docker compose \
   --env-file /srv/radar/config/runtime.env \
   -f /srv/radar/app/compose.prod.yml \
   ps
+```
+
+## Human access with Tailscale SSH
+
+Keep the security group at zero ingress. Tailscale reaches the host without a public SSH listener,
+so do not add a TCP/22 ingress rule or an EC2 key pair. SSM remains available independently for
+the checked-in deployment/job automation and for recovery if tailnet access fails.
+
+On each new or replacement instance, the bootstrap installs and starts the Tailscale client. Use
+the SSM session above to activate the device once:
+
+```bash
+sudo tailscale up --ssh --hostname=radar-worker --accept-dns=false --accept-routes=false
+```
+
+Open the URL emitted by `tailscale up`, have a tailnet administrator sign in to the intended
+tailnet, and approve `radar-worker` if device approval is enabled. The administrator must configure
+Tailscale SSH policy/grants that allow only the intended operator identities to connect as
+`ubuntu`; being able to see the node in the tailnet is not sufficient authorization.
+
+From an approved workstation on the tailnet, use:
+
+```bash
+tailscale ssh ubuntu@radar-worker
+# Or, when the workstation's ACL/SSH configuration and name resolution permit it:
+ssh ubuntu@radar-worker
+```
+
+Do not put a Tailscale auth key in Git, CloudFormation UserData, stack parameters, or deployment
+scripts. Interactive login keeps reusable enrollment credentials out of the machine bootstrap.
+For a stopped/expired node, failed login, or policy mistake, recover with SSM:
+
+```bash
+aws ssm start-session \
+  --profile radar-athena \
+  --region us-east-1 \
+  --target "${instance_id}"
+
+sudo tailscale status
+sudo systemctl status tailscaled --no-pager
+sudo systemctl restart tailscaled
+```
+
+Re-run the one-time `tailscale up` command if re-authentication is required. Never open public
+port 22 as a recovery shortcut.
+
+The worker security group allows outbound UDP for Tailscale NAT traversal and direct peer
+connections while retaining zero ingress rules. Inspect Tailscale health without opening a shell:
+
+```bash
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 tailscale
 ```
 
 ## Deploy a new commit
