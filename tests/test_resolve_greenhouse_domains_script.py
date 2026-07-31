@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,7 @@ def args_for(tmp_path: Path, input_path: Path, **overrides) -> argparse.Namespac
         "retry_delay_seconds": 0,
         "max_attempts": 1,
         "max_pages_per_domain": 3,
+        "company_timeout_seconds": 120,
         "no_resume": False,
         "apply": False,
     }
@@ -141,7 +143,7 @@ def test_quota_checkpoint_is_durable_and_returns_success_to_avoid_restart_loop(
 
     class FakeResolver:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.cache = type("Cache", (), {"hits": 0, "stores": 0})()
 
         def __enter__(self):
             return self
@@ -175,6 +177,106 @@ def test_quota_checkpoint_is_durable_and_returns_success_to_avoid_restart_loop(
     assert status["request_attempt_count"] == 3
     assert status["prompt_version"] == resolver_script.PROMPT_VERSION
     assert status["evidence_version"] == resolver_script.EVIDENCE_VERSION
+
+
+def test_company_timeout_is_retryable_and_run_continues(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "scout.csv"
+    write_scout_csv(
+        path,
+        [
+            scout_row("slow", board_name="Slow Company"),
+            scout_row("next", board_name="Next Company"),
+        ],
+    )
+    args = args_for(
+        tmp_path,
+        path,
+        checkpoint_every=10,
+        company_timeout_seconds=0.01,
+    )
+    checkpoint_lengths: list[int] = []
+    original_checkpoint = resolver_script.checkpoint
+
+    def recording_checkpoint(*checkpoint_args, **checkpoint_kwargs) -> None:
+        checkpoint_lengths.append(len(checkpoint_args[2]))
+        original_checkpoint(*checkpoint_args, **checkpoint_kwargs)
+
+    monkeypatch.setattr(resolver_script, "checkpoint", recording_checkpoint)
+
+    class FakeResolver:
+        def __init__(self, *args, **kwargs) -> None:
+            self.cache = type("Cache", (), {"hits": 0, "stores": 0})()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def resolve(self, *, company_name: str, **kwargs) -> DomainResolutionResult:
+            if company_name == "Slow Company":
+                self.cache.hits += 1
+                time.sleep(1)
+            return DomainResolutionResult(
+                status="unresolved",
+                model="gemini-3.5-flash-lite",
+                location="global",
+                cache_source="network",
+            )
+
+    monkeypatch.setattr(resolver_script, "GoogleDomainResolver", FakeResolver)
+
+    assert resolver_script.run(args) == 0
+
+    with args.output.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    assert [row["board_token"] for row in rows] == ["slow", "next"]
+    assert rows[0]["domain_resolution_status"] == "request_failed"
+    assert rows[0]["retryable"] == "true"
+    assert rows[0]["cache_source"] == "disk"
+    assert rows[0]["error"] == "company_timeout:0.01s"
+    assert rows[1]["domain_resolution_status"] == "unresolved"
+    assert checkpoint_lengths == [1]
+    status = json.loads(args.status_file.read_text(encoding="utf-8"))
+    assert status["state"] == "completed"
+    assert status["processed"] == 2
+    assert status["failed"] == 1
+    assert status["company_timeout_seconds"] == 0.01
+
+    retry_calls: list[str] = []
+
+    class RetryResolver(FakeResolver):
+        def resolve(self, *, company_name: str, **kwargs) -> DomainResolutionResult:
+            retry_calls.append(company_name)
+            return DomainResolutionResult(
+                status="unresolved",
+                model="gemini-3.5-flash-lite",
+                location="global",
+                cache_source="disk",
+            )
+
+    monkeypatch.setattr(resolver_script, "GoogleDomainResolver", RetryResolver)
+
+    assert resolver_script.run(args) == 0
+    assert retry_calls == ["Slow Company"]
+    retry_status = json.loads(args.status_file.read_text(encoding="utf-8"))
+    assert retry_status["processed"] == 2
+    assert retry_status["failed"] == 0
+    assert retry_status["resumed"] == 1
+
+
+def test_validate_args_rejects_non_positive_company_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "scout.csv"
+    write_scout_csv(path, [scout_row()])
+    args = args_for(tmp_path, path, company_timeout_seconds=0)
+
+    with pytest.raises(SystemExit, match="--company-timeout-seconds must be positive"):
+        resolver_script.validate_args(args)
 
 
 def test_result_row_and_registration_proof_retain_auditable_fields() -> None:

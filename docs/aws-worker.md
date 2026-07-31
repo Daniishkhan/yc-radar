@@ -363,13 +363,17 @@ new Vertex calls, then the resolver advances through the remaining input:
   --input /app/data/local/debug/greenhouse_board_verification_CC-MAIN-2026-30.csv \
   --output /app/data/local/debug/greenhouse_domain_resolution.csv \
   --status-file /app/data/local/debug/greenhouse_domain_resolution.status.json \
-  --cache-file /app/data/local/cache/greenhouse_domain_resolver.json
+  --cache-file /app/data/local/cache/greenhouse_domain_resolver.json \
+  --company-timeout-seconds 120
 ```
 
 If the process or VM stops, use `retry domain-resolver-full`; systemd reuses the exact argv and the
-resolver advances from its CSV/cache checkpoint. Do not delete the partial output or change input,
-model, prompt, or scope mid-run. Re-run the status and cost checks against the full-run paths.
-Registry writes remain a separate reviewed `--apply` decision.
+resolver advances from its CSV/cache checkpoint. Each company also has a 120-second wall-clock
+budget by default. A company that exceeds it is immediately checkpointed as a retryable
+`request_failed` row so one bad site cannot block the remaining queue; a later retry revisits that
+row while resuming completed rows. Do not delete the partial output or change input, model, prompt,
+or scope mid-run. Re-run the status and cost checks against the full-run paths. Registry writes
+remain a separate reviewed `--apply` decision.
 
 The manifest also fingerprints the resolver prompt and deterministic evidence versions. A prompt
 change intentionally creates new Vertex cache keys; an evidence-only change can reuse raw model

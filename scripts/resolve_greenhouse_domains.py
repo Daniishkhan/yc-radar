@@ -8,11 +8,13 @@ import csv
 import hashlib
 import json
 import os
+import signal
 import tempfile
 from collections import Counter
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy import select
@@ -83,6 +85,11 @@ OUTPUT_FIELDS = [
     "checked_at",
 ]
 RETRYABLE_RESULT_STATUSES = frozenset({"request_failed", "quota_exhausted"})
+DEFAULT_COMPANY_TIMEOUT_SECONDS = 120.0
+
+
+class CompanyResolutionDeadlineExceeded(BaseException):
+    """Escape third-party retry loops when one company exceeds its wall-clock budget."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,6 +136,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--max-pages-per-domain", type=int, default=3)
     parser.add_argument(
+        "--company-timeout-seconds",
+        type=positive_float,
+        default=DEFAULT_COMPANY_TIMEOUT_SECONDS,
+        help=(
+            "Hard wall-clock budget for one company. A timeout is checkpointed as a "
+            "retryable request failure and the run continues."
+        ),
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Ignore prior output rows; the independent raw-response cache remains enabled.",
@@ -146,6 +162,36 @@ def non_negative_float(value: str) -> float:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be zero or greater")
     return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+@contextmanager
+def company_resolution_deadline(seconds: float) -> Iterator[None]:
+    """Bound a synchronous resolver call even across nested SDK and HTTP retries."""
+
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        raise RuntimeError("per-company deadlines require POSIX interval timers")
+
+    def deadline_reached(_signum: int, _frame: Any) -> None:
+        # BaseException is deliberate: broad third-party `except Exception` retry loops
+        # must not swallow the job-level wall-clock deadline.
+        raise CompanyResolutionDeadlineExceeded
+
+    previous_handler = signal.signal(signal.SIGALRM, deadline_reached)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def main() -> None:
@@ -171,6 +217,7 @@ def run(args: argparse.Namespace) -> int:
             "project": args.project,
             "prompt_version": PROMPT_VERSION,
             "evidence_version": EVIDENCE_VERSION,
+            "company_timeout_seconds": args.company_timeout_seconds,
             "dry_run": not args.apply,
         }
     )
@@ -202,6 +249,7 @@ def run(args: argparse.Namespace) -> int:
         with resolver:
             for index, candidate in enumerate(selected, start=1):
                 token = candidate["board_token"]
+                timed_out = False
                 prior = resume_rows.get(token)
                 if prior is not None and can_resume_row(
                     prior, candidate=candidate, apply=args.apply
@@ -209,9 +257,32 @@ def run(args: argparse.Namespace) -> int:
                     rows.append(prior)
                     resumed += 1
                 else:
-                    result = resolver.resolve(
-                        company_name=candidate["board_name"], board_token=token
-                    )
+                    cache_hits_before = resolver.cache.hits
+                    cache_stores_before = resolver.cache.stores
+                    try:
+                        with company_resolution_deadline(args.company_timeout_seconds):
+                            result = resolver.resolve(
+                                company_name=candidate["board_name"], board_token=token
+                            )
+                    except CompanyResolutionDeadlineExceeded:
+                        timed_out = True
+                        cache_source = "unknown"
+                        if resolver.cache.stores > cache_stores_before:
+                            cache_source = "network"
+                        elif resolver.cache.hits > cache_hits_before:
+                            cache_source = "disk"
+                        resolver.close()
+                        result = DomainResolutionResult(
+                            status="request_failed",
+                            model=args.model,
+                            location=args.location,
+                            cache_source=cache_source,
+                            error=(
+                                "company_timeout:"
+                                f"{args.company_timeout_seconds:g}s"
+                            ),
+                            retryable=True,
+                        )
                     row = result_row(candidate, result)
                     if args.apply and result.status == "accepted":
                         assert engine is not None
@@ -226,7 +297,7 @@ def run(args: argparse.Namespace) -> int:
                     rows.append(row)
                     quota_exhausted = result.quota_exhausted
 
-                if index % args.checkpoint_every == 0 or quota_exhausted:
+                if index % args.checkpoint_every == 0 or quota_exhausted or timed_out:
                     checkpoint(
                         args,
                         status,
@@ -285,6 +356,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--checkpoint-every must be positive")
     if args.max_attempts < 1 or args.max_pages_per_domain < 1:
         raise SystemExit("--max-attempts and --max-pages-per-domain must be positive")
+    if args.company_timeout_seconds <= 0:
+        raise SystemExit("--company-timeout-seconds must be positive")
     if not args.location:
         raise SystemExit("--location must not be empty")
     if not args.model:
