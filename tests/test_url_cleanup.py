@@ -29,7 +29,9 @@ sys.modules["cleanup_url_inventory"] = cleanup_url_inventory
 SPEC.loader.exec_module(cleanup_url_inventory)
 
 
-def test_cleanup_plan_merges_only_canonical_duplicates_and_deactivates_deterministic_low_value_rows() -> None:
+def test_cleanup_plan_merges_only_canonical_duplicates_and_deactivates_deterministic_low_value_rows() -> (
+    None
+):
     pages = [
         {
             "id": 1,
@@ -90,7 +92,9 @@ def test_cleanup_plan_merges_only_canonical_duplicates_and_deactivates_determini
 
     urls[1]["is_active"] = False
     post_apply_actions = cleanup_url_inventory.build_cleanup_plan([pages[0]], urls, {})
-    assert not any(action["category"] == "discovered_url_duplicate" for action in post_apply_actions)
+    assert not any(
+        action["category"] == "discovered_url_duplicate" for action in post_apply_actions
+    )
 
 
 def test_cleanup_plan_does_not_cross_wire_page_ids_or_none_http_statuses() -> None:
@@ -136,14 +140,11 @@ def test_cleanup_plan_does_not_cross_wire_page_ids_or_none_http_statuses() -> No
     actions = cleanup_url_inventory.build_cleanup_plan(pages, urls, classifications)
 
     page_duplicate = next(
-        action
-        for action in actions
-        if action["category"] == "company_career_page_duplicate"
+        action for action in actions if action["category"] == "company_career_page_duplicate"
     )
     assert page_duplicate["winner_id"] == 2
     assert not any(
-        action["category"] == "discovered_url_terminal_error_deactivate"
-        for action in actions
+        action["category"] == "discovered_url_terminal_error_deactivate" for action in actions
     )
 
 
@@ -209,6 +210,94 @@ def test_cleanup_plan_canonicalizes_filters_and_rejects_bad_primary_urls() -> No
     assert {action["after_url"] for action in canonicalizations} == {canonical}
 
 
+def test_cleanup_plan_canonicalizes_registered_source_to_provider_board_root() -> None:
+    observed = "https://job-boards.greenhouse.io/acme/jobs/42?gh_src=campaign"
+    actions = cleanup_url_inventory.build_cleanup_plan(
+        [],
+        [],
+        {},
+        [
+            {
+                "id": 7,
+                "provider": "greenhouse",
+                "external_source_id": "acme",
+                "source_url": observed,
+                "discovered_from_url": observed,
+            }
+        ],
+    )
+
+    assert cleanup_url_inventory.action_counts(actions) == {"career_source_url_canonicalize": 1}
+    assert actions[0]["after_url"] == "https://job-boards.greenhouse.io/acme"
+    assert actions[0]["after_discovered_from_url"] == (
+        "https://job-boards.greenhouse.io/acme/jobs/42"
+    )
+
+
+def test_cleanup_plan_does_not_hide_career_source_identity_mismatch() -> None:
+    source_url = "https://job-boards.greenhouse.io/different/jobs/42"
+    actions = cleanup_url_inventory.build_cleanup_plan(
+        [],
+        [],
+        {},
+        [
+            {
+                "id": 7,
+                "provider": "greenhouse",
+                "external_source_id": "acme",
+                "source_url": source_url,
+                "discovered_from_url": source_url,
+            }
+        ],
+    )
+
+    assert actions == []
+
+
+def test_cleanup_plan_preserves_legacy_source_detail_as_discovery_evidence() -> None:
+    observed = "https://job-boards.greenhouse.io/acme/jobs/42?gh_src=campaign"
+    actions = cleanup_url_inventory.build_cleanup_plan(
+        [],
+        [],
+        {},
+        [
+            {
+                "id": 7,
+                "provider": "greenhouse",
+                "external_source_id": "acme",
+                "source_url": observed,
+                "discovered_from_url": None,
+            }
+        ],
+    )
+
+    assert cleanup_url_inventory.action_counts(actions) == {"career_source_url_canonicalize": 1}
+    assert actions[0]["after_url"] == "https://job-boards.greenhouse.io/acme"
+    assert actions[0]["after_discovered_from_url"] == (
+        "https://job-boards.greenhouse.io/acme/jobs/42"
+    )
+
+
+def test_inventory_fingerprint_includes_career_source_identity() -> None:
+    source = {
+        "id": 7,
+        "provider": "greenhouse",
+        "external_source_id": "acme",
+        "source_url": "https://job-boards.greenhouse.io/acme?gh_src=campaign",
+        "discovered_from_url": None,
+    }
+
+    original = cleanup_url_inventory.inventory_fingerprint([], [], {}, [source])
+    changed = cleanup_url_inventory.inventory_fingerprint(
+        [],
+        [],
+        {},
+        [{**source, "external_source_id": "other"}],
+    )
+
+    assert changed != original
+
+
 def test_cleanup_plan_quarantines_audited_fanout_and_vendor_navigation_only() -> None:
     pages = [
         {
@@ -269,11 +358,10 @@ def test_cleanup_plan_quarantines_audited_fanout_and_vendor_navigation_only() ->
         "discovered_url_inventory_deactivate": 2,
         "discovered_url_primary_reselect": 2,
     }
-    assert {
-        action["loser_id"]
-        for action in actions
-        if action.get("loser_id") is not None
-    } == {1, 3}
+    assert {action["loser_id"] for action in actions if action.get("loser_id") is not None} == {
+        1,
+        3,
+    }
 
 
 def test_url_inventory_writer_lock_conflicts_with_cleanup_exclusive_lock(
@@ -282,18 +370,26 @@ def test_url_inventory_writer_lock_conflicts_with_cleanup_exclusive_lock(
     engine = engine_from_url(postgres_database_url)
     with url_inventory_writer_lock(engine):
         with engine.connect() as observer:
-            assert observer.scalar(
-                select(func.pg_try_advisory_lock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
-            ) is False
+            assert (
+                observer.scalar(
+                    select(func.pg_try_advisory_lock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
+                )
+                is False
+            )
 
     with engine.connect() as exclusive:
-        assert exclusive.scalar(
-            select(func.pg_try_advisory_lock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
-        ) is True
+        assert (
+            exclusive.scalar(
+                select(func.pg_try_advisory_lock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
+            )
+            is True
+        )
         with pytest.raises(RuntimeError, match="cleanup apply is active"):
             with url_inventory_writer_lock(engine):
                 pass
-        exclusive.execute(select(func.pg_advisory_unlock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK))))
+        exclusive.execute(
+            select(func.pg_advisory_unlock(func.hashtext(URL_INVENTORY_ADVISORY_LOCK)))
+        )
 
 
 def test_cleanup_apply_canonicalizes_page_queue_and_registered_source_urls(
@@ -350,9 +446,7 @@ def test_cleanup_apply_canonicalizes_page_queue_and_registered_source_urls(
         pages, urls, classifications = cleanup_url_inventory.load_inventory(connection)
         sources = cleanup_url_inventory.load_career_source_urls(connection)
         counts = cleanup_url_inventory.table_counts(connection)
-    actions = cleanup_url_inventory.build_cleanup_plan(
-        pages, urls, classifications, sources
-    )
+    actions = cleanup_url_inventory.build_cleanup_plan(pages, urls, classifications, sources)
     cleanup_url_inventory.write_dry_run_artifacts(
         tmp_path,
         database=str(engine.url.database),
@@ -441,7 +535,11 @@ def test_cleanup_apply_requires_reviewed_digest_and_backs_up_all_mutated_rows(
             company_career_pages_table.insert(),
             [
                 page("https://example.com/careers", primary=True, confidence=0.9),
-                page("http://www.example.com/careers?utm_source=footer", primary=False, confidence=0.8),
+                page(
+                    "http://www.example.com/careers?utm_source=footer",
+                    primary=False,
+                    confidence=0.8,
+                ),
                 page("https://example.com/jobs", primary=False, confidence=0.7),
             ],
         )
@@ -469,7 +567,10 @@ def test_cleanup_apply_requires_reviewed_digest_and_backs_up_all_mutated_rows(
 
     changed_survivor_input = [dict(row) for row in urls]
     changed_survivor_input[0]["source_event_count"] += 1
-    assert cleanup_url_inventory.inventory_fingerprint(pages, changed_survivor_input, classifications) != fingerprint
+    assert (
+        cleanup_url_inventory.inventory_fingerprint(pages, changed_survivor_input, classifications)
+        != fingerprint
+    )
     tampered_actions = [dict(action) for action in reviewed_actions]
     tampered_actions[0]["winner_id"] = 999
     with pytest.raises(RuntimeError, match="reviewed actions"):
@@ -477,13 +578,23 @@ def test_cleanup_apply_requires_reviewed_digest_and_backs_up_all_mutated_rows(
 
     before, after = cleanup_url_inventory.apply_cleanup_plan(engine, tmp_path, manifest)
 
-    backup = [json.loads(line) for line in (tmp_path / "backup.jsonl").read_text(encoding="utf-8").splitlines()]
-    backed_up_page_ids = {entry["row"]["id"] for entry in backup if entry["table"] == "company_career_pages"}
-    backed_up_url_ids = {entry["row"]["id"] for entry in backup if entry["table"] == "discovered_urls"}
+    backup = [
+        json.loads(line)
+        for line in (tmp_path / "backup.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    backed_up_page_ids = {
+        entry["row"]["id"] for entry in backup if entry["table"] == "company_career_pages"
+    }
+    backed_up_url_ids = {
+        entry["row"]["id"] for entry in backup if entry["table"] == "discovered_urls"
+    }
     assert backed_up_page_ids == {row["id"] for row in pages}
     assert backed_up_url_ids == {row["id"] for row in urls}
     backup_manifest = json.loads((tmp_path / "backup-manifest.json").read_text(encoding="utf-8"))
-    assert backup_manifest["backup_sha256"] == hashlib.sha256((tmp_path / "backup.jsonl").read_bytes()).hexdigest()
+    assert (
+        backup_manifest["backup_sha256"]
+        == hashlib.sha256((tmp_path / "backup.jsonl").read_bytes()).hexdigest()
+    )
     assert before["career_page_discovery_events"] == after["career_page_discovery_events"] == 0
 
     with engine.connect() as connection:

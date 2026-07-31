@@ -38,6 +38,7 @@ from yc_radar.services.database import (
     source_documents_table,
     source_sync_runs_table,
 )
+from yc_radar.services.job_source_registry import default_job_source_providers
 from yc_radar.services.url_quality import (
     POLICY_VERSION,
     canonical_url_key,
@@ -64,9 +65,15 @@ TABLES = {
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    parser = argparse.ArgumentParser(description="Audit or conservatively clean local URL inventory.")
-    parser.add_argument("--audit-dir", type=Path, default=settings.local_debug_dir / "url-cleanup" / stamp)
-    parser.add_argument("--apply", action="store_true", help="Apply only the reviewed matching dry run.")
+    parser = argparse.ArgumentParser(
+        description="Audit or conservatively clean local URL inventory."
+    )
+    parser.add_argument(
+        "--audit-dir", type=Path, default=settings.local_debug_dir / "url-cleanup" / stamp
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Apply only the reviewed matching dry run."
+    )
     return parser.parse_args()
 
 
@@ -93,7 +100,9 @@ def atomic_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
 def load_reviewed_actions(path: Path) -> list[dict[str, Any]]:
     """Load the exact dry-run action list that the operator reviewed."""
     try:
-        actions = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        actions = [
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line
+        ]
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("reviewed actions.jsonl is missing or malformed") from exc
     if not all(isinstance(action, dict) for action in actions):
@@ -119,12 +128,25 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
 
 
 def table_counts(connection: Connection) -> dict[str, int]:
-    counts = {name: int(connection.scalar(select(func.count()).select_from(table)) or 0) for name, table in TABLES.items()}
+    counts = {
+        name: int(connection.scalar(select(func.count()).select_from(table)) or 0)
+        for name, table in TABLES.items()
+    }
     counts["discovered_urls_active"] = int(
-        connection.scalar(select(func.count()).select_from(discovered_urls_table).where(discovered_urls_table.c.is_active.is_(True))) or 0
+        connection.scalar(
+            select(func.count())
+            .select_from(discovered_urls_table)
+            .where(discovered_urls_table.c.is_active.is_(True))
+        )
+        or 0
     )
     counts["discovered_urls_inactive"] = int(
-        connection.scalar(select(func.count()).select_from(discovered_urls_table).where(discovered_urls_table.c.is_active.is_(False))) or 0
+        connection.scalar(
+            select(func.count())
+            .select_from(discovered_urls_table)
+            .where(discovered_urls_table.c.is_active.is_(False))
+        )
+        or 0
     )
     return counts
 
@@ -132,15 +154,14 @@ def table_counts(connection: Connection) -> dict[str, int]:
 def load_inventory(
     connection: Connection,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, dict[str, Any]]]:
-    pages = [
-        dict(row)
-        for row in connection.execute(select(company_career_pages_table)).mappings()
-    ]
+    pages = [dict(row) for row in connection.execute(select(company_career_pages_table)).mappings()]
     urls = [dict(row) for row in connection.execute(select(discovered_urls_table)).mappings()]
     classifications = {
         int(row["discovered_url_id"]): dict(row)
         for row in connection.execute(
-            select(page_classifications_table).where(page_classifications_table.c.discovered_url_id.is_not(None))
+            select(page_classifications_table).where(
+                page_classifications_table.c.discovered_url_id.is_not(None)
+            )
         ).mappings()
     }
     return pages, urls, classifications
@@ -148,6 +169,28 @@ def load_inventory(
 
 def load_career_source_urls(connection: Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(select(career_sources_table)).mappings()]
+
+
+def canonical_career_source_url(row: dict[str, Any]) -> str:
+    """Return the provider-owned board/feed URL when the stored identity agrees.
+
+    ``career_sources.source_url`` is the stable provider source, while
+    ``discovered_from_url`` retains the observed detail/listing URL.  Older rows
+    predate that distinction and can therefore contain a job-detail URL here.
+    Fail closed on an identity mismatch instead of rewriting it to a different
+    provider source.
+    """
+
+    source_url = str(row.get("source_url") or "")
+    provider = str(row.get("provider") or "")
+    external_source_id = str(row.get("external_source_id") or "")
+    try:
+        detected = default_job_source_providers().detect(source_url, provider=provider)
+    except ValueError:
+        detected = None
+    if detected is not None and detected.external_source_id == external_source_id:
+        return detected.canonical_url
+    return normalize_url(source_url, source_url) or source_url
 
 
 def inventory_fingerprint(
@@ -196,6 +239,8 @@ def inventory_fingerprint(
         "career_sources": [
             [
                 row["id"],
+                row.get("provider"),
+                row.get("external_source_id"),
                 row.get("source_url"),
                 row.get("discovered_from_url"),
             ]
@@ -216,7 +261,9 @@ def _successful(row: dict[str, Any], classifications: dict[int, dict[str, Any]])
     return status is not None and 200 <= int(status) < 400
 
 
-def _survivor_key(row: dict[str, Any], classifications: dict[int, dict[str, Any]]) -> tuple[Any, ...]:
+def _survivor_key(
+    row: dict[str, Any], classifications: dict[int, dict[str, Any]]
+) -> tuple[Any, ...]:
     # Lower tuple wins: verified provider board, fetched success, active/primary, HTTP, evidence, age, ID.
     normalized = str(row.get("normalized_url") or row.get("career_page_url") or "")
     return (
@@ -281,7 +328,10 @@ def build_cleanup_plan(
             if len(members) < 2:
                 continue
             winner = min(members, key=lambda row: _survivor_key(row, classifications))
-            for loser in sorted((row for row in members if row["id"] != winner["id"]), key=lambda row: int(row["id"])):
+            for loser in sorted(
+                (row for row in members if row["id"] != winner["id"]),
+                key=lambda row: int(row["id"]),
+            ):
                 actions.append(
                     _action(
                         f"{category}_duplicate",
@@ -329,9 +379,7 @@ def build_cleanup_plan(
             )
 
     duplicate_url_losers = {
-        action["loser_id"]
-        for action in actions
-        if action["category"] == "discovered_url_duplicate"
+        action["loser_id"] for action in actions if action["category"] == "discovered_url_duplicate"
     }
     successful_by_company = {
         str(row["company_slug"])
@@ -398,16 +446,16 @@ def build_cleanup_plan(
         discovered_from_url = (
             str(raw_discovered_from_url) if raw_discovered_from_url is not None else None
         )
-        canonical_source_url = normalize_url(source_url, source_url) or source_url
+        normalized_source_url = normalize_url(source_url, source_url) or source_url
+        canonical_source_url = canonical_career_source_url(row)
         canonical_discovered_url = (
             normalize_url(discovered_from_url, discovered_from_url)
             if discovered_from_url
+            else normalized_source_url
+            if canonical_source_url != normalized_source_url
             else None
         )
-        if (
-            canonical_source_url != source_url
-            or canonical_discovered_url != discovered_from_url
-        ):
+        if canonical_source_url != source_url or canonical_discovered_url != discovered_from_url:
             actions.append(
                 _action(
                     "career_source_url_canonicalize",
@@ -450,8 +498,7 @@ def build_cleanup_plan(
     url_loser_ids = {
         int(action["loser_id"])
         for action in actions
-        if action["category"].startswith("discovered_url_")
-        and action.get("loser_id") is not None
+        if action["category"].startswith("discovered_url_") and action.get("loser_id") is not None
     }
     surviving_urls: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in urls:
@@ -492,15 +539,21 @@ def verify_reviewed_action_plan(
     expected_digest = manifest.get("actions_sha256")
     expected_ids = manifest.get("action_ids")
     if not isinstance(expected_digest, str) or not isinstance(expected_ids, list):
-        raise RuntimeError("dry-run manifest lacks an action digest; run a fresh audit before --apply")
+        raise RuntimeError(
+            "dry-run manifest lacks an action digest; run a fresh audit before --apply"
+        )
     reviewed_ids = [str(action.get("action_id") or "") for action in reviewed_actions]
     if action_digest(reviewed_actions) != expected_digest or reviewed_ids != expected_ids:
         raise RuntimeError("reviewed actions.jsonl does not match its manifest")
     if action_counts(recomputed_actions) != manifest.get("action_counts"):
-        raise RuntimeError("cleanup action counts changed after dry run; run a fresh audit before --apply")
+        raise RuntimeError(
+            "cleanup action counts changed after dry run; run a fresh audit before --apply"
+        )
     recomputed_ids = [str(action.get("action_id") or "") for action in recomputed_actions]
     if action_digest(recomputed_actions) != expected_digest or recomputed_ids != expected_ids:
-        raise RuntimeError("cleanup action plan changed after dry run; run a fresh audit before --apply")
+        raise RuntimeError(
+            "cleanup action plan changed after dry run; run a fresh audit before --apply"
+        )
 
 
 def write_dry_run_artifacts(
@@ -516,7 +569,9 @@ def write_dry_run_artifacts(
     # accepts a manifest that points at a partial or different plan.
     atomic_json(audit_dir / "before-counts.json", counts)
     atomic_jsonl(audit_dir / "actions.jsonl", actions)
-    with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8", delete=False, dir=audit_dir) as handle:
+    with tempfile.NamedTemporaryFile(
+        "w", newline="", encoding="utf-8", delete=False, dir=audit_dir
+    ) as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
@@ -567,7 +622,9 @@ def _cleanup_raw_json(row: dict[str, Any], action: dict[str, Any]) -> dict[str, 
     return raw
 
 
-def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+def apply_cleanup_plan(
+    engine: Engine, audit_dir: Path, manifest: dict[str, Any]
+) -> tuple[dict[str, int], dict[str, int]]:
     """Apply one verified plan under a session advisory lock and return before/after counts."""
     with engine.connect() as connection:
         locked = connection.scalar(
@@ -580,11 +637,11 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
             connection.commit()
             pages, urls, classifications = load_inventory(connection)
             career_sources = load_career_source_urls(connection)
-            fresh_fingerprint = inventory_fingerprint(
-                pages, urls, classifications, career_sources
-            )
+            fresh_fingerprint = inventory_fingerprint(pages, urls, classifications, career_sources)
             if fresh_fingerprint != manifest["input_fingerprint"]:
-                raise RuntimeError("inventory changed after dry run; run a fresh audit before --apply")
+                raise RuntimeError(
+                    "inventory changed after dry run; run a fresh audit before --apply"
+                )
             actions = build_cleanup_plan(pages, urls, classifications, career_sources)
             verify_reviewed_action_plan(manifest, reviewed_actions, actions)
             # End read preflight, then repeat it under the mutation transaction.
@@ -604,9 +661,7 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                 actions = transactional_actions
                 page_by_id = {int(row["id"]): row for row in pages}
                 url_by_id = {int(row["id"]): row for row in urls}
-                career_source_by_id = {
-                    int(row["id"]): row for row in career_sources
-                }
+                career_source_by_id = {int(row["id"]): row for row in career_sources}
                 page_action_companies = {
                     str(action["company_slug"])
                     for action in actions
@@ -671,8 +726,7 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                         .with_for_update()
                     )
                 affected_page_urls = [
-                    str(page_by_id[row_id]["normalized_url"])
-                    for row_id in deleted_page_ids
+                    str(page_by_id[row_id]["normalized_url"]) for row_id in deleted_page_ids
                 ]
                 if affected_page_urls:
                     source_references = connection.scalar(
@@ -697,20 +751,27 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                     career_source_by_id.update(
                         {int(row["id"]): dict(row) for row in locked_sources}
                     )
-                backup = [
-                    {"table": "company_career_pages", "row": page_by_id[row_id]}
-                    for row_id in sorted(touched_page_ids)
-                ] + [
-                    {"table": "discovered_urls", "row": url_by_id[row_id]}
-                    for row_id in sorted(touched_url_ids)
-                ] + [
-                    {"table": "career_sources", "row": career_source_by_id[row_id]}
-                    for row_id in sorted(touched_career_source_ids)
-                ]
+                backup = (
+                    [
+                        {"table": "company_career_pages", "row": page_by_id[row_id]}
+                        for row_id in sorted(touched_page_ids)
+                    ]
+                    + [
+                        {"table": "discovered_urls", "row": url_by_id[row_id]}
+                        for row_id in sorted(touched_url_ids)
+                    ]
+                    + [
+                        {"table": "career_sources", "row": career_source_by_id[row_id]}
+                        for row_id in sorted(touched_career_source_ids)
+                    ]
+                )
                 backup_bytes = canonical_jsonl_bytes(backup)
                 backup_sha256 = hashlib.sha256(backup_bytes).hexdigest()
                 atomic_jsonl(audit_dir / "backup.jsonl", backup)
-                if hashlib.sha256((audit_dir / "backup.jsonl").read_bytes()).hexdigest() != backup_sha256:
+                if (
+                    hashlib.sha256((audit_dir / "backup.jsonl").read_bytes()).hexdigest()
+                    != backup_sha256
+                ):
                     raise RuntimeError("cleanup backup verification failed")
                 atomic_json(
                     audit_dir / "backup-manifest.json",
@@ -745,9 +806,7 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                             .where(career_sources_table.c.id == source["id"])
                             .values(
                                 source_url=action["after_url"],
-                                discovered_from_url=action[
-                                    "after_discovered_from_url"
-                                ],
+                                discovered_from_url=action["after_discovered_from_url"],
                                 raw_json=_cleanup_raw_json(source, action),
                             )
                         )
@@ -776,18 +835,27 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                         winner = page_by_id[int(action["winner_id"])]
                         loser = page_by_id[int(action["loser_id"])]
                         merged_raw = _cleanup_raw_json(winner, action)
-                        merged_raw["merged_page_ids"] = sorted(set(merged_raw.get("merged_page_ids", []) + [int(loser["id"])]))
+                        merged_raw["merged_page_ids"] = sorted(
+                            set(merged_raw.get("merged_page_ids", []) + [int(loser["id"])])
+                        )
                         connection.execute(
                             update(company_career_pages_table)
                             .where(company_career_pages_table.c.id == winner["id"])
                             .values(
                                 observed_source_count=int(winner.get("observed_source_count") or 0)
                                 + int(loser.get("observed_source_count") or 0),
-                                confidence=max(float(winner.get("confidence") or 0), float(loser.get("confidence") or 0)),
+                                confidence=max(
+                                    float(winner.get("confidence") or 0),
+                                    float(loser.get("confidence") or 0),
+                                ),
                                 raw_json=merged_raw,
                             )
                         )
-                        connection.execute(delete(company_career_pages_table).where(company_career_pages_table.c.id == loser["id"]))
+                        connection.execute(
+                            delete(company_career_pages_table).where(
+                                company_career_pages_table.c.id == loser["id"]
+                            )
+                        )
                     elif category == "discovered_url_canonicalize":
                         winner = url_by_id[int(action["winner_id"])]
                         connection.execute(
@@ -808,36 +876,58 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                             update(discovered_urls_table)
                             .where(discovered_urls_table.c.id == winner["id"])
                             .values(
-                                discovery_sources=_merge_list(winner.get("discovery_sources"), loser.get("discovery_sources")),
-                                evidence_samples=_merge_list(winner.get("evidence_samples"), loser.get("evidence_samples")),
+                                discovery_sources=_merge_list(
+                                    winner.get("discovery_sources"), loser.get("discovery_sources")
+                                ),
+                                evidence_samples=_merge_list(
+                                    winner.get("evidence_samples"), loser.get("evidence_samples")
+                                ),
                                 source_event_count=int(winner.get("source_event_count") or 0)
                                 + int(loser.get("source_event_count") or 0),
-                                confidence=max(float(winner.get("confidence") or 0), float(loser.get("confidence") or 0)),
-                                fetch_priority=max(float(winner.get("fetch_priority") or 0), float(loser.get("fetch_priority") or 0)),
+                                confidence=max(
+                                    float(winner.get("confidence") or 0),
+                                    float(loser.get("confidence") or 0),
+                                ),
+                                fetch_priority=max(
+                                    float(winner.get("fetch_priority") or 0),
+                                    float(loser.get("fetch_priority") or 0),
+                                ),
                                 raw_json=merged_raw,
                             )
                         )
                         connection.execute(
                             update(discovered_urls_table)
                             .where(discovered_urls_table.c.id == loser["id"])
-                            .values(is_active=False, is_primary=False, raw_json=_cleanup_raw_json(loser, action))
+                            .values(
+                                is_active=False,
+                                is_primary=False,
+                                raw_json=_cleanup_raw_json(loser, action),
+                            )
                         )
                     else:
                         loser = url_by_id[int(action["loser_id"])]
                         connection.execute(
                             update(discovered_urls_table)
                             .where(discovered_urls_table.c.id == loser["id"])
-                            .values(is_active=False, is_primary=False, raw_json=_cleanup_raw_json(loser, action))
+                            .values(
+                                is_active=False,
+                                is_primary=False,
+                                raw_json=_cleanup_raw_json(loser, action),
+                            )
                         )
                 for company_slug in sorted(page_action_companies):
                     current_pages = [
                         dict(row)
                         for row in connection.execute(
-                            select(company_career_pages_table).where(company_career_pages_table.c.company_slug == company_slug)
+                            select(company_career_pages_table).where(
+                                company_career_pages_table.c.company_slug == company_slug
+                            )
                         ).mappings()
                     ]
                     if current_pages:
-                        winner = min(current_pages, key=lambda row: _survivor_key(row, classifications))
+                        winner = min(
+                            current_pages, key=lambda row: _survivor_key(row, classifications)
+                        )
                         connection.execute(
                             update(company_career_pages_table)
                             .where(company_career_pages_table.c.company_slug == company_slug)
@@ -859,7 +949,9 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                         ).mappings()
                     ]
                     if current_urls:
-                        winner = min(current_urls, key=lambda row: _survivor_key(row, classifications))
+                        winner = min(
+                            current_urls, key=lambda row: _survivor_key(row, classifications)
+                        )
                         connection.execute(
                             update(discovered_urls_table)
                             .where(discovered_urls_table.c.company_slug == company_slug)
@@ -875,7 +967,14 @@ def apply_cleanup_plan(engine: Engine, audit_dir: Path, manifest: dict[str, Any]
                     raise RuntimeError("raw discovery event invariant failed")
                 if {name: after[name] for name in canonical_before} != canonical_before:
                     raise RuntimeError("canonical provider lifecycle invariant failed")
-                active = [row for row in connection.execute(select(discovered_urls_table).where(discovered_urls_table.c.is_active.is_(True))).mappings()]
+                active = [
+                    row
+                    for row in connection.execute(
+                        select(discovered_urls_table).where(
+                            discovered_urls_table.c.is_active.is_(True)
+                        )
+                    ).mappings()
+                ]
                 seen: set[tuple[str, str]] = set()
                 for row in active:
                     key = canonical_url_key(str(row["normalized_url"]))
@@ -918,12 +1017,8 @@ def run(args: argparse.Namespace) -> None:
         pages, urls, classifications = load_inventory(connection)
         career_sources = load_career_source_urls(connection)
         counts = table_counts(connection)
-        fingerprint = inventory_fingerprint(
-            pages, urls, classifications, career_sources
-        )
-        actions = build_cleanup_plan(
-            pages, urls, classifications, career_sources
-        )
+        fingerprint = inventory_fingerprint(pages, urls, classifications, career_sources)
+        actions = build_cleanup_plan(pages, urls, classifications, career_sources)
         connection.exec_driver_sql("ROLLBACK")
     if not args.apply:
         write_dry_run_artifacts(
@@ -933,7 +1028,16 @@ def run(args: argparse.Namespace) -> None:
             fingerprint=fingerprint,
             actions=actions,
         )
-        print(json.dumps({"audit_dir": str(args.audit_dir), "counts": counts, "actions": action_counts(actions)}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "audit_dir": str(args.audit_dir),
+                    "counts": counts,
+                    "actions": action_counts(actions),
+                },
+                sort_keys=True,
+            )
+        )
         return
     manifest_path = args.audit_dir / "manifest.json"
     if not manifest_path.exists():
@@ -943,8 +1047,21 @@ def run(args: argparse.Namespace) -> None:
         raise SystemExit("dry-run manifest policy or database does not match this apply")
     before, after = apply_cleanup_plan(engine, args.audit_dir, manifest)
     atomic_json(args.audit_dir / "after-counts.json", after)
-    atomic_json(args.audit_dir / "apply-summary.json", {"before": before, "after": after, "actions": action_counts(actions)})
-    print(json.dumps({"audit_dir": str(args.audit_dir), "before": before, "after": after, "actions": action_counts(actions)}, sort_keys=True))
+    atomic_json(
+        args.audit_dir / "apply-summary.json",
+        {"before": before, "after": after, "actions": action_counts(actions)},
+    )
+    print(
+        json.dumps(
+            {
+                "audit_dir": str(args.audit_dir),
+                "before": before,
+                "after": after,
+                "actions": action_counts(actions),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -98,6 +98,31 @@ def test_company_registration_rejects_conflicting_identity_evidence(
         )
 
 
+def test_company_registration_rejects_shared_directory_identity_website(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+
+    with pytest.raises(ValueError, match="safe company-owned identity evidence"):
+        CompanyRegistry(engine).register_company(
+            name="Descope",
+            website="https://github.com",
+        )
+
+
+def test_company_registration_allows_shared_root_for_its_exact_brand(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+
+    result = CompanyRegistry(engine).register_company(
+        name="GitHub",
+        website="https://github.com",
+    )
+
+    assert result.company_created is True
+
+
 def test_yc_ingestion_keeps_profile_data_out_of_neutral_company(
     postgres_database_url: str,
 ) -> None:
@@ -156,9 +181,13 @@ def test_yc_external_id_cannot_overwrite_standalone_company(
     )
 
     with engine.connect() as connection:
-        standalone_row = connection.execute(
-            select(companies_table).where(companies_table.c.id == standalone.company_id)
-        ).mappings().one()
+        standalone_row = (
+            connection.execute(
+                select(companies_table).where(companies_table.c.id == standalone.company_id)
+            )
+            .mappings()
+            .one()
+        )
         profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
     assert standalone_row["name"] == "Independent Employer"
     assert profile["yc_company_id"] == 1

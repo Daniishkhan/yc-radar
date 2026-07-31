@@ -66,6 +66,7 @@ def test_external_job_origin_rejects_ats_and_shared_hosts() -> None:
     assert external_job_origin("https://job-boards.greenhouse.io/acme/jobs/1") is None
     assert external_job_origin("https://job-boards.eu.greenhouse.io/acme/jobs/1") is None
     assert external_job_origin("https://acme.notion.site/job") is None
+    assert external_job_origin("https://github.com") is None
     assert external_job_origin("https://www.acme.com/jobs/1") == "https://www.acme.com"
 
 

@@ -256,7 +256,60 @@ def test_private_and_third_party_domains_are_not_company_candidates() -> None:
     assert acceptable_company_domain("service.internal") is None
     assert acceptable_company_domain("127.0.0.1") is None
     assert acceptable_company_domain("acme.wikipedia.org") is None
+    assert acceptable_company_domain("github.io") is None
+    assert acceptable_company_domain("acme.github.io") is None
     assert acceptable_company_domain("careers.acme.test") == "acme.test"
+
+
+def test_compatible_ninth_candidate_beyond_probe_limit_requires_manual_review(
+    tmp_path: Path,
+) -> None:
+    requested_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_hosts.append(request.url.host)
+        if request.url.host == "acme.test":
+            return httpx.Response(
+                200,
+                text=(
+                    "<title>Acme Careers</title>"
+                    '<a href="https://job-boards.greenhouse.io/acme">Jobs</a>'
+                ),
+            )
+        return httpx.Response(404)
+
+    candidates = " ".join(
+        (
+            "acme.test",
+            "noiseone.test",
+            "noisetwo.test",
+            "noisethree.test",
+            "noisefour.test",
+            "noisefive.test",
+            "noisesix.test",
+            "noiseseven.test",
+            "acmeapp.test",
+        )
+    )
+    resolver = GoogleDomainResolver(
+        tmp_path / "responses.json",
+        project="test-project",
+        client=FakeClient(raw_response(candidates, queries=["Acme official"])),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleeper=lambda _: None,
+        delay_seconds=0,
+    )
+
+    result = resolver.resolve(company_name="Acme", board_token="acme")
+    by_domain = {evidence.domain: evidence for evidence in result.candidate_evidence}
+
+    assert result.status == "manual_review"
+    assert result.accepted_domain is None
+    assert result.passing_domain_count == 1
+    assert result.error == "compatible_candidate_not_probed_due_to_limit"
+    assert by_domain["acmeapp.test"].company_domain_compatible is True
+    assert by_domain["acmeapp.test"].pages == ()
+    assert "acmeapp.test" not in requested_hosts
 
 
 def test_page_fetch_rejects_nonstandard_or_invalid_ports_before_network(tmp_path: Path) -> None:
@@ -356,7 +409,7 @@ def test_prompt_requires_company_owned_non_ats_url_with_unknown_fallback(
     request = resolver._request_identity(company_name="Acme", board_token="acme")
 
     assert PROMPT_VERSION == 2
-    assert EVIDENCE_VERSION == 3
+    assert EVIDENCE_VERSION == 4
     assert request["prompt_version"] == PROMPT_VERSION
     assert "company-owned" in request["prompt"]
     assert "never return a greenhouse.io URL" in request["prompt"]

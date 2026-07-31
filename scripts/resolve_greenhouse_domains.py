@@ -20,6 +20,7 @@ from urllib.parse import urlparse, urlunparse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
+from yc_radar.adapters.greenhouse import GreenhouseAdapter
 from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.database import career_sources_table, companies_table, engine_from_url
 from yc_radar.services.google_domain_resolver import (
@@ -29,7 +30,9 @@ from yc_radar.services.google_domain_resolver import (
     PROMPT_VERSION,
     DomainResolutionResult,
     GoogleDomainResolver,
+    acceptable_company_domain,
     citations_json,
+    find_company_domain_matches,
     result_evidence_json,
 )
 from yc_radar.services.greenhouse_scout import (
@@ -85,7 +88,15 @@ OUTPUT_FIELDS = [
     "checked_at",
 ]
 RETRYABLE_RESULT_STATUSES = frozenset({"request_failed", "quota_exhausted"})
+SUCCESSFUL_REGISTRATION_STATUSES = frozenset(
+    {
+        "source_existing",
+        "company_created_source_created",
+        "company_reused_source_created",
+    }
+)
 DEFAULT_COMPANY_TIMEOUT_SECONDS = 120.0
+GREENHOUSE_ADAPTER = GreenhouseAdapter()
 
 
 class CompanyResolutionDeadlineExceeded(BaseException):
@@ -120,9 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--location", default=os.environ.get("GOOGLE_CLOUD_LOCATION", DEFAULT_LOCATION)
     )
-    parser.add_argument(
-        "--model", default=os.environ.get("YC_RADAR_VERTEX_MODEL", DEFAULT_MODEL)
-    )
+    parser.add_argument("--model", default=os.environ.get("YC_RADAR_VERTEX_MODEL", DEFAULT_MODEL))
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--checkpoint-every", type=int, default=10)
@@ -208,6 +217,8 @@ def run(args: argparse.Namespace) -> int:
     if args.limit is not None:
         selected = selected[: args.limit]
     ensure_checkpoint_manifest(args, selected)
+    resume_path = existing_resume_path(args.output) if not args.no_resume else None
+    resume_rows = load_resume_rows(resume_path) if resume_path else {}
     status = stage_started("greenhouse_domain_resolver")
     status.update(
         {
@@ -223,8 +234,6 @@ def run(args: argparse.Namespace) -> int:
     )
     write_status(args.status_file, status)
 
-    resume_path = existing_resume_path(args.output) if not args.no_resume else None
-    resume_rows = load_resume_rows(resume_path) if resume_path else {}
     companies: list[dict[str, Any]] = []
     existing_sources: dict[str, int] = {}
     engine = None
@@ -252,7 +261,10 @@ def run(args: argparse.Namespace) -> int:
                 timed_out = False
                 prior = resume_rows.get(token)
                 if prior is not None and can_resume_row(
-                    prior, candidate=candidate, apply=args.apply
+                    prior,
+                    candidate=candidate,
+                    apply=args.apply,
+                    existing_source_company_id=existing_sources.get(token),
                 ):
                     rows.append(prior)
                     resumed += 1
@@ -277,10 +289,7 @@ def run(args: argparse.Namespace) -> int:
                             model=args.model,
                             location=args.location,
                             cache_source=cache_source,
-                            error=(
-                                "company_timeout:"
-                                f"{args.company_timeout_seconds:g}s"
-                            ),
+                            error=(f"company_timeout:{args.company_timeout_seconds:g}s"),
                             retryable=True,
                         )
                     row = result_row(candidate, result)
@@ -324,9 +333,7 @@ def run(args: argparse.Namespace) -> int:
                 status,
                 state="failed",
                 error=exc,
-                **summary_counts(
-                    durable_rows, selected=len(selected), resumed=resumed
-                ),
+                **summary_counts(durable_rows, selected=len(selected), resumed=resumed),
             ),
         )
         raise
@@ -338,9 +345,7 @@ def run(args: argparse.Namespace) -> int:
             stage_finished(
                 status,
                 state="quota_exhausted",
-                **summary_counts(
-                    durable_rows, selected=len(selected), resumed=resumed
-                ),
+                **summary_counts(durable_rows, selected=len(selected), resumed=resumed),
                 checkpoint=str(args.output.with_suffix(".partial.csv")),
             ),
         )
@@ -356,7 +361,12 @@ def run(args: argparse.Namespace) -> int:
     summary = summary_counts(rows, selected=len(selected), resumed=resumed)
     write_status(
         args.status_file,
-        stage_finished(status, state="completed", **summary, output=str(args.output)),
+        stage_finished(
+            status,
+            state="partial" if summary["failed"] else "completed",
+            **summary,
+            output=str(args.output),
+        ),
     )
     print_progress(len(rows), len(selected), rows)
     print(f"Wrote {len(rows)} domain-resolution rows to {args.output}")
@@ -405,9 +415,19 @@ def load_candidates(path: Path) -> list[dict[str, str]]:
         if row["resolution_status"].lower() != "unresolved_no_domain":
             continue
         token = row["board_token"].lower()
-        if not token or not row["board_name"]:
+        if not row["board_name"]:
             continue
+        try:
+            expected_url = GREENHOUSE_ADAPTER.canonical_source_url(token)
+        except ValueError as exc:
+            raise ValueError(f"invalid eligible Greenhouse board token: {token!r}") from exc
+        source_token = GREENHOUSE_ADAPTER.extract_board_token(row["canonical_source_url"])
+        if source_token != token:
+            raise ValueError(
+                f"eligible scout canonical source URL does not match board token: {token}"
+            )
         row["board_token"] = token
+        row["canonical_source_url"] = expected_url
         prior = by_token.get(token)
         if prior is not None:
             identity_fields = ("canonical_source_url", "board_name")
@@ -419,9 +439,7 @@ def load_candidates(path: Path) -> list[dict[str, str]]:
     return selected
 
 
-def ensure_checkpoint_manifest(
-    args: argparse.Namespace, selected: list[dict[str, str]]
-) -> None:
+def ensure_checkpoint_manifest(args: argparse.Namespace, selected: list[dict[str, str]]) -> None:
     selected_identity = "\n".join(
         f"{row['board_token']}\t{row['board_name']}\t{row['canonical_source_url']}"
         for row in selected
@@ -465,19 +483,27 @@ def load_resume_rows(path: Path) -> dict[str, dict[str, str]]:
         rows = list(reader)
         if set(OUTPUT_FIELDS) - set(reader.fieldnames or ()):
             return {}
-    return {
-        row["board_token"].strip().lower(): row
-        for row in rows
-        if row.get("board_token", "").strip()
-    }
+    by_token: dict[str, dict[str, str]] = {}
+    for row in rows:
+        token = row.get("board_token", "").strip().lower()
+        if not token:
+            continue
+        if token in by_token:
+            raise ValueError(f"duplicate resume row for board token: {token}")
+        by_token[token] = row
+    return by_token
 
 
 def can_resume_row(
-    row: dict[str, str], *, candidate: dict[str, str], apply: bool
+    row: dict[str, str],
+    *,
+    candidate: dict[str, str],
+    apply: bool,
+    existing_source_company_id: int | None = None,
 ) -> bool:
     if any(
         row.get(field, "") != candidate.get(field, "")
-        for field in ("canonical_source_url", "board_name")
+        for field in ("board_token", "canonical_source_url", "board_name")
     ):
         return False
     if str(row.get("retryable") or "").strip().lower() in {"1", "true", "yes"}:
@@ -486,16 +512,19 @@ def can_resume_row(
         return False
     if not apply or row.get("domain_resolution_status") != "accepted":
         return True
-    return row.get("registration_status") not in {
-        "",
-        "not_requested",
-        "registration_failed",
-    }
+    if row.get("registration_status") not in SUCCESSFUL_REGISTRATION_STATUSES:
+        return False
+    try:
+        checkpoint_company_id = int(row.get("company_id") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        existing_source_company_id is not None
+        and checkpoint_company_id == existing_source_company_id
+    )
 
 
-def result_row(
-    candidate: dict[str, str], result: DomainResolutionResult
-) -> dict[str, Any]:
+def result_row(candidate: dict[str, str], result: DomainResolutionResult) -> dict[str, Any]:
     return {
         "board_token": candidate["board_token"],
         "canonical_source_url": candidate["canonical_source_url"],
@@ -561,34 +590,39 @@ def apply_registration(
     existing_sources: dict[str, int],
     engine: Any,
 ) -> None:
-    token = candidate["board_token"]
-    website = result.website_candidate
-    if result.status != "accepted" or not website:
-        return
-    evidence = GreenhouseBoardEvidence(
-        board_token=token,
-        verification_status="verified",
-        http_status=200,
-        company_name=candidate["board_name"],
-        job_count=int(candidate.get("job_count") or 0),
-        external_job_origins=(website,),
-    )
-    resolution = resolve_company(
-        evidence,
-        companies=companies,
-        existing_source_company_id=existing_sources.get(token),
-    )
-    row["registry_resolution_status"] = resolution.status
-    if resolution.status == "already_registered":
-        row["company_id"] = resolution.company_id or ""
-        row["registration_status"] = "source_existing"
-        return
-    if resolution.status not in {"existing_exact_name", "new_company_domain_candidate"}:
-        row["registration_status"] = "identity_conflict"
-        row["error"] = resolution.reason or resolution.status
+    if result.status != "accepted":
         return
 
     try:
+        token, website = validate_apply_invariants(
+            row=row,
+            result=result,
+            candidate=candidate,
+        )
+        job_count = parse_non_negative_job_count(candidate.get("job_count"))
+        evidence = GreenhouseBoardEvidence(
+            board_token=token,
+            verification_status="verified",
+            http_status=200,
+            company_name=candidate["board_name"],
+            job_count=job_count,
+            external_job_origins=(website,),
+        )
+        resolution = resolve_company(
+            evidence,
+            companies=companies,
+            existing_source_company_id=existing_sources.get(token),
+        )
+        row["registry_resolution_status"] = resolution.status
+        if resolution.status == "already_registered":
+            row["company_id"] = resolution.company_id or ""
+            row["registration_status"] = "source_existing"
+            return
+        if resolution.status not in {"existing_exact_name", "new_company_domain_candidate"}:
+            row["registration_status"] = "identity_conflict"
+            row["error"] = resolution.reason or resolution.status
+            return
+
         if resolution.status == "new_company_domain_candidate":
             company = CompanyRegistry(engine).register_company(
                 name=candidate["board_name"], website=website
@@ -631,9 +665,89 @@ def apply_registration(
                     "primary_domain": (urlparse(website).hostname or "").removeprefix("www."),
                 }
             )
-    except (ValueError, SQLAlchemyError) as exc:
+    except (TypeError, ValueError, SQLAlchemyError) as exc:
         row["registration_status"] = "registration_failed"
         row["error"] = f"{type(exc).__name__}:{exc}"[:500]
+
+
+def validate_apply_invariants(
+    *,
+    row: dict[str, Any],
+    result: DomainResolutionResult,
+    candidate: dict[str, str],
+) -> tuple[str, str]:
+    """Recheck identity and deterministic proof immediately before DB mutation."""
+
+    token = candidate.get("board_token", "")
+    if token != token.strip().lower():
+        raise ValueError("apply candidate board token is not canonical")
+    try:
+        canonical_url = GREENHOUSE_ADAPTER.canonical_source_url(token)
+    except ValueError as exc:
+        raise ValueError("apply candidate has an invalid Greenhouse board token") from exc
+    if candidate.get("canonical_source_url") != canonical_url:
+        raise ValueError("apply candidate canonical source URL does not match board token")
+    if row.get("board_token") != token or row.get("canonical_source_url") != canonical_url:
+        raise ValueError("accepted row identity does not match apply candidate")
+
+    accepted_domain = result.accepted_domain
+    if not accepted_domain or acceptable_company_domain(accepted_domain) != accepted_domain:
+        raise ValueError("accepted result has an invalid canonical company domain")
+    website = f"https://{accepted_domain}"
+    if result.website_candidate != website:
+        raise ValueError("accepted result website does not match accepted domain")
+    if result.retryable or result.quota_exhausted:
+        raise ValueError("accepted result cannot be retryable or quota exhausted")
+
+    passing = [evidence for evidence in result.candidate_evidence if evidence.passed]
+    if len(passing) != 1 or passing[0].domain != accepted_domain:
+        raise ValueError("accepted result must have exactly one matching passing domain")
+    accepted = passing[0]
+    brand_proven = any(page.brand_matches for page in accepted.pages)
+    reciprocal_link_proven = any(
+        GREENHOUSE_ADAPTER.extract_board_token(link) == token
+        for page in accepted.pages
+        for link in page.greenhouse_links
+    )
+    expected_domain_matches = find_company_domain_matches(accepted_domain, candidate["board_name"])
+    if not (
+        accepted.brand_valid
+        and brand_proven
+        and accepted.reciprocal_link_valid
+        and reciprocal_link_proven
+        and accepted.company_domain_compatible
+        and expected_domain_matches
+        and accepted.company_domain_matches == expected_domain_matches
+    ):
+        raise ValueError("accepted result is missing deterministic identity proof")
+    if any(
+        evidence.retryable and evidence.company_domain_compatible and not evidence.passed
+        for evidence in result.candidate_evidence
+    ):
+        raise ValueError("accepted result contains incomplete retryable identity evidence")
+
+    expected_row_fields: dict[str, Any] = {
+        "domain_resolution_status": "accepted",
+        "accepted_domain": accepted_domain,
+        "website_candidate": website,
+        "candidate_domain_count": len(result.candidate_evidence),
+        "passing_domain_count": 1,
+        "candidate_evidence": result_evidence_json(result),
+    }
+    if any(row.get(field) != value for field, value in expected_row_fields.items()):
+        raise ValueError("accepted row does not preserve the validated result proof")
+    return token, website
+
+
+def parse_non_negative_job_count(value: Any) -> int:
+    raw = str(value or "0").strip()
+    try:
+        job_count = int(raw or "0")
+    except ValueError as exc:
+        raise ValueError("job_count must be a non-negative integer") from exc
+    if job_count < 0:
+        raise ValueError("job_count must be a non-negative integer")
+    return job_count
 
 
 def accepted_proof(result: DomainResolutionResult) -> list[dict[str, Any]]:
@@ -720,9 +834,7 @@ def merge_checkpoint_rows(
 ) -> list[dict[str, Any]]:
     """Overlay visited rows without dropping the unvisited tail of a prior checkpoint."""
 
-    merged: dict[str, dict[str, Any]] = {
-        token: dict(row) for token, row in preserved_rows.items()
-    }
+    merged: dict[str, dict[str, Any]] = {token: dict(row) for token, row in preserved_rows.items()}
     for row in rows:
         token = str(row.get("board_token") or "").strip().lower()
         if token:
@@ -734,9 +846,7 @@ def merge_checkpoint_rows(
     ]
 
 
-def summary_counts(
-    rows: list[dict[str, Any]], *, selected: int, resumed: int
-) -> dict[str, Any]:
+def summary_counts(rows: list[dict[str, Any]], *, selected: int, resumed: int) -> dict[str, Any]:
     outcomes = Counter(str(row.get("domain_resolution_status") or "") for row in rows)
 
     def summed(field: str) -> int:
@@ -748,12 +858,20 @@ def summary_counts(
                 continue
         return total
 
-    failed = outcomes["request_failed"] + outcomes["quota_exhausted"]
+    registration_outcomes = Counter(str(row.get("registration_status") or "") for row in rows)
+    registration_failed = registration_outcomes["registration_failed"]
+    failed = outcomes["request_failed"] + outcomes["quota_exhausted"] + registration_failed
+    retryable = sum(
+        str(row.get("retryable") or "").strip().lower() in {"1", "true", "yes"} for row in rows
+    )
     return {
         "selected": selected,
         "processed": len(rows),
         "succeeded": len(rows) - failed,
         "failed": failed,
+        "retryable": retryable,
+        "registration_failed": registration_failed,
+        "registration_conflicts": registration_outcomes["identity_conflict"],
         "resumed": resumed,
         "accepted": outcomes["accepted"],
         "ambiguous": outcomes["ambiguous"],

@@ -33,6 +33,7 @@ COMMON_JOB_HOST_PREFIXES = frozenset({"apply", "career", "careers", "job", "jobs
 BLOCKED_COMPANY_HOST_SUFFIXES = frozenset(
     {
         "facebook.com",
+        "github.com",
         "github.io",
         "glassdoor.com",
         "google.com",

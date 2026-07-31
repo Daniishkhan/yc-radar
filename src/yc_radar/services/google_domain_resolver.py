@@ -25,14 +25,18 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from yc_radar.adapters.greenhouse import GreenhouseAdapter
-from yc_radar.services.greenhouse_scout import domains_compatible, identity_domain_for_url
+from yc_radar.services.greenhouse_scout import (
+    BLOCKED_COMPANY_HOST_SUFFIXES,
+    domains_compatible,
+    identity_domain_for_url,
+)
 from yc_radar.services.run_status import read_status, write_status
 from yc_radar.services.source_providers import is_ats_domain
 
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_LOCATION = "global"
 PROMPT_VERSION = 2
-EVIDENCE_VERSION = 3
+EVIDENCE_VERSION = 4
 CACHE_SCHEMA_VERSION = 1
 MAX_PAGE_BYTES = 2_000_000
 MAX_CANDIDATE_DOMAINS = 8
@@ -333,17 +337,29 @@ class GoogleDomainResolver:
             and not candidate.passed
             for candidate in evidence
         )
+        probe_limited_compatible = any(
+            candidate.company_domain_compatible and not candidate.pages
+            for candidate in evidence
+        )
         brand_only = [
             candidate
             for candidate in evidence
             if candidate.brand_valid and not candidate.reciprocal_link_valid
         ]
-        if len(passing) == 1 and not retryable_incomplete:
+        if (
+            len(passing) == 1
+            and not retryable_incomplete
+            and not probe_limited_compatible
+        ):
             status = "accepted"
             accepted_domain = passing[0].domain
             website = f"https://{accepted_domain}"
         elif len(passing) > 1:
             status = "ambiguous"
+            accepted_domain = None
+            website = None
+        elif len(passing) == 1 and probe_limited_compatible:
+            status = "manual_review"
             accepted_domain = None
             website = None
         elif brand_only:
@@ -372,7 +388,11 @@ class GoogleDomainResolver:
             cached_content_token_count=grounded.cached_content_token_count,
             cache_source=cache_source,
             request_attempt_count=attempts,
-            error="retryable_page_fetch" if retryable_incomplete else None,
+            error=(
+                "compatible_candidate_not_probed_due_to_limit"
+                if len(passing) == 1 and probe_limited_compatible
+                else "retryable_page_fetch" if retryable_incomplete else None
+            ),
             retryable=retryable_incomplete,
         )
 
@@ -1013,6 +1033,7 @@ def acceptable_company_domain(value: str | None) -> str | None:
         or is_grounding_redirect_domain(raw)
         or _has_suffix(raw, PRIVATE_HOST_SUFFIXES)
         or _has_suffix(raw, THIRD_PARTY_DOMAIN_SUFFIXES)
+        or _has_suffix(raw, BLOCKED_COMPANY_HOST_SUFFIXES)
     ):
         return None
     return identity_domain_for_url(raw)

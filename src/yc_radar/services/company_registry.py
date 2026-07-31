@@ -15,6 +15,7 @@ from yc_radar.services.database import (
     create_schema,
     normalize_company_name,
     primary_domain_for_website,
+    sanitized_yc_company_website,
 )
 
 
@@ -47,7 +48,12 @@ class CompanyRegistry:
         company_name = name.strip()
         if not company_name:
             raise ValueError("company name is required")
-        domain = verified_primary_domain(website)
+        sanitized_website = sanitized_yc_company_website(
+            {"name": company_name, "website": website}
+        )
+        if sanitized_website is None:
+            raise ValueError("website is not safe company-owned identity evidence")
+        domain = verified_primary_domain(sanitized_website)
         normalized_name = normalize_company_name(company_name)
         observed_at = now or datetime.now(UTC)
         with self.engine.begin() as connection:
@@ -83,7 +89,7 @@ class CompanyRegistry:
                 connection.execute(
                     update(companies_table)
                     .where(companies_table.c.id == existing["id"])
-                    .values(website=website, updated_at=observed_at)
+                    .values(website=sanitized_website, updated_at=observed_at)
                 )
                 return CompanyRegistrationResult(
                     company_id=int(existing["id"]),
@@ -104,7 +110,7 @@ class CompanyRegistry:
                         name=company_name,
                         normalized_name=normalized_name,
                         slug=slug,
-                        website=website,
+                        website=sanitized_website,
                         primary_domain=domain,
                         created_at=observed_at,
                         updated_at=observed_at,

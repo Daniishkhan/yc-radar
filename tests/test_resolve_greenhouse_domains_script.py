@@ -70,6 +70,42 @@ def args_for(tmp_path: Path, input_path: Path, **overrides) -> argparse.Namespac
     return argparse.Namespace(**values)
 
 
+def accepted_result(*, greenhouse_token: str = "acme") -> DomainResolutionResult:
+    brand_page = PageEvidence(
+        requested_url="https://acme.test",
+        final_url="https://acme.test",
+        http_status=200,
+        domain="acme.test",
+        brand_matches=("title:Acme Careers",),
+    )
+    careers_page = PageEvidence(
+        requested_url="https://acme.test/careers",
+        final_url="https://acme.test/careers",
+        http_status=200,
+        domain="acme.test",
+        greenhouse_links=(f"https://job-boards.greenhouse.io/{greenhouse_token}",),
+    )
+    return DomainResolutionResult(
+        status="accepted",
+        model="gemini-3.5-flash-lite",
+        location="global",
+        accepted_domain="acme.test",
+        website_candidate="https://acme.test",
+        candidate_evidence=(
+            DomainEvidence(
+                domain="acme.test",
+                candidate_sources=("generated_text",),
+                pages=(brand_page, careers_page),
+                brand_valid=True,
+                reciprocal_link_valid=True,
+                company_domain_compatible=True,
+                company_domain_matches=("domain_label:name_prefix:acme",),
+                passed=True,
+            ),
+        ),
+    )
+
+
 def test_load_candidates_scopes_only_verified_domainless_rows(tmp_path: Path) -> None:
     path = tmp_path / "scout.csv"
     write_scout_csv(
@@ -85,6 +121,59 @@ def test_load_candidates_scopes_only_verified_domainless_rows(tmp_path: Path) ->
 
     assert [row["board_token"] for row in rows] == ["keep"]
     assert rows[0]["job_count"] == "7"
+
+
+def test_load_candidates_canonicalizes_matching_greenhouse_url(tmp_path: Path) -> None:
+    path = tmp_path / "scout.csv"
+    write_scout_csv(
+        path,
+        [
+            scout_row(
+                "AcMe",
+                canonical_source_url=("http://boards.greenhouse.io/ACME/jobs/123?gh_src=tracking"),
+            )
+        ],
+    )
+
+    rows = resolver_script.load_candidates(path)
+
+    assert rows[0]["board_token"] == "acme"
+    assert rows[0]["canonical_source_url"] == "https://job-boards.greenhouse.io/acme"
+
+
+@pytest.mark.parametrize(
+    ("token", "source_url"),
+    [
+        ("acme", "https://job-boards.greenhouse.io/other"),
+        ("acme", "https://example.com/acme"),
+        ("bad/token", "https://job-boards.greenhouse.io/bad%2Ftoken"),
+    ],
+)
+def test_load_candidates_rejects_invalid_or_mismatched_greenhouse_identity(
+    tmp_path: Path, token: str, source_url: str
+) -> None:
+    path = tmp_path / "scout.csv"
+    write_scout_csv(
+        path,
+        [scout_row(token, canonical_source_url=source_url)],
+    )
+
+    with pytest.raises(ValueError, match="eligible Greenhouse|does not match board token"):
+        resolver_script.load_candidates(path)
+
+
+def test_load_resume_rows_rejects_duplicate_normalized_tokens(tmp_path: Path) -> None:
+    path = tmp_path / "result.partial.csv"
+    resolver_script.write_csv_atomic(
+        path,
+        [
+            {"board_token": "acme"},
+            {"board_token": " ACME "},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="duplicate resume row for board token: acme"):
+        resolver_script.load_resume_rows(path)
 
 
 def test_manifest_fails_closed_when_limit_changes(tmp_path: Path) -> None:
@@ -112,6 +201,38 @@ def test_resume_retries_request_failures_and_apply_pending_acceptance() -> None:
 
     assert resolver_script.can_resume_row(row, candidate=candidate, apply=False) is True
     assert resolver_script.can_resume_row(row, candidate=candidate, apply=True) is False
+    registered = {
+        **row,
+        "registration_status": "source_existing",
+        "company_id": "42",
+    }
+    assert (
+        resolver_script.can_resume_row(
+            registered,
+            candidate=candidate,
+            apply=True,
+            existing_source_company_id=42,
+        )
+        is True
+    )
+    assert (
+        resolver_script.can_resume_row(
+            registered,
+            candidate=candidate,
+            apply=True,
+            existing_source_company_id=41,
+        )
+        is False
+    )
+    assert (
+        resolver_script.can_resume_row(
+            {**registered, "board_token": " ACME "},
+            candidate=candidate,
+            apply=True,
+            existing_source_company_id=42,
+        )
+        is False
+    )
     assert (
         resolver_script.can_resume_row(
             {
@@ -159,9 +280,7 @@ def test_checkpoint_merge_preserves_unvisited_prior_rows() -> None:
     assert merged[1:] == [prior["two"], prior["three"], visited[1]]
 
 
-def test_interrupted_resume_does_not_truncate_prior_checkpoint(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_interrupted_resume_does_not_truncate_prior_checkpoint(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "scout.csv"
     candidates = [
         scout_row("one", board_name="One"),
@@ -265,14 +384,13 @@ def test_quota_checkpoint_is_durable_and_returns_success_to_avoid_restart_loop(
     assert status["state"] == "quota_exhausted"
     assert status["processed"] == 1
     assert status["failed"] == 1
+    assert status["retryable"] == 1
     assert status["request_attempt_count"] == 3
     assert status["prompt_version"] == resolver_script.PROMPT_VERSION
     assert status["evidence_version"] == resolver_script.EVIDENCE_VERSION
 
 
-def test_company_timeout_is_retryable_and_run_continues(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_company_timeout_is_retryable_and_run_continues(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "scout.csv"
     write_scout_csv(
         path,
@@ -334,9 +452,10 @@ def test_company_timeout_is_retryable_and_run_continues(
     assert rows[1]["domain_resolution_status"] == "unresolved"
     assert checkpoint_lengths == [1]
     status = json.loads(args.status_file.read_text(encoding="utf-8"))
-    assert status["state"] == "completed"
+    assert status["state"] == "partial"
     assert status["processed"] == 2
     assert status["failed"] == 1
+    assert status["retryable"] == 1
     assert status["company_timeout_seconds"] == 0.01
 
     retry_calls: list[str] = []
@@ -358,7 +477,30 @@ def test_company_timeout_is_retryable_and_run_continues(
     retry_status = json.loads(args.status_file.read_text(encoding="utf-8"))
     assert retry_status["processed"] == 2
     assert retry_status["failed"] == 0
+    assert retry_status["retryable"] == 0
     assert retry_status["resumed"] == 1
+
+
+def test_invalid_resume_rows_fail_before_status_is_marked_running(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "scout.csv"
+    candidate = scout_row()
+    write_scout_csv(path, [candidate])
+    args = args_for(tmp_path, path)
+    resolver_script.ensure_checkpoint_manifest(args, [candidate])
+    resolver_script.write_csv_atomic(
+        args.output.with_suffix(".partial.csv"),
+        [
+            {"board_token": "acme"},
+            {"board_token": " ACME "},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="duplicate resume row"):
+        resolver_script.run(args)
+
+    assert not args.status_file.exists()
 
 
 def test_validate_args_rejects_non_positive_company_timeout(tmp_path: Path) -> None:
@@ -422,8 +564,104 @@ def test_result_row_and_registration_proof_retain_auditable_fields() -> None:
         {
             "page_url": "https://acme.test/careers",
             "brand_match_kinds": [],
-            "greenhouse_links": [
-                "https://boards.greenhouse.io/embed/job_board?for=acme"
-            ],
+            "greenhouse_links": ["https://boards.greenhouse.io/embed/job_board?for=acme"],
         },
     ]
+
+
+def test_apply_registration_rechecks_identity_and_accepted_proof() -> None:
+    candidate = scout_row()
+    result = accepted_result()
+    row = resolver_script.result_row(candidate, result)
+
+    resolver_script.apply_registration(
+        row,
+        result=result,
+        candidate=candidate,
+        companies=[],
+        existing_sources={"acme": 42},
+        engine=object(),
+    )
+
+    assert row["company_id"] == 42
+    assert row["registration_status"] == "source_existing"
+
+    tampered_row = resolver_script.result_row(candidate, result)
+    tampered_row["canonical_source_url"] = "https://job-boards.greenhouse.io/other"
+    resolver_script.apply_registration(
+        tampered_row,
+        result=result,
+        candidate=candidate,
+        companies=[],
+        existing_sources={},
+        engine=object(),
+    )
+    assert tampered_row["registration_status"] == "registration_failed"
+    assert "accepted row identity" in tampered_row["error"]
+
+    wrong_proof = accepted_result(greenhouse_token="other")
+    wrong_proof_row = resolver_script.result_row(candidate, wrong_proof)
+    resolver_script.apply_registration(
+        wrong_proof_row,
+        result=wrong_proof,
+        candidate=candidate,
+        companies=[],
+        existing_sources={},
+        engine=object(),
+    )
+    assert wrong_proof_row["registration_status"] == "registration_failed"
+    assert "deterministic identity proof" in wrong_proof_row["error"]
+
+    stripped_proof_row = resolver_script.result_row(candidate, result)
+    stripped_proof_row["candidate_evidence"] = "[]"
+    resolver_script.apply_registration(
+        stripped_proof_row,
+        result=result,
+        candidate=candidate,
+        companies=[],
+        existing_sources={},
+        engine=object(),
+    )
+    assert stripped_proof_row["registration_status"] == "registration_failed"
+    assert "does not preserve the validated result proof" in stripped_proof_row["error"]
+
+
+@pytest.mark.parametrize("job_count", ["-1", "not-a-number"])
+def test_apply_registration_contains_invalid_job_count(job_count: str) -> None:
+    candidate = scout_row(job_count=job_count)
+    result = accepted_result()
+    row = resolver_script.result_row(candidate, result)
+
+    resolver_script.apply_registration(
+        row,
+        result=result,
+        candidate=candidate,
+        companies=[],
+        existing_sources={},
+        engine=object(),
+    )
+
+    assert row["registration_status"] == "registration_failed"
+    assert "job_count must be a non-negative integer" in row["error"]
+
+
+def test_summary_counts_registration_failures() -> None:
+    summary = resolver_script.summary_counts(
+        [
+            {
+                "domain_resolution_status": "accepted",
+                "registration_status": "registration_failed",
+            },
+            {
+                "domain_resolution_status": "accepted",
+                "registration_status": "identity_conflict",
+            },
+        ],
+        selected=2,
+        resumed=0,
+    )
+
+    assert summary["failed"] == 1
+    assert summary["succeeded"] == 1
+    assert summary["registration_failed"] == 1
+    assert summary["registration_conflicts"] == 1

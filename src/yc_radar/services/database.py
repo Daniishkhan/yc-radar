@@ -49,6 +49,37 @@ _DOMAIN_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
     re.IGNORECASE,
 )
+_ABSOLUTE_HTTP_URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
+_SHARED_WEBSITE_HOSTS = frozenset(
+    {
+        "angel.co",
+        "apps.apple.com",
+        "crunchbase.com",
+        "facebook.com",
+        "github.com",
+        "googleblog.blogspot.com",
+        "itunes.apple.com",
+        "linkedin.com",
+        "lnkd.in",
+        "m.me",
+        "pitchbook.com",
+        "play.google.com",
+        "producthunt.com",
+        "substack.com",
+        "ycombinator.com",
+    }
+)
+_SHARED_ROOT_WEBSITE_BRANDS = {
+    "angel.co": "angellist",
+    "crunchbase.com": "crunchbase",
+    "facebook.com": "facebook",
+    "github.com": "github",
+    "linkedin.com": "linkedin",
+    "pitchbook.com": "pitchbook",
+    "producthunt.com": "product hunt",
+    "substack.com": "substack",
+    "ycombinator.com": "y combinator",
+}
 
 companies_table = Table(
     "companies",
@@ -437,7 +468,9 @@ source_sync_runs_table = Table(
     "source_sync_runs",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True),
+    Column(
+        "career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True
+    ),
     Column("run_key", String, nullable=False),
     Column("provider", String, nullable=False),
     Column("adapter_version", String, nullable=False),
@@ -456,7 +489,9 @@ source_sync_runs_table = Table(
     Column("request_metadata", JSONB, nullable=False, default=dict),
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
-    CheckConstraint("status IN ('running', 'completed', 'partial', 'failed')", name="ck_source_sync_runs_status"),
+    CheckConstraint(
+        "status IN ('running', 'completed', 'partial', 'failed')", name="ck_source_sync_runs_status"
+    ),
     CheckConstraint("jobs_fetched >= 0", name="ck_source_sync_runs_jobs_fetched"),
     UniqueConstraint("career_source_id", "run_key", name="uq_source_sync_run_key"),
 )
@@ -465,7 +500,9 @@ job_postings_table = Table(
     "job_postings",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True),
+    Column(
+        "career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True
+    ),
     Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
     Column("provider", String, nullable=False),
     Column("external_job_id", String, nullable=False),
@@ -478,7 +515,13 @@ job_postings_table = Table(
     Column("status", String, nullable=False, default="active"),
     Column("consecutive_complete_misses", Integer, nullable=False, default=0),
     Column("content_hash", String, nullable=False, index=True),
-    Column("current_version_id", BigInteger, ForeignKey("job_posting_versions.id", use_alter=True, name="fk_job_postings_current_version")),
+    Column(
+        "current_version_id",
+        BigInteger,
+        ForeignKey(
+            "job_posting_versions.id", use_alter=True, name="fk_job_postings_current_version"
+        ),
+    ),
     Column("source_published_at", DateTime(timezone=True)),
     Column("source_updated_at", DateTime(timezone=True)),
     Column("first_seen_at", DateTime(timezone=True), nullable=False),
@@ -489,7 +532,9 @@ job_postings_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint("status IN ('active', 'closed')", name="ck_job_postings_status"),
     CheckConstraint("consecutive_complete_misses >= 0", name="ck_job_postings_misses"),
-    UniqueConstraint("provider", "career_source_id", "external_job_id", name="uq_job_posting_identity"),
+    UniqueConstraint(
+        "provider", "career_source_id", "external_job_id", name="uq_job_posting_identity"
+    ),
 )
 
 job_posting_versions_table = Table(
@@ -497,7 +542,13 @@ job_posting_versions_table = Table(
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("job_posting_id", BigInteger, ForeignKey("job_postings.id"), nullable=False, index=True),
-    Column("source_sync_run_id", BigInteger, ForeignKey("source_sync_runs.id"), nullable=False, index=True),
+    Column(
+        "source_sync_run_id",
+        BigInteger,
+        ForeignKey("source_sync_runs.id"),
+        nullable=False,
+        index=True,
+    ),
     Column("content_hash", String, nullable=False, index=True),
     Column("title", Text, nullable=False),
     Column("description_html", Text),
@@ -520,7 +571,13 @@ job_posting_observations_table = Table(
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("job_posting_id", BigInteger, ForeignKey("job_postings.id"), nullable=False, index=True),
-    Column("source_sync_run_id", BigInteger, ForeignKey("source_sync_runs.id"), nullable=False, index=True),
+    Column(
+        "source_sync_run_id",
+        BigInteger,
+        ForeignKey("source_sync_runs.id"),
+        nullable=False,
+        index=True,
+    ),
     Column("observation_kind", String, nullable=False),
     Column("status_before", String, nullable=False),
     Column("status_after", String, nullable=False),
@@ -529,7 +586,9 @@ job_posting_observations_table = Table(
     Column("observed_at", DateTime(timezone=True), nullable=False),
     Column("evidence", JSONB, nullable=False, default=dict),
     CheckConstraint("observation_kind IN ('seen', 'missed')", name="ck_job_observation_kind"),
-    CheckConstraint("status_before IN ('active', 'closed')", name="ck_job_observation_status_before"),
+    CheckConstraint(
+        "status_before IN ('active', 'closed')", name="ck_job_observation_status_before"
+    ),
     CheckConstraint("status_after IN ('active', 'closed')", name="ck_job_observation_status_after"),
     UniqueConstraint("source_sync_run_id", "job_posting_id", name="uq_job_observation_run_job"),
 )
@@ -537,13 +596,17 @@ job_posting_observations_table = Table(
 Index("ix_companies_slug", companies_table.c.slug, unique=True)
 Index("ix_companies_normalized_name", companies_table.c.normalized_name)
 Index("ix_companies_primary_domain", companies_table.c.primary_domain)
-Index("ix_yc_company_profiles_yc_company_id", yc_company_profiles_table.c.yc_company_id, unique=True)
+Index(
+    "ix_yc_company_profiles_yc_company_id", yc_company_profiles_table.c.yc_company_id, unique=True
+)
 Index(
     "ix_career_page_discovery_statuses_company_slug",
     career_page_discovery_statuses_table.c.company_slug,
     unique=True,
 )
-Index("ix_job_postings_company_active", job_postings_table.c.company_id, job_postings_table.c.status)
+Index(
+    "ix_job_postings_company_active", job_postings_table.c.company_id, job_postings_table.c.status
+)
 
 Index(
     "ix_source_documents_search_vector",
@@ -634,18 +697,97 @@ def upsert_yc_companies(engine: Engine, companies: list[dict[str, Any]]) -> None
         return
     now = datetime.now(UTC)
     with engine.begin() as connection:
-        for company in companies:
-            yc_company_id = _yc_company_id(company)
-            existing_source = connection.execute(
-                select(company_sources_table).where(
-                    company_sources_table.c.provider == "yc",
-                    company_sources_table.c.external_company_id == str(yc_company_id),
+        incoming_yc_ids = {str(_yc_company_id(company)) for company in companies}
+        persisted_company_rows = [
+            dict(row)
+            for row in connection.execute(
+                select(
+                    companies_table.c.id,
+                    companies_table.c.name,
+                    companies_table.c.website,
+                    companies_table.c.primary_domain,
                 )
-            ).mappings().first()
+            ).mappings()
+        ]
+        yc_source_ids_by_company: dict[int, set[str]] = {}
+        yc_source_owner_by_id: dict[str, int] = {}
+        for row in connection.execute(
+            select(
+                company_sources_table.c.company_id,
+                company_sources_table.c.external_company_id,
+            ).where(company_sources_table.c.provider == "yc")
+        ):
+            company_id = int(row.company_id)
+            external_id = str(row.external_company_id)
+            yc_source_ids_by_company.setdefault(company_id, set()).add(external_id)
+            yc_source_owner_by_id[external_id] = company_id
+
+        persisted_by_domain: dict[str, list[dict[str, Any]]] = {}
+        for row in persisted_company_rows:
+            domain = str(row.get("primary_domain") or "")
+            if domain:
+                persisted_by_domain.setdefault(domain, []).append(row)
+
+        neutral_companies = sanitized_yc_company_payloads(companies)
+        for company, neutral_company in zip(companies, neutral_companies, strict=True):
+            domain = primary_domain_for_website(neutral_company.get("website"))
+            if not domain:
+                continue
+            current_company_id = yc_source_owner_by_id.get(str(_yc_company_id(company)))
+            standalone_owners = [
+                row
+                for row in persisted_by_domain.get(domain, [])
+                if int(row["id"]) != current_company_id
+                and not yc_source_ids_by_company.get(int(row["id"]))
+            ]
+            exact_standalone_match = len(standalone_owners) == 1 and normalize_company_name(
+                str(standalone_owners[0]["name"])
+            ) == normalize_company_name(str(neutral_company.get("name") or ""))
+            if standalone_owners and not exact_standalone_match:
+                neutral_company["website"] = None
+                neutral_company["_website_domain_conflict"] = True
+
+        persisted_claims = [
+            {
+                "id": f"persisted:{row['id']}",
+                "name": row["name"],
+                "website": row["website"],
+                "_local_company_id": int(row["id"]),
+            }
+            for row in persisted_company_rows
+            if (source_ids := yc_source_ids_by_company.get(int(row["id"])))
+            and source_ids.isdisjoint(incoming_yc_ids)
+        ]
+        sanitized_claims = sanitized_yc_company_payloads(neutral_companies + persisted_claims)
+        neutral_companies = sanitized_claims[: len(neutral_companies)]
+        for persisted, sanitized in zip(
+            persisted_claims,
+            sanitized_claims[len(companies) :],
+            strict=True,
+        ):
+            if sanitized.get("_website_domain_conflict"):
+                connection.execute(
+                    companies_table.update()
+                    .where(companies_table.c.id == persisted["_local_company_id"])
+                    .values(website=None, primary_domain=None, updated_at=now)
+                )
+
+        for company, neutral_company in zip(companies, neutral_companies, strict=True):
+            yc_company_id = _yc_company_id(company)
+            existing_source = (
+                connection.execute(
+                    select(company_sources_table).where(
+                        company_sources_table.c.provider == "yc",
+                        company_sources_table.c.external_company_id == str(yc_company_id),
+                    )
+                )
+                .mappings()
+                .first()
+            )
             local_company_id = (
                 int(existing_source["company_id"])
                 if existing_source is not None
-                else _matching_neutral_company_id(connection, company)
+                else _matching_neutral_company_id(connection, neutral_company)
             )
             desired_slug = (
                 str(
@@ -663,19 +805,35 @@ def upsert_yc_companies(engine: Engine, companies: list[dict[str, Any]]) -> None
                 )
             )
             if local_company_id is None:
-                neutral_values = _company_row(company, slug=desired_slug, now=now)
+                neutral_values = _company_row(neutral_company, slug=desired_slug, now=now)
                 local_company_id = int(
                     connection.execute(
-                        companies_table.insert().values(neutral_values).returning(companies_table.c.id)
+                        companies_table.insert()
+                        .values(neutral_values)
+                        .returning(companies_table.c.id)
                     ).scalar_one()
                 )
             else:
+                existing_company = (
+                    connection.execute(
+                        select(companies_table).where(companies_table.c.id == local_company_id)
+                    )
+                    .mappings()
+                    .one()
+                )
                 neutral_values = _company_row(
-                    company,
+                    neutral_company,
                     local_company_id=local_company_id,
                     slug=desired_slug,
                     now=now,
                 )
+                if (
+                    neutral_values["website"] is None
+                    and not neutral_company.get("_website_domain_conflict")
+                    and sanitized_yc_company_website(existing_company) is not None
+                ):
+                    neutral_values["website"] = existing_company["website"]
+                    neutral_values["primary_domain"] = existing_company["primary_domain"]
                 statement = pg_insert(companies_table).values(neutral_values)
                 connection.execute(
                     statement.on_conflict_do_update(
@@ -759,7 +917,9 @@ def upsert_page_classifications(engine: Engine, classifications: list[dict[str, 
         upsert_page_classifications_connection(connection, classifications)
 
 
-def upsert_page_classifications_connection(connection: Any, classifications: list[dict[str, Any]]) -> None:
+def upsert_page_classifications_connection(
+    connection: Any, classifications: list[dict[str, Any]]
+) -> None:
     """Upsert classifications into an existing transaction."""
     if not classifications:
         return
@@ -921,7 +1081,11 @@ def _company_profile_statement(*, require_yc_profile: bool = False):
     )
     statement = select(companies_table, *profile_columns)
     join = companies_table.c.id == yc_company_profiles_table.c.company_id
-    return statement.join(yc_company_profiles_table, join) if require_yc_profile else statement.outerjoin(yc_company_profiles_table, join)
+    return (
+        statement.join(yc_company_profiles_table, join)
+        if require_yc_profile
+        else statement.outerjoin(yc_company_profiles_table, join)
+    )
 
 
 def fetch_company_rows(engine: Engine) -> list[dict[str, Any]]:
@@ -1102,7 +1266,9 @@ def fetch_source_document_rows_connection(
         statement = statement.where(source_documents_table.c.source_type == source_type)
     if source_keys:
         statement = statement.where(source_documents_table.c.source_key.in_(source_keys))
-    statement = statement.order_by(source_documents_table.c.company_slug, source_documents_table.c.id)
+    statement = statement.order_by(
+        source_documents_table.c.company_slug, source_documents_table.c.id
+    )
     rows = connection.execute(statement).mappings().all()
     return [dict(row) for row in rows]
 
@@ -1214,6 +1380,127 @@ def primary_domain_for_website(website: str | None) -> str | None:
     return domain if _DOMAIN_PATTERN.fullmatch(domain) else None
 
 
+def sanitized_yc_company_website(company: dict[str, Any]) -> str | None:
+    """Return a website suitable for the source-neutral company row.
+
+    YC's raw profile payload sometimes puts a directory listing, social profile, app-store page,
+    or even multiple URLs in ``website``. Keep that evidence in the YC profile JSON, but do not
+    promote it to the neutral employer identity.
+    """
+    raw_website = company.get("website")
+    if not isinstance(raw_website, str):
+        return None
+    website = raw_website.strip()
+    if not website or any(character.isspace() for character in website):
+        return None
+    if _DOMAIN_PATTERN.fullmatch(website):
+        website = f"https://{website}"
+    elif len(_ABSOLUTE_HTTP_URL_PATTERN.findall(website)) != 1:
+        return None
+
+    try:
+        parsed = urlparse(website)
+        port = parsed.port
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not host
+        or host.endswith(".")
+        or parsed.netloc.endswith(":")
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is not None and not 1 <= port <= 65535)
+        or not _DOMAIN_PATTERN.fullmatch(host.removeprefix("www."))
+    ):
+        return None
+
+    shared_host = next(
+        (
+            candidate
+            for candidate in _SHARED_WEBSITE_HOSTS
+            if host.removeprefix("www.") == candidate
+            or host.removeprefix("www.").endswith(f".{candidate}")
+        ),
+        None,
+    )
+    if shared_host is None:
+        return website
+
+    normalized_name = normalize_company_name(str(company.get("name") or "").strip())
+    is_allowed_brand_root = (
+        host.removeprefix("www.") == shared_host
+        and _SHARED_ROOT_WEBSITE_BRANDS.get(shared_host) == normalized_name
+        and parsed.path in {"", "/"}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    )
+    return website if is_allowed_brand_root else None
+
+
+def sanitized_yc_company_payloads(
+    companies: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Copy YC payloads with neutral websites deconflicted across the batch.
+
+    A domain claimed by multiple YC identities is not safe identity evidence. If
+    exactly one claimant has a deterministic brand-shaped domain, retain that
+    claimant and clear the others; otherwise clear every competing claim. Raw YC
+    profile payloads are written from the original list and remain unchanged.
+    """
+
+    sanitized = [
+        {**company, "website": sanitized_yc_company_website(company)} for company in companies
+    ]
+    claims: dict[str, list[int]] = {}
+    for index, company in enumerate(sanitized):
+        domain = primary_domain_for_website(company.get("website"))
+        if domain:
+            claims.setdefault(domain, []).append(index)
+
+    for domain, indexes in claims.items():
+        if len(indexes) < 2:
+            continue
+        compatible = [
+            index
+            for index in indexes
+            if _company_name_matches_domain(str(sanitized[index].get("name") or ""), domain)
+        ]
+        survivor = compatible[0] if len(compatible) == 1 else None
+        for index in indexes:
+            if index != survivor:
+                sanitized[index]["website"] = None
+                sanitized[index]["_website_domain_conflict"] = True
+    return sanitized
+
+
+def _company_name_matches_domain(name: str, domain: str) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", normalize_company_name(name))
+    legal_suffixes = {
+        "incorporated",
+        "corporation",
+        "limited",
+        "corp",
+        "llc",
+        "ltd",
+        "inc",
+    }
+    if len(tokens) > 1 and tokens[-1] in legal_suffixes:
+        tokens.pop()
+    normalized = "".join(tokens)
+    label = domain.split(".", 1)[0].lower()
+    if not normalized or not label:
+        return False
+    if label == normalized:
+        return True
+    return any(
+        label == f"{prefix}{normalized}"
+        for prefix in ("get", "go", "hey", "join", "my", "ridewith", "team", "try", "use")
+    )
+
+
 def _yc_company_id(company: dict[str, Any]) -> int:
     yc_company_id = _to_int(company.get("id")) or _to_int(company.get("objectID"))
     if yc_company_id is None:
@@ -1223,7 +1510,7 @@ def _yc_company_id(company: dict[str, Any]) -> int:
 
 def _matching_neutral_company_id(connection: Any, company: dict[str, Any]) -> int | None:
     """Return one safe non-YC identity match, never a best-effort merge."""
-    domain = primary_domain_for_website(company.get("website"))
+    domain = primary_domain_for_website(sanitized_yc_company_website(company))
     normalized_name = normalize_company_name(str(company.get("name") or "").strip())
     if not domain or not normalized_name:
         return None
@@ -1285,12 +1572,13 @@ def _company_row(
     local_company_id: int | None = None,
 ) -> dict[str, Any]:
     name = str(company.get("name") or "").strip()
+    website = sanitized_yc_company_website(company)
     row: dict[str, Any] = {
         "name": name,
         "normalized_name": normalize_company_name(name),
         "slug": slug,
-        "website": company.get("website"),
-        "primary_domain": primary_domain_for_website(company.get("website")),
+        "website": website,
+        "primary_domain": primary_domain_for_website(website),
         "created_at": now,
         "updated_at": now,
     }
