@@ -32,7 +32,7 @@ from yc_radar.services.source_providers import is_ats_domain
 DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_LOCATION = "global"
 PROMPT_VERSION = 2
-EVIDENCE_VERSION = 2
+EVIDENCE_VERSION = 3
 CACHE_SCHEMA_VERSION = 1
 MAX_PAGE_BYTES = 2_000_000
 MAX_CANDIDATE_DOMAINS = 8
@@ -83,7 +83,7 @@ JS_TOKEN_ASSIGNMENT_RE = re.compile(
     r"(?P<quote>['\"])(?P<value>[A-Za-z0-9_-]{1,128})(?P=quote)"
 )
 DOMAIN_PREFIXES = frozenset(
-    {"get", "go", "join", "my", "ridewith", "team", "try", "use"}
+    {"get", "go", "hey", "join", "my", "ridewith", "team", "try", "use"}
 )
 DOMAIN_SUFFIXES = frozenset(
     {

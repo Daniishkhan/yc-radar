@@ -356,7 +356,7 @@ def test_prompt_requires_company_owned_non_ats_url_with_unknown_fallback(
     request = resolver._request_identity(company_name="Acme", board_token="acme")
 
     assert PROMPT_VERSION == 2
-    assert EVIDENCE_VERSION == 2
+    assert EVIDENCE_VERSION == 3
     assert request["prompt_version"] == PROMPT_VERSION
     assert "company-owned" in request["prompt"]
     assert "never return a greenhouse.io URL" in request["prompt"]
@@ -639,6 +639,7 @@ def test_known_job_aggregators_are_not_company_candidates() -> None:
         ("ID.me", "id.me"),
         ("Via", "ridewithvia.com"),
         ("Private Equity Insights", "pe-insights.com"),
+        ("Diana Health", "heydianahealth.com"),
     ],
 )
 def test_domain_gate_retains_conservative_known_brand_forms(
