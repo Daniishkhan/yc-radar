@@ -1,3 +1,5 @@
+import pytest
+
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import (
     DEFAULT_CANDIDATE_PROFILE,
@@ -93,6 +95,8 @@ def test_role_classifier_excludes_backend_and_software_executive_leadership() ->
         "Senior Director, Backend Engineering",
         "Director, Backend Engineering",
         "Head of Backend",
+        "Engineer Team Lead, New Markets Singapore",
+        "Render Engineering Team Lead",
     ):
         assert classify_role_text(title, "Build backend APIs").status == "exclude", title
 
@@ -101,6 +105,8 @@ def test_role_classifier_excludes_backend_and_software_executive_leadership() ->
         "Staff Backend Engineer",
         "Lead Backend Engineer",
         "Principal Software Engineer",
+        "Engineering Lead",
+        "Data Platform Engineering Lead",
     ):
         assert classify_role_text(title, "Build backend APIs").status != "exclude", title
 
@@ -133,6 +139,12 @@ def test_role_classifier_excludes_physical_and_industrial_engineering_titles() -
         "Senior SCADA Engineer",
         "SCADA Controls Engineer",
         "Senior Project Commissioning Engineer - Battery Storage",
+        "Senior Drilling Engineer",
+        "PLM Senior Engineer",
+        "Staff Radar Systems Engineer",
+        "Principal Mission Architect",
+        "Senior FPGA Verification Engineer",
+        "Lead Technical Architect, Converged Packet Optical(#1284)",
     ):
         assert classify_role_text(title, "Build backend APIs").status == "exclude", title
 
@@ -143,8 +155,40 @@ def test_role_classifier_excludes_physical_and_industrial_engineering_titles() -
         "Full Stack Engineer, Mechanical Design Tools",
         "Senior SDE, Mechanical Simulation",
         "Senior Software Engineer, Commissioning Platform",
+        "Senior Software Engineer, Drilling Platform",
+        "Software Architect, Converged Packet Optical",
+        "Backend Engineer, Radar Systems",
+        "Full Stack Engineer, PLM",
+        "Senior SDE, FPGA Tooling",
     ):
         assert classify_role_text(title, "Build backend APIs").status != "exclude", title
+
+
+def test_role_classifier_excludes_design_process_and_physical_it_delivery() -> None:
+    assert (
+        classify_role_text(
+            "Contract: Senior AI Design & Engineering Process Lead",
+            "We are looking for a Senior Designer using Figma and design systems.",
+        ).status
+        == "exclude"
+    )
+    assert (
+        classify_role_text(
+            "Systems Engineer II",
+            (
+                "Execute network switch and server room cable management. Complete physical "
+                "setup of servers, SANs, firewalls, switches, and access points."
+            ),
+        ).status
+        == "exclude"
+    )
+    assert (
+        classify_role_text(
+            "Systems Engineer II",
+            "Automate Linux systems, cloud infrastructure, and backend APIs.",
+        ).status
+        != "exclude"
+    )
 
 
 def test_role_classifier_keeps_architect_and_client_software_specialties() -> None:
@@ -459,6 +503,55 @@ def test_remote_eligibility_accepts_only_unambiguous_global_location_labels() ->
     assert (
         classify_remote_eligibility({"location": "Remote - APAC"}).status
         == "regional_unconfirmed"
+    )
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "U.S. Person status is required to access U.S.-only systems.",
+        "This position will require U.S. citizenship.",
+        "US citizenship required; must be eligible for CUI access.",
+        (
+            "U.S. citizenship and ability to obtain and maintain a U.S. Personnel "
+            "Security Clearance."
+        ),
+        "Applicants must be authorized to work in the United States.",
+        "Must be eligible to obtain and maintain a U.S. personnel security clearance.",
+        "Eligible to obtain and maintain a U.S. TS clearance.",
+        "This position requires eligibility to obtain and maintain a U.S. security clearance.",
+        "Ability to obtain and maintain a Public Trust clearance.",
+        "To conform to U.S. Government export regulations, applicant must be a U.S. person.",
+    ),
+)
+def test_us_specific_remote_eligibility_requirements_are_restricted(
+    description: str,
+) -> None:
+    result = classify_remote_eligibility(
+        {"location": "Global - Remote", "description_text": description}
+    )
+    assert result.status == "restricted_remote"
+    assert result.evidence[0].startswith("eligibility restriction: ")
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "U.S. citizenship is not required.",
+        "We do not require U.S. citizenship.",
+        "Preferred: eligible to obtain and maintain a U.S. security clearance.",
+        "Ability to obtain a Public Trust clearance is preferred but not required.",
+        "You will collaborate with United States customers.",
+    ),
+)
+def test_optional_or_unrelated_us_language_does_not_restrict_remote_roles(
+    description: str,
+) -> None:
+    assert (
+        classify_remote_eligibility(
+            {"location": "Remote", "description_text": description}
+        ).status
+        == "remote_unclear"
     )
 
 

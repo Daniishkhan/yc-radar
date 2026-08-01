@@ -111,6 +111,12 @@ ACTIVE_CLEARANCE_PHRASE_PATTERN = re.compile(
     rf"\bclearance\b[^.!?;\r\n]{{0,60}}\b{ACTIVE_CLEARANCE_LEVEL_PATTERN}\b",
     flags=re.IGNORECASE,
 )
+LABELED_REQUIRED_CLEARANCE_PATTERN = re.compile(
+    rf"\binvestigative\s+requirements?\b[^.!?;\r\n]{{0,100}}"
+    rf"\b{ACTIVE_CLEARANCE_LEVEL_PATTERN}\b"
+    rf"(?:[^.!?;\r\n]{{0,30}}\bclearance\b)?",
+    flags=re.IGNORECASE,
+)
 CLEARANCE_CLAUSE_BOUNDARY_PATTERN = re.compile(
     r"(?:[.!?;\r\n]+|</?(?:br|div|li|p)\b[^>]*>|[•●▪])",
     flags=re.IGNORECASE,
@@ -421,6 +427,8 @@ def requires_active_government_clearance(
     for value in (title, description):
         if not isinstance(value, str) or not value.strip():
             continue
+        if LABELED_REQUIRED_CLEARANCE_PATTERN.search(value):
+            return True
         for match in ACTIVE_CLEARANCE_PHRASE_PATTERN.finditer(value):
             html_section_before = value[max(0, match.start() - 4_000) : match.start()]
             before, after = _clearance_clause_sides(

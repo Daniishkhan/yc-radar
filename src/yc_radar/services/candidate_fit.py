@@ -216,6 +216,7 @@ ENGINEERING_LEADERSHIP_TITLE_PATTERNS = (
     r"(?:director|head|manager)\b",
     r"\bhead\s+of\s+(?:backend|infrastructure|platform|software)"
     r"(?:\s+engineering)?\b",
+    r"\b(?:engineer|engineering)\s+team\s+lead\b",
 )
 BUSINESS_DEVELOPMENT_TITLE_PATTERNS = (
     r"^\s*(?:(?:founding|global|lead|principal|regional|senior|sr\.?|strategic|"
@@ -235,6 +236,27 @@ PHYSICAL_ENGINEERING_TITLE_PATTERNS = (
     r"\bscada\b.{0,40}\bengineer(?:ing)?\b",
     r"\bengineer(?:ing)?\b.{0,24}\bscada\b",
     r"\b(?:project\s+)?commissioning\s+engineer(?:ing)?\b",
+    r"\bdrilling\s+engineer(?:ing)?\b",
+    r"\bplm\b.{0,32}\bengineer(?:ing)?\b",
+    r"\bradar\s+systems?\s+engineer(?:ing)?\b",
+    r"\bfpga\b.{0,48}\b(?:verification\s+)?engineer(?:ing)?\b",
+    r"\bmission\s+architect\b",
+    r"\bconverged\s+packet\s+optical\b",
+)
+DESIGN_PROCESS_TITLE_PATTERNS = (
+    r"\bdesign\s*(?:&|and)\s*engineering\s+process\s+lead\b",
+)
+PHYSICAL_IT_IMPLEMENTATION_TITLE_PATTERNS = (
+    r"\bsystems?\s+engineer\s+(?:i{1,3}|[123])\b",
+)
+PHYSICAL_IT_CABLING_CONTEXT_PATTERNS = (
+    r"\b(?:cable\s+management|cabling)\b",
+)
+PHYSICAL_IT_EQUIPMENT_CONTEXT_PATTERNS = (
+    r"\bphysical\s+(?:setup|installation)\b.{0,120}"
+    r"\b(?:access\s+points?|firewalls?|sans?|servers?|switches?)\b",
+    r"\b(?:access\s+points?|firewalls?|sans?|servers?|switches?)\b.{0,120}"
+    r"\bphysical\s+(?:setup|installation)\b",
 )
 NON_OPENING_CONTEXT_PATTERNS = (
     r"\bjoin\s+(?:our|the)\s+(?:contractor|freelance)\s+(?:pool|network)\b",
@@ -397,6 +419,47 @@ _REMOTE_NEGATION_PATTERNS = (
     r"\bnot\s+a\s+remote\s+(?:job|role|position|opportunity)\b",
     r"\bremote(?:\s+work)?\s+(?:is\s+)?not\s+(?:available|offered|supported|permitted|an\s+option)\b",
 )
+_US_ELIGIBILITY_TERM_PATTERN = r"(?:u\.?\s*s\.?|united\s+states)"
+_US_SPECIFIC_ELIGIBILITY_RESTRICTION_PATTERNS = (
+    rf"\b{_US_ELIGIBILITY_TERM_PATTERN}\s+person\s+status\s+(?:is\s+)?required\b",
+    rf"\b(?:this|the)\s+(?:position|role|job)\s+(?:will\s+)?"
+    rf"requir(?:e|es|ed)\s+{_US_ELIGIBILITY_TERM_PATTERN}\s+citizenship\b",
+    rf"\b{_US_ELIGIBILITY_TERM_PATTERN}\s+citizenship\s+(?:is\s+)?required\b",
+    rf"\b{_US_ELIGIBILITY_TERM_PATTERN}\s+citizenship\s+and\s+(?:the\s+)?"
+    rf"ability\s+to\s+(?:obtain|hold)(?:\s+and\s+maintain)?\s+(?:an?\s+)?"
+    rf"{_US_ELIGIBILITY_TERM_PATTERN}\s+"
+    rf"(?:(?:personnel|security|secret|top\s+secret|ts(?:\s*[/\-]\s*sci)?)\s+)*"
+    rf"clearance\b",
+    rf"\bmust\s+be\s+(?:an?\s+)?{_US_ELIGIBILITY_TERM_PATTERN}\s+citizen\b",
+    rf"\b(?:applicants?|candidates?|employees?)\s+must\s+be\s+"
+    rf"(?:legally\s+)?authorized\s+to\s+work\s+in\s+(?:the\s+)?"
+    rf"{_US_ELIGIBILITY_TERM_PATTERN}\b",
+    rf"\b(?:must|required\s+to)\s+(?:be\s+)?(?:legally\s+)?authorized\s+"
+    rf"to\s+work\s+in\s+(?:the\s+)?{_US_ELIGIBILITY_TERM_PATTERN}\b",
+    rf"\b(?:must\s+be\s+)?eligible\s+to\s+(?:obtain|hold)"
+    rf"(?:\s+and\s+maintain)?\s+(?:an?\s+)?{_US_ELIGIBILITY_TERM_PATTERN}\s+"
+    rf"(?:(?:personnel|security|secret|top\s+secret|ts(?:\s*[/\-]\s*sci)?)\s+)*"
+    rf"clearance\b",
+    rf"\b(?:this|the)\s+(?:position|role|job)\s+requires?\s+eligibility\s+to\s+"
+    rf"(?:obtain|hold)(?:\s+and\s+maintain)?\s+(?:an?\s+)?"
+    rf"{_US_ELIGIBILITY_TERM_PATTERN}\s+"
+    rf"(?:(?:personnel|security|secret|top\s+secret|ts(?:\s*[/\-]\s*sci)?)\s+)*"
+    rf"clearance\b",
+    r"\b(?:ability|eligible|eligibility|required)\s+to\s+(?:obtain|hold)"
+    r"(?:\s+and\s+maintain)?\s+(?:an?\s+)?public\s+trust(?:\s+clearance)?\b",
+    rf"\bto\s+conform\s+to\s+{_US_ELIGIBILITY_TERM_PATTERN}\s+government\s+"
+    rf"export\s+regulations?\b",
+)
+_OPTIONAL_ELIGIBILITY_BEFORE_PATTERN = re.compile(
+    r"\b(?:optional|preferred|nice[- ]to[- ]have|a\s+plus|not\s+required)\b"
+    r"[^.!?;\r\n]{0,100}$",
+    flags=re.IGNORECASE,
+)
+_OPTIONAL_ELIGIBILITY_AFTER_PATTERN = re.compile(
+    r"^[^.!?;\r\n]{0,50}\b(?:optional|preferred|nice[- ]to[- ]have|"
+    r"a\s+plus|not\s+required)\b",
+    flags=re.IGNORECASE,
+)
 _GLOBAL_SCOPE_LIMITATION_PATTERNS = (
     r"\bnot\s+(?:a\s+)?(?:remote\s+)?(?:worldwide|world wide|global(?:ly)?)(?:\s+remote)?\b",
     r"\bremote\s+(?:but\s+)?not\s+(?:worldwide|world wide|global(?:ly)?)\b",
@@ -522,6 +585,7 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     has_backend_signal = _has_any_signal(combined, BACKEND_ROLE_TERMS)
     has_backend_title_signal = _has_any_signal(title_text, BACKEND_ROLE_TERMS)
     has_software_signal = _has_any_signal(title_text, SOFTWARE_ROLE_TERMS)
+    has_explicit_software_title = _has_signal(title_text, "software")
     has_backend_title_role = bool(
         re.search(
             r"(?:\bback[ -]?end\b.{0,32}\b(?:developer|engineer)\b|"
@@ -540,6 +604,10 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         return RoleClassification("exclude", ["Non-engineering or junior/intern role"])
     if _first_pattern_match(title_text, ENGINEERING_LEADERSHIP_TITLE_PATTERNS):
         return RoleClassification("exclude", ["Engineering leadership role is outside IC SWE lane"])
+    if _first_pattern_match(title_text, DESIGN_PROCESS_TITLE_PATTERNS):
+        return RoleClassification(
+            "exclude", ["Design-process role is outside the IC SWE lane"]
+        )
     if _first_pattern_match(title_text, BUSINESS_DEVELOPMENT_TITLE_PATTERNS):
         return RoleClassification(
             "exclude", ["Business-development role is outside the IC SWE lane"]
@@ -555,10 +623,19 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     if _first_pattern_match(title_text, QUALITY_ENGINEERING_TITLE_PATTERNS):
         return RoleClassification("exclude", ["QA/test role is outside the IC SWE lane"])
     if _first_pattern_match(title_text, PHYSICAL_ENGINEERING_TITLE_PATTERNS) and not (
-        has_software_signal or is_full_stack_title or has_backend_title_role
+        has_explicit_software_title or is_full_stack_title or has_backend_title_role
     ):
         return RoleClassification(
             "exclude", ["Physical or industrial engineering role is outside software lane"]
+        )
+    if (
+        _first_pattern_match(title_text, PHYSICAL_IT_IMPLEMENTATION_TITLE_PATTERNS)
+        and _first_pattern_match(combined, PHYSICAL_IT_CABLING_CONTEXT_PATTERNS)
+        and _first_pattern_match(combined, PHYSICAL_IT_EQUIPMENT_CONTEXT_PATTERNS)
+        and not (has_explicit_software_title or is_full_stack_title or has_backend_title_role)
+    ):
+        return RoleClassification(
+            "exclude", ["Physical IT implementation role is outside software lane"]
         )
     if has_frontend_only_title and not is_full_stack_title:
         return RoleClassification("exclude", ["Frontend-only title is outside backend/SWE focus"])
@@ -1042,6 +1119,16 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
         or role_remote_match
     )
 
+    us_specific_restriction = _first_required_us_eligibility_match(
+        descriptive_evidence
+    )
+    if us_specific_restriction and remote_signal:
+        return _remote_result(
+            "restricted_remote",
+            "Posting explicitly requires U.S.-specific status or government eligibility",
+            _evidence("eligibility restriction", us_specific_restriction),
+        )
+
     pakistan_exclusion = _first_pattern_match(
         " ".join((location_scope, countries, descriptive_evidence)),
         _PAKISTAN_EXCLUSION_PATTERNS,
@@ -1284,6 +1371,19 @@ def _first_pattern_match(text: str, patterns: tuple[str, ...]) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
+            return re.sub(r"\s+", " ", match.group(0)).strip()
+    return None
+
+
+def _first_required_us_eligibility_match(text: str) -> str | None:
+    for pattern in _US_SPECIFIC_ELIGIBILITY_RESTRICTION_PATTERNS:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            before = re.sub(r"<[^>]+>", " ", text[max(0, match.start() - 140) : match.start()])
+            after = re.sub(r"<[^>]+>", " ", text[match.end() : match.end() + 100])
+            if _OPTIONAL_ELIGIBILITY_BEFORE_PATTERN.search(before):
+                continue
+            if _OPTIONAL_ELIGIBILITY_AFTER_PATTERN.search(after):
+                continue
             return re.sub(r"\s+", " ", match.group(0)).strip()
     return None
 

@@ -400,6 +400,9 @@ def test_required_clearance_in_title_is_excluded_without_active_keyword() -> Non
             "<p>Required Qualifications:</p><ul><li>Active Secret clearance"
             "</li></ul>"
         ),
+        (
+            "<li><strong>Investigative Requirement</strong>: Secret clearance.</li>"
+        ),
     ),
 )
 def test_active_clearance_filter_detects_clause_local_requirements(
