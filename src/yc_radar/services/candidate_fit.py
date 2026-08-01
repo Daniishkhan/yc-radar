@@ -201,6 +201,40 @@ QUALITY_ENGINEERING_TITLE_PATTERNS = (
     r"\b(?:qa|quality(?: assurance)?|test(?: automation|ing)?)\b.{0,40}"
     r"\b(?:software engineer|software developer)\b",
 )
+ENGINEERING_LEADERSHIP_TITLE_PATTERNS = (
+    r"\b(?:avp|evp|svp|vp|vice president)\b.{0,80}"
+    r"\b(?:backend|engineering|engineer|infrastructure|platform|software|technology)\b",
+    r"\b(?:backend|engineering|engineer|infrastructure|platform|software|technology)\b"
+    r".{0,80}\b(?:avp|evp|svp|vp|vice president)\b",
+    r"\b(?:senior|sr\.?)\s+(?:director|head|manager)\b.{0,60}"
+    r"\b(?:backend|engineering|infrastructure|platform|software)\b",
+    r"\b(?:director|head|manager)\b.{0,40}"
+    r"\b(?:backend|infrastructure|platform|software)\s+engineering\b",
+    r"\b(?:backend|infrastructure|platform|software)\s+engineering\b.{0,40}"
+    r"\b(?:director|head|manager)\b",
+    r"\b(?:senior|sr\.?)\s+(?:backend|infrastructure|platform|software)\s+"
+    r"(?:director|head|manager)\b",
+    r"\bhead\s+of\s+(?:backend|infrastructure|platform|software)"
+    r"(?:\s+engineering)?\b",
+)
+BUSINESS_DEVELOPMENT_TITLE_PATTERNS = (
+    r"^\s*(?:(?:founding|global|lead|principal|regional|senior|sr\.?|strategic|"
+    r"technical)\s+)*business development\b.{0,60}"
+    r"\b(?:developer|engineer(?:ing)?|technical)\b",
+    r"\bbusiness development\s+(?:associate|director|engineer|executive|lead|manager|"
+    r"representative|specialist)\b",
+    r"\b(?:director|head|lead|manager|vice president|vp)\s+(?:of\s+)?"
+    r"business development\b",
+    r"\bbusiness developer\b",
+)
+PHYSICAL_ENGINEERING_TITLE_PATTERNS = (
+    r"\b(?:mechanical|stress|structural)\s+"
+    r"(?:(?:analysis|design|systems?)\s+)?engineer(?:ing)?\b",
+    r"\bengineer(?:ing)?\s*(?:[-–—,/:(]\s*|\s+)"
+    r"(?:mechanical|stress|structural)\b",
+    r"\bscada\b.{0,40}\bengineer(?:ing)?\b",
+    r"\bengineer(?:ing)?\b.{0,24}\bscada\b",
+)
 NON_OPENING_CONTEXT_PATTERNS = (
     r"\bjoin\s+(?:our|the)\s+(?:contractor|freelance)\s+(?:pool|network)\b",
     r"\b(?:contractor|freelance)\s+network\b.{0,240}\bproject\s+invitations?\b",
@@ -487,6 +521,13 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     has_backend_signal = _has_any_signal(combined, BACKEND_ROLE_TERMS)
     has_backend_title_signal = _has_any_signal(title_text, BACKEND_ROLE_TERMS)
     has_software_signal = _has_any_signal(title_text, SOFTWARE_ROLE_TERMS)
+    has_backend_title_role = bool(
+        re.search(
+            r"(?:\bback[ -]?end\b.{0,32}\b(?:developer|engineer)\b|"
+            r"\b(?:developer|engineer)\b.{0,32}\bback[ -]?end\b)",
+            title_text,
+        )
+    )
     has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS)
     is_founding = _has_any_signal(title_text, FOUNDING_TERMS)
     has_frontend_signal = _has_any_signal(combined, FRONTEND_TERMS)
@@ -496,6 +537,12 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         return RoleClassification("exclude", ["Junior or entry-level role is outside senior lane"])
     if _has_any_title_term(title_text, EXCLUDED_ROLE_TERMS):
         return RoleClassification("exclude", ["Non-engineering or junior/intern role"])
+    if _first_pattern_match(title_text, ENGINEERING_LEADERSHIP_TITLE_PATTERNS):
+        return RoleClassification("exclude", ["Engineering leadership role is outside IC SWE lane"])
+    if _first_pattern_match(title_text, BUSINESS_DEVELOPMENT_TITLE_PATTERNS):
+        return RoleClassification(
+            "exclude", ["Business-development role is outside the IC SWE lane"]
+        )
     if _has_any_title_term(title_text, ENGINEERING_DOMAIN_MODIFIER_TERMS) and not (
         has_software_signal or is_full_stack_title or has_backend_title_signal
     ):
@@ -506,6 +553,12 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         return RoleClassification("exclude", ["Engineering-adjacent role is outside the IC SWE lane"])
     if _first_pattern_match(title_text, QUALITY_ENGINEERING_TITLE_PATTERNS):
         return RoleClassification("exclude", ["QA/test role is outside the IC SWE lane"])
+    if _first_pattern_match(title_text, PHYSICAL_ENGINEERING_TITLE_PATTERNS) and not (
+        has_software_signal or is_full_stack_title or has_backend_title_role
+    ):
+        return RoleClassification(
+            "exclude", ["Physical or industrial engineering role is outside software lane"]
+        )
     if has_frontend_only_title and not is_full_stack_title:
         return RoleClassification("exclude", ["Frontend-only title is outside backend/SWE focus"])
     if _first_pattern_match(combined, NON_OPENING_CONTEXT_PATTERNS):

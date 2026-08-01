@@ -106,7 +106,9 @@ ACTIVE_CLEARANCE_PHRASE_PATTERN = re.compile(
     rf"\bactive\b[^.!?;\r\n]{{0,80}}\bclearance\b"
     rf"[^.!?;\r\n]{{0,60}}\b{ACTIVE_CLEARANCE_LEVEL_PATTERN}\b|"
     r"\bactive\b[^.!?;\r\n]{0,30}\b(?:ts\s*[/\-]\s*sci|"
-    r"top\s+secret\s*[/\-]\s*sci)\b",
+    r"top\s+secret\s*[/\-]\s*sci)\b|"
+    rf"\b{ACTIVE_CLEARANCE_LEVEL_PATTERN}\b[^.!?;\r\n]{{0,60}}\bclearance\b|"
+    rf"\bclearance\b[^.!?;\r\n]{{0,60}}\b{ACTIVE_CLEARANCE_LEVEL_PATTERN}\b",
     flags=re.IGNORECASE,
 )
 CLEARANCE_CLAUSE_BOUNDARY_PATTERN = re.compile(
@@ -412,32 +414,35 @@ def _clearance_clause_sides(
     return description[clause_start:start], description[end:clause_end]
 
 
-def requires_active_government_clearance(description: Any) -> bool:
-    """Detect an explicitly required active Secret/TS-SCI clearance."""
-    if not isinstance(description, str) or not description.strip():
-        return False
-    for match in ACTIVE_CLEARANCE_PHRASE_PATTERN.finditer(description):
-        html_section_before = description[max(0, match.start() - 4_000) : match.start()]
-        before, after = _clearance_clause_sides(
-            description, start=match.start(), end=match.end()
-        )
-        if CLEARANCE_OPTIONAL_BEFORE_PATTERN.search(before):
+def requires_active_government_clearance(
+    description: Any, *, title: Any = ""
+) -> bool:
+    """Detect a required pre-existing Secret/TS-SCI clearance in title or description."""
+    for value in (title, description):
+        if not isinstance(value, str) or not value.strip():
             continue
-        after_nearby = after[:160]
-        if CLEARANCE_OBTAIN_ALTERNATIVE_PATTERN.search(after_nearby):
-            continue
-        required_after = CLEARANCE_REQUIRED_AFTER_PATTERN.search(after_nearby)
-        optional_after = CLEARANCE_OPTIONAL_AFTER_PATTERN.search(after_nearby)
-        if optional_after and (
-            required_after is None or optional_after.start() < required_after.start()
-        ):
-            continue
-        if (
-            required_after
-            or CLEARANCE_REQUIRED_BEFORE_PATTERN.search(before)
-            or CLEARANCE_REQUIRED_HTML_SECTION_PATTERN.search(html_section_before)
-        ):
-            return True
+        for match in ACTIVE_CLEARANCE_PHRASE_PATTERN.finditer(value):
+            html_section_before = value[max(0, match.start() - 4_000) : match.start()]
+            before, after = _clearance_clause_sides(
+                value, start=match.start(), end=match.end()
+            )
+            if CLEARANCE_OPTIONAL_BEFORE_PATTERN.search(before):
+                continue
+            after_nearby = after[:160]
+            if CLEARANCE_OBTAIN_ALTERNATIVE_PATTERN.search(after_nearby):
+                continue
+            required_after = CLEARANCE_REQUIRED_AFTER_PATTERN.search(after_nearby)
+            optional_after = CLEARANCE_OPTIONAL_AFTER_PATTERN.search(after_nearby)
+            if optional_after and (
+                required_after is None or optional_after.start() < required_after.start()
+            ):
+                continue
+            if (
+                required_after
+                or CLEARANCE_REQUIRED_BEFORE_PATTERN.search(before)
+                or CLEARANCE_REQUIRED_HTML_SECTION_PATTERN.search(html_section_before)
+            ):
+                return True
     return False
 
 
@@ -489,7 +494,7 @@ def analyzed_variant(
         role=role,
         remote=remote,
         requires_active_clearance=requires_active_government_clearance(
-            row.get("description_text")
+            row.get("description_text"), title=title
         ),
     )
 
@@ -648,7 +653,7 @@ def _analyze_role_rows(
 
         remote = classify_remote_eligibility(dict(row))
         requires_clearance = requires_active_government_clearance(
-            row.get("description_text")
+            row.get("description_text"), title=title
         )
         variant = _variant_from_classifications(
             row,

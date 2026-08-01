@@ -356,6 +356,33 @@ def test_required_active_clearance_stays_measurable_but_is_excluded_from_queues(
     assert "Candidates must be able to obtain" not in json.dumps(leads)
 
 
+def test_required_clearance_in_title_is_excluded_without_active_keyword() -> None:
+    analysis = funnel._analyze_role_rows(
+        [
+            job(
+                1,
+                title="Senior Backend Engineer (TS/SCI Clearance Required)",
+                description="This role is remote worldwide.",
+            ),
+            job(
+                2,
+                title="Senior Backend Engineer (TS/SCI Clearance Preferred)",
+                description="This role is remote worldwide.",
+            ),
+        ]
+    )
+
+    assert analysis.role_summary["clearance_required_matching_variant_count"] == 1
+    assert analysis.role_summary["actionable_clearance_excluded_variant_count"] == 1
+    assert [
+        item["best_variant"]["external_job_id"]
+        for item in analysis.actionable_clusters
+    ] == ["external-2"]
+    assert [
+        item["best_variant"]["external_job_id"] for item in analysis.remote_leads
+    ] == ["external-2"]
+
+
 @pytest.mark.parametrize(
     "description",
     (
@@ -366,6 +393,9 @@ def test_required_active_clearance_stays_measurable_but_is_excluded_from_queues(
         "An active Secret clearance is mandatory.",
         "Must have an active DoD security clearance.",
         "Must hold an active TS/SCI.",
+        "TS/SCI Clearance Required.",
+        "A Top Secret clearance is mandatory.",
+        "Candidates must hold a Secret clearance.",
         (
             "<p>Required Qualifications:</p><ul><li>Active Secret clearance"
             "</li></ul>"
@@ -390,6 +420,10 @@ def test_active_clearance_filter_detects_clause_local_requirements(
         "No active Secret clearance is required.",
         "An active Secret clearance is required or the ability to obtain one.",
         "You must have Python experience. Active Secret clearance is a nice-to-have.",
+        "TS/SCI clearance is preferred but not required.",
+        "Ability to obtain a TS/SCI clearance is required.",
+        "No TS/SCI clearance is required.",
+        "A Top Secret clearance is optional.",
         (
             "<p>Preferred Qualifications:</p><ul><li>Active Secret clearance"
             "</li></ul>"

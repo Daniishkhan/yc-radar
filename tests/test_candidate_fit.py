@@ -82,6 +82,80 @@ def test_role_classifier_excludes_junior_and_management_titles() -> None:
         assert classify_role_text(title, "Build backend APIs").status == "exclude", title
 
 
+def test_role_classifier_excludes_backend_and_software_executive_leadership() -> None:
+    for title in (
+        "VP, Backend Engineering",
+        "VP, Senior Backend Developer",
+        "VP / Senior Backend Engineer",
+        "Vice President, Software Engineering",
+        "SVP of Platform Engineering",
+        "Senior Manager, Backend Engineering",
+        "Senior Director, Backend Engineering",
+        "Director, Backend Engineering",
+        "Head of Backend",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status == "exclude", title
+
+    for title in (
+        "Senior Backend Engineer",
+        "Staff Backend Engineer",
+        "Lead Backend Engineer",
+        "Principal Software Engineer",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status != "exclude", title
+
+
+def test_role_classifier_excludes_business_development_with_engineering_terms() -> None:
+    for title in (
+        "Business Development Engineer",
+        "Business Development, Engineering",
+        "Engineering Business Development Manager",
+        "Senior Business Development Manager - Architecture, Engineering & Construction",
+        "Senior Business Development Representative, Engineering",
+        "Business Developer, Platform Partnerships",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status == "exclude", title
+
+    for title in (
+        "Senior Software Engineer, Business Development Platform",
+        "Senior Software Engineer, Business Development Engineering",
+        "Backend Engineer, Business Development Systems",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status != "exclude", title
+
+
+def test_role_classifier_excludes_physical_and_industrial_engineering_titles() -> None:
+    for title in (
+        "Senior Stress Engineer",
+        "Structural Design Engineer",
+        "Senior Mechanical Engineer",
+        "Engineer, Mechanical Systems",
+        "Senior SCADA Engineer",
+        "SCADA Controls Engineer",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status == "exclude", title
+
+    for title in (
+        "Senior Software Engineer, Structural Analysis",
+        "Backend Engineer, SCADA Integrations",
+        "Senior Backend Platform Engineer, SCADA Integrations",
+        "Full Stack Engineer, Mechanical Design Tools",
+        "Senior SDE, Mechanical Simulation",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status != "exclude", title
+
+
+def test_role_classifier_keeps_architect_and_client_software_specialties() -> None:
+    for title in (
+        "Senior Solutions Architect",
+        "Senior Mobile Software Engineer",
+        "Senior Client Platform Engineer",
+        "Senior iOS Engineer",
+        "Senior Android Engineer",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status != "exclude", title
+
+
 def test_role_classifier_excludes_qa_qualified_software_titles() -> None:
     for title in (
         "Software Development Engineer IV - QA",
