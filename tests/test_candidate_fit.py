@@ -174,7 +174,7 @@ def test_role_classifier_excludes_design_process_and_physical_it_delivery() -> N
     )
     assert (
         classify_role_text(
-            "Systems Engineer II",
+            "Systems Engineer ll",
             (
                 "Execute network switch and server room cable management. Complete physical "
                 "setup of servers, SANs, firewalls, switches, and access points."
@@ -519,6 +519,10 @@ def test_remote_eligibility_accepts_only_unambiguous_global_location_labels() ->
         "Applicants must be authorized to work in the United States.",
         "Must be eligible to obtain and maintain a U.S. personnel security clearance.",
         "Eligible to obtain and maintain a U.S. TS clearance.",
+        (
+            "<li>Eligible to obtain and maintain a U.S. TS clearance</li></ul>"
+            "<h3>Preferred Qualifications</h3>"
+        ),
         "This position requires eligibility to obtain and maintain a U.S. security clearance.",
         "Ability to obtain and maintain a Public Trust clearance.",
         "To conform to U.S. Government export regulations, applicant must be a U.S. person.",

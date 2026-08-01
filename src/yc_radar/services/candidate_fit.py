@@ -247,7 +247,7 @@ DESIGN_PROCESS_TITLE_PATTERNS = (
     r"\bdesign\s*(?:&|and)\s*engineering\s+process\s+lead\b",
 )
 PHYSICAL_IT_IMPLEMENTATION_TITLE_PATTERNS = (
-    r"\bsystems?\s+engineer\s+(?:i{1,3}|[123])\b",
+    r"\bsystems?\s+engineer\s+(?:i{1,3}|l{2}|[123])\b",
 )
 PHYSICAL_IT_CABLING_CONTEXT_PATTERNS = (
     r"\b(?:cable\s+management|cabling)\b",
@@ -458,6 +458,10 @@ _OPTIONAL_ELIGIBILITY_BEFORE_PATTERN = re.compile(
 _OPTIONAL_ELIGIBILITY_AFTER_PATTERN = re.compile(
     r"^[^.!?;\r\n]{0,50}\b(?:optional|preferred|nice[- ]to[- ]have|"
     r"a\s+plus|not\s+required)\b",
+    flags=re.IGNORECASE,
+)
+_ELIGIBILITY_CLAUSE_BOUNDARY_PATTERN = re.compile(
+    r"</?(?:br|div|h[1-6]|li|ol|p|ul)\b[^>]*>",
     flags=re.IGNORECASE,
 )
 _GLOBAL_SCOPE_LIMITATION_PATTERNS = (
@@ -1378,8 +1382,18 @@ def _first_pattern_match(text: str, patterns: tuple[str, ...]) -> str | None:
 def _first_required_us_eligibility_match(text: str) -> str | None:
     for pattern in _US_SPECIFIC_ELIGIBILITY_RESTRICTION_PATTERNS:
         for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            before = re.sub(r"<[^>]+>", " ", text[max(0, match.start() - 140) : match.start()])
-            after = re.sub(r"<[^>]+>", " ", text[match.end() : match.end() + 100])
+            before_raw = text[max(0, match.start() - 140) : match.start()]
+            before_boundaries = list(
+                _ELIGIBILITY_CLAUSE_BOUNDARY_PATTERN.finditer(before_raw)
+            )
+            if before_boundaries:
+                before_raw = before_raw[before_boundaries[-1].end() :]
+            after_raw = text[match.end() : match.end() + 100]
+            after_boundary = _ELIGIBILITY_CLAUSE_BOUNDARY_PATTERN.search(after_raw)
+            if after_boundary:
+                after_raw = after_raw[: after_boundary.start()]
+            before = re.sub(r"<[^>]+>", " ", before_raw)
+            after = re.sub(r"<[^>]+>", " ", after_raw)
             if _OPTIONAL_ELIGIBILITY_BEFORE_PATTERN.search(before):
                 continue
             if _OPTIONAL_ELIGIBILITY_AFTER_PATTERN.search(after):
