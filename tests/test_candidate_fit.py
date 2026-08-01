@@ -67,6 +67,65 @@ def test_role_classifier_excludes_non_backend_role_lanes() -> None:
     )
 
 
+def test_role_classifier_excludes_junior_and_management_titles() -> None:
+    for title in (
+        "Junior Backend Engineer",
+        "Jr. Software Engineer",
+        "Entry-Level Platform Engineer",
+        "New Grad Software Engineer",
+        "Graduate Software Engineer",
+        "Graduate Software Developer",
+        "Software Engineer - Graduate",
+        "Software Engineering Director",
+        "Director, Software Engineering",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status == "exclude", title
+
+
+def test_role_classifier_excludes_qa_qualified_software_titles() -> None:
+    for title in (
+        "Software Development Engineer IV - QA",
+        "Software Engineer, Quality Assurance",
+        "Senior Software Engineer, Test",
+        "Senior Software Engineer - Quality",
+        "Test Automation Software Engineer",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status == "exclude", title
+
+
+def test_role_classifier_supports_exact_sde_titles_but_not_sde_managers_or_interns() -> None:
+    assert classify_role_text("SDE").status == "weak"
+    assert classify_role_text("Senior SDE").status == "strong"
+    assert classify_role_text("SDE", "Build backend APIs").status != "exclude"
+    assert classify_role_text("SDE Manager", "Build backend APIs").status == "exclude"
+    assert classify_role_text("SDE Intern", "Build backend APIs").status == "exclude"
+    assert classify_role_text("SDET", "Build backend APIs").status == "exclude"
+
+
+def test_role_classifier_does_not_substring_match_or_reject_product_domains() -> None:
+    for title in (
+        "Senior Internal Tools Software Engineer",
+        "Senior Internationalization Software Engineer",
+        "Senior Salesforce Software Engineer",
+        "Senior Battlefield Software Engineer",
+        "Senior Software Engineer, Growth",
+        "Senior Software Engineer, Marketing Technology",
+        "Senior Platform Operations Engineer",
+        "Senior Software Engineer, Money Partnerships",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status != "exclude", title
+
+    for title in (
+        "Software Engineering Intern",
+        "Sales Engineer",
+        "Customer Support Engineer",
+        "Account Executive",
+        "Marketing Engineer",
+        "Growth Engineer",
+    ):
+        assert classify_role_text(title, "Build backend APIs").status == "exclude", title
+
+
 def test_role_classifier_keeps_backend_heavy_web_and_full_stack_titles() -> None:
     assert (
         classify_role_text(
@@ -91,6 +150,17 @@ def test_role_classifier_excludes_contractor_pool_invitations() -> None:
     )
     assert classify_role_text("Contract Senior Web Engineer", description).status == "exclude"
     assert classify_role_text("Senior Full Stack Engineer", description).status == "exclude"
+
+
+def test_role_classifier_excludes_future_non_openings() -> None:
+    for description in (
+        "This is not a position we are currently hiring for.",
+        "We are accepting resumes for a potential future role.",
+        "We are not currently hiring for this position.",
+    ):
+        result = classify_role_text("Senior Backend Engineer", description)
+        assert result.status == "exclude", description
+        assert result.reasons == ["Listing is not a current opening"]
 
 
 def test_role_classifier_marks_frontend_heavy_full_stack_as_weak() -> None:
@@ -472,6 +542,128 @@ def test_title_region_only_overrides_global_remote_location() -> None:
     )
     assert regional.status == "regional_unconfirmed"
     assert regional.evidence == ["title restriction: APAC-only"]
+
+
+def test_remote_region_in_title_restricts_global_location() -> None:
+    for title in (
+        "Software Engineer - US Remote",
+        "Senior Software Engineer, .NET - US Remote",
+        "Remote US - Software Engineer",
+        "Remote — US Software Engineer",
+        "Remote (US) Software Engineer",
+        "Software Engineer (US) - Remote",
+        "Software Engineer (Remote, Europe)",
+    ):
+        result = classify_remote_eligibility(
+            {"title": title, "location": "Global - Remote"}
+        )
+        assert result.status == "restricted_remote", title
+        assert result.evidence[0].startswith("title restriction: ")
+
+    regional = classify_remote_eligibility(
+        {
+            "title": "Senior Software Engineer - APAC Remote",
+            "location": "Global - Remote",
+        }
+    )
+    assert regional.status == "regional_unconfirmed"
+    assert regional.evidence == ["title restriction: APAC Remote"]
+
+
+def test_remote_title_signal_requires_work_arrangement_syntax() -> None:
+    semantic_remote = classify_remote_eligibility(
+        {"title": "Remote Sensing Software Engineer"}
+    )
+    assert semantic_remote.status == "no_remote_evidence"
+    assert (
+        classify_remote_eligibility(
+            {"title": "Remote-Sensing Software Engineer"}
+        ).status
+        == "no_remote_evidence"
+    )
+
+    unrelated_region = classify_remote_eligibility(
+        {
+            "title": "Remote Software Engineer - India Payments",
+            "location": "Global - Remote",
+        }
+    )
+    assert unrelated_region.status == "global_explicit"
+
+    corroborated = classify_remote_eligibility(
+        {
+            "title": "Remote Sensing Software Engineer",
+            "location": "Remote",
+        }
+    )
+    assert corroborated.status == "remote_unclear"
+
+
+def test_enumerated_legal_work_countries_are_checked_for_pakistan() -> None:
+    restriction = (
+        "All candidates must be legally authorized to work in one of the following countries: "
+        "United States, Canada, United Kingdom, France, Germany, and Australia."
+    )
+    restricted = classify_remote_eligibility(
+        {"location": "Remote - Global", "description_text": restriction}
+    )
+    assert restricted.status == "restricted_remote"
+    assert restricted.evidence == [
+        "legal work countries: United States, Canada, United Kingdom, France, Germany, and Australia"
+    ]
+
+    includes_pakistan = classify_remote_eligibility(
+        {
+            "location": "Remote - Global",
+            "description_text": (
+                "All candidates must be legally authorised to work in one of the following "
+                "countries: Pakistan, United Kingdom, or Canada."
+            ),
+        }
+    )
+    assert includes_pakistan.status == "pakistan_explicit"
+    assert includes_pakistan.evidence == [
+        "legal work countries: Pakistan, United Kingdom, or Canada"
+    ]
+
+    html_description = (
+        "<p>Location: remote-first. All candidates must be legally authorized to work in one "
+        "of the following countries: United States, Canada, Australia, or Botswana.</p>"
+        "<div><p>What to expect after applying.</p></div>"
+    )
+    html_restricted = classify_remote_eligibility(
+        {"location": "Remote", "description_text": html_description}
+    )
+    assert html_restricted.status == "restricted_remote"
+    assert html_restricted.evidence == [
+        "legal work countries: United States, Canada, Australia, or Botswana"
+    ]
+
+
+def test_legal_work_country_list_does_not_absorb_later_pakistan_mentions() -> None:
+    later_sentence = (
+        "All candidates must be legally authorized to work in one of the following countries: "
+        "United States, Canada, and Australia. Our talent community also includes professionals "
+        "in Pakistan."
+    )
+    result = classify_remote_eligibility(
+        {"location": "Remote", "description_text": later_sentence}
+    )
+    assert result.status == "restricted_remote"
+    assert result.evidence == [
+        "legal work countries: United States, Canada, and Australia"
+    ]
+
+    flattened_blocks = (
+        "All candidates must be legally authorized to work in one of the following countries: "
+        "U.S., Canada, or Australia Our team works with customers and colleagues in Pakistan "
+        "What you will do Build reliable backend systems."
+    )
+    flattened_result = classify_remote_eligibility(
+        {"location": "Remote", "description_text": flattened_blocks}
+    )
+    assert flattened_result.status == "restricted_remote"
+    assert flattened_result.evidence == ["legal work countries: U.S., Canada, or Australia"]
 
 
 def test_structured_remote_restrictions_override_global_description_boilerplate() -> None:

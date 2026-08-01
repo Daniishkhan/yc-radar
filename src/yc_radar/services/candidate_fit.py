@@ -88,6 +88,7 @@ SOFTWARE_ROLE_TERMS = (
     "software engineer",
     "software engineering",
     "software developer",
+    "sde",
     "swe",
 )
 FULL_STACK_TERMS = ("full stack", "full-stack", "fullstack")
@@ -114,11 +115,8 @@ EXCLUDED_ROLE_TERMS = (
     "product designer",
     "sales",
     "account executive",
-    "marketing",
-    "growth",
     "customer success",
     "support",
-    "operations",
     "intern",
     "internship",
     "apprentice",
@@ -135,6 +133,11 @@ EXCLUDED_ROLE_TERMS = (
     "human resources",
     "people partner",
     "account manager",
+)
+ENGINEERING_DOMAIN_MODIFIER_TERMS = (
+    "marketing",
+    "growth",
+    "operations",
     "partnerships",
 )
 EXCLUDED_ENGINEERING_TITLE_TERMS = (
@@ -150,6 +153,11 @@ EXCLUDED_ENGINEERING_TITLE_TERMS = (
     "engineering manager",
     "manager, engineering",
     "director of engineering",
+    "director of software engineering",
+    "director, engineering",
+    "engineering director",
+    "director, software engineering",
+    "director software engineering",
     "head of engineering",
     "vp of engineering",
     "vice president of engineering",
@@ -158,6 +166,8 @@ EXCLUDED_ENGINEERING_TITLE_TERMS = (
     "community engineer",
     "software engineer in test",
     "software development engineer in test",
+    "sde manager",
+    "manager, sde",
     "sdet",
 )
 ENGINEERING_TITLE_TERMS = (
@@ -168,6 +178,7 @@ ENGINEERING_TITLE_TERMS = (
     "sre",
     "devops",
     "member of technical staff",
+    "sde",
 )
 RESEARCH_ONLY_TERMS = (
     "research scientist",
@@ -176,10 +187,27 @@ RESEARCH_ONLY_TERMS = (
     "machine learning researcher",
 )
 DATA_ANALYST_TERMS = ("data analyst", "business analyst", "analytics analyst")
+JUNIOR_TITLE_PATTERNS = (
+    r"\b(?:junior|jr\.?)\b",
+    r"\bentry[- ]level\b",
+    r"\b(?:new|recent)[- ]grad(?:uate)?\b",
+    r"\bgraduate\s+(?:backend|full[- ]stack|platform|software|systems?)\s+"
+    r"(?:developer|engineer)\b",
+    r"\b(?:developer|engineer)\s*(?:[-–—,/:()]\s*)graduate\b",
+)
+QUALITY_ENGINEERING_TITLE_PATTERNS = (
+    r"\b(?:software (?:development )?engineer|software developer)\b.{0,40}"
+    r"\b(?:qa|quality(?: assurance)?|test(?: automation|ing)?)\b",
+    r"\b(?:qa|quality(?: assurance)?|test(?: automation|ing)?)\b.{0,40}"
+    r"\b(?:software engineer|software developer)\b",
+)
 NON_OPENING_CONTEXT_PATTERNS = (
     r"\bjoin\s+(?:our|the)\s+(?:contractor|freelance)\s+(?:pool|network)\b",
     r"\b(?:contractor|freelance)\s+network\b.{0,240}\bproject\s+invitations?\b",
     r"\bproject\s+invitations?\b.{0,160}\bwhen\s+they\s+arise\b",
+    r"\bnot\s+(?:a|an|the)\s+(?:job|opening|position|role)\s+(?:that\s+)?we(?:'re|\s+are)?\s+currently\s+hiring\s+for\b",
+    r"\bwe(?:'re|\s+are)\s+not\s+currently\s+hiring\s+for\s+(?:a|the|this)\s+(?:job|opening|position|role)\b",
+    r"\baccepting\s+(?:applications?|resumes?)\s+for\s+(?:a\s+)?(?:potential\s+)?future\s+(?:job|opening|opportunit(?:y|ies)|position|role)\b",
 )
 
 
@@ -442,26 +470,46 @@ def _has_any_signal(text: str, terms: tuple[str, ...]) -> bool:
     return any(_has_signal(text, term) for term in terms)
 
 
+def _has_any_title_term(text: str, terms: tuple[str, ...]) -> bool:
+    """Match exclusion terms as complete title tokens instead of substrings."""
+    for term in terms:
+        phrase = re.escape(term).replace(r"\ ", r"\s+")
+        if re.search(rf"(?<![a-z0-9]){phrase}(?![a-z0-9])", text):
+            return True
+    return False
+
+
 def classify_role_text(title: str, context: str = "") -> RoleClassification:
     title_text = title.lower()
     combined = f"{title} {context}".lower()
     is_full_stack = _has_any_signal(combined, FULL_STACK_TERMS)
     is_full_stack_title = _has_any_signal(title_text, FULL_STACK_TERMS)
     has_backend_signal = _has_any_signal(combined, BACKEND_ROLE_TERMS)
+    has_backend_title_signal = _has_any_signal(title_text, BACKEND_ROLE_TERMS)
     has_software_signal = _has_any_signal(title_text, SOFTWARE_ROLE_TERMS)
     has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS)
     is_founding = _has_any_signal(title_text, FOUNDING_TERMS)
     has_frontend_signal = _has_any_signal(combined, FRONTEND_TERMS)
     has_frontend_only_title = _has_any_signal(title_text, FRONTEND_ONLY_TITLE_TERMS)
 
-    if _has_any_signal(title_text, EXCLUDED_ROLE_TERMS):
+    if _first_pattern_match(title_text, JUNIOR_TITLE_PATTERNS):
+        return RoleClassification("exclude", ["Junior or entry-level role is outside senior lane"])
+    if _has_any_title_term(title_text, EXCLUDED_ROLE_TERMS):
         return RoleClassification("exclude", ["Non-engineering or junior/intern role"])
-    if _has_any_signal(title_text, EXCLUDED_ENGINEERING_TITLE_TERMS):
+    if _has_any_title_term(title_text, ENGINEERING_DOMAIN_MODIFIER_TERMS) and not (
+        has_software_signal or is_full_stack_title or has_backend_title_signal
+    ):
+        return RoleClassification(
+            "exclude", ["Business-domain role lacks an explicit software/backend title"]
+        )
+    if _has_any_title_term(title_text, EXCLUDED_ENGINEERING_TITLE_TERMS):
         return RoleClassification("exclude", ["Engineering-adjacent role is outside the IC SWE lane"])
+    if _first_pattern_match(title_text, QUALITY_ENGINEERING_TITLE_PATTERNS):
+        return RoleClassification("exclude", ["QA/test role is outside the IC SWE lane"])
     if has_frontend_only_title and not is_full_stack_title:
         return RoleClassification("exclude", ["Frontend-only title is outside backend/SWE focus"])
     if _first_pattern_match(combined, NON_OPENING_CONTEXT_PATTERNS):
-        return RoleClassification("exclude", ["Listing is a contractor pool, not a current opening"])
+        return RoleClassification("exclude", ["Listing is not a current opening"])
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
         return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
     if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
@@ -919,6 +967,13 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     global_location_signal = _first_pattern_match(
         primary_location_scope, _GLOBAL_REMOTE_LOCATION_PATTERNS
     )
+    title_remote_signal = _title_work_arrangement_remote_match(title_raw) is not None
+    restricted_title_remote_scope = _title_remote_region_match(
+        title_raw, _RESTRICTED_REGION_PATTERNS
+    )
+    regional_title_remote_scope = _title_remote_region_match(
+        title_raw, _REGIONAL_UNCONFIRMED_PATTERNS
+    )
 
     global_match = _first_pattern_match(descriptive_evidence, _GLOBAL_REMOTE_CLAIM_PATTERNS)
     role_remote_match = _first_pattern_match(
@@ -927,6 +982,7 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     remote_signal = bool(
         location_is_remote
         or structured.remote
+        or title_remote_signal
         or global_location_signal
         or global_match
         or role_remote_match
@@ -956,7 +1012,7 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
 
     restricted_title_scope = _title_region_only_match(
         title_raw, _RESTRICTED_REGION_PATTERNS
-    )
+    ) or restricted_title_remote_scope
     if restricted_title_scope and remote_signal:
         return _remote_result(
             "restricted_remote",
@@ -966,12 +1022,20 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
 
     regional_title_scope = _title_region_only_match(
         title_raw, _REGIONAL_UNCONFIRMED_PATTERNS
-    )
+    ) or regional_title_remote_scope
     if regional_title_scope and remote_signal:
         return _remote_result(
             "regional_unconfirmed",
             "Job title explicitly limits the remote role to a broad region",
             _evidence("title restriction", regional_title_scope),
+        )
+
+    legal_work_countries = _legal_work_country_list(description_raw)
+    if legal_work_countries and remote_signal and not legal_work_countries[1]:
+        return _remote_result(
+            "restricted_remote",
+            "Posting limits legal work authorization to enumerated countries outside Pakistan",
+            _evidence("legal work countries", legal_work_countries[0]),
         )
 
     remote_negation = _first_pattern_match(description, _REMOTE_NEGATION_PATTERNS)
@@ -1095,12 +1159,19 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     pakistan_match = _first_pattern_match(
         descriptive_evidence, _PAKISTAN_ELIGIBILITY_PATTERNS
     )
-    if remote_signal and (re.search(r"\bpakistan\b", location_scope) or pakistan_match):
+    if remote_signal and (
+        re.search(r"\bpakistan\b", location_scope)
+        or pakistan_match
+        or (legal_work_countries and legal_work_countries[1])
+    ):
         return _remote_result(
             "pakistan_explicit",
             "Remote eligibility explicitly names Pakistan",
             _evidence("location", location_raw) if "pakistan" in location else "",
             _evidence("eligibility", pakistan_match or ""),
+            _evidence("legal work countries", legal_work_countries[0])
+            if legal_work_countries and legal_work_countries[1]
+            else "",
         )
 
     if global_primary_location or _is_unambiguously_global_remote_location(
@@ -1174,11 +1245,54 @@ def _title_region_only_match(title: str, region_patterns: tuple[str, ...]) -> st
             (
                 rf"(?:{region})\s*(?:[-:/]\s*)?only\b",
                 rf"\bonly\s+(?:(?:in|within|for)\s+)?(?:the\s+)?(?:{region})",
+                rf"(?:{region})[- ]based\b",
+                rf"\bbased\s+(?:in|within)\s+(?:the\s+)?(?:{region})",
             ),
         )
         if match:
             return match
     return None
+
+
+def _title_remote_region_match(
+    title: str, region_patterns: tuple[str, ...]
+) -> str | None:
+    if _title_work_arrangement_remote_match(title) is None:
+        return None
+    for region in region_patterns:
+        match = _first_pattern_match(
+            title,
+            (
+                rf"(?:{region})[-–—,/|:()\[\]\s]*remote\b",
+                rf"\bremote[-–—,/|:()\[\]\s]*(?:the\s+)?(?:{region})"
+                rf"(?:\s*[)\]])?",
+            ),
+        )
+        if match:
+            return match
+    return None
+
+
+_SEMANTIC_REMOTE_TITLE_PATTERNS = (
+    r"\bremote[- ]+(?:access|build|control|diagnostics?|monitoring|operations|"
+    r"sensing|service|support)\b",
+)
+
+
+def _title_work_arrangement_remote_match(title: str) -> str | None:
+    work_arrangement_text = title
+    for pattern in _SEMANTIC_REMOTE_TITLE_PATTERNS:
+        work_arrangement_text = re.sub(
+            pattern, "", work_arrangement_text, flags=re.IGNORECASE
+        )
+    return _first_pattern_match(
+        work_arrangement_text,
+        (
+            r"^\s*remote\b",
+            r"(?:[-–—|:/,(\[]\s*)remote\b",
+            r"\bremote\s*(?:[-–—|:/,)\]]|$)",
+        ),
+    )
 
 
 def _has_global_remote_claim(text: str) -> bool:
@@ -1268,6 +1382,45 @@ _UNRESTRICTED_GLOBAL_DESTINATION_PATTERNS = (
     r"\banywhere\b(?!\s+(?:in|within|across)\b)",
     r"\b(?:worldwide|world wide|globally|any\s+country)\b",
 )
+
+_LEGAL_WORK_COUNTRY_LIST_PREFIX_PATTERN = re.compile(
+    r"\b(?:all\s+)?(?:applicants?|candidates?)\s+must\s+be\s+legally\s+authori[sz]ed"
+    r"\s+to\s+work\s+in\s+(?:one\s+of\s+)?(?:the\s+)?following\s+countries\s*:\s*",
+    flags=re.IGNORECASE,
+)
+_LEGAL_WORK_COUNTRY_LIST_SECTION_BOUNDARY = re.compile(
+    r"(?:</(?:div|li|p|ul)>|\n|\s+(?=(?:about(?:\s+us)?|benefits|equal\s+opportunity|"
+    r"how\s+we|our\s+(?:company|culture|mission|team)|please|responsibilities|the\s+role|"
+    r"we\s+(?:are|believe|have|offer)|what\s+(?:to\s+expect|we|you)|who\s+we|you\s+will)\b))",
+    flags=re.IGNORECASE,
+)
+_COUNTRY_LIST_PERIOD_ABBREVIATIONS = re.compile(
+    r"\b(?:u\.s\.a|u\.a\.e|e\.u|u\.k|u\.s|st)\.", flags=re.IGNORECASE
+)
+
+
+def _legal_work_country_list(text: str) -> tuple[str, bool] | None:
+    prefix = _LEGAL_WORK_COUNTRY_LIST_PREFIX_PATTERN.search(text)
+    if not prefix:
+        return None
+    remainder = text[prefix.end() : prefix.end() + 500]
+    # Greenhouse flattens block and list HTML to spaces. Protect common dotted country aliases,
+    # then stop at the first real sentence delimiter or recognizable section transition. This
+    # prevents a later company-history mention of Pakistan from becoming part of the legal list.
+    protected = _COUNTRY_LIST_PERIOD_ABBREVIATIONS.sub(
+        lambda match: match.group(0).replace(".", "\u2024"), remainder
+    )
+    delimiter = re.search(r"[.!?;]", protected)
+    section_boundary = _LEGAL_WORK_COUNTRY_LIST_SECTION_BOUNDARY.search(protected)
+    boundary_candidates = [
+        match.start() for match in (delimiter, section_boundary) if match is not None
+    ]
+    end = min(boundary_candidates, default=len(remainder))
+    countries = re.sub(r"<[^>]+>", " ", remainder[:end])
+    countries = re.sub(r"\s+", " ", countries).strip(" .,:-")
+    if not countries:
+        return None
+    return countries, bool(re.search(r"\bpakistan\b", countries, flags=re.IGNORECASE))
 
 
 def _generic_location_restriction_match(text: str) -> str | None:

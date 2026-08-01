@@ -291,11 +291,17 @@ Inspect active canonical jobs without profile/contact data:
 uv run python scripts/generate_job_opportunities.py --limit 50
 ```
 
-Measure the full canonical funnel and write a conservative application queue. The JSON keeps all
-matching company/title clusters and their posting-variant distributions; the CSV includes only
-`pakistan_explicit` and `global_explicit` evidence. `regional_unconfirmed`, `remote_unclear`,
-geographically restricted, onsite, and no-evidence roles remain measurable but are not presented
-as directly actionable.
+Measure the full canonical funnel and write two application-research queues. The JSON keeps all
+matching company/title clusters and their posting-variant distributions.
+
+- `actionable_job_clusters.csv` remains strict: only `pakistan_explicit` and `global_explicit`.
+- `remote_role_leads.csv` unions the primary backend/platform lane with explicit full-stack and
+  software-engineering titles. It separates remote work arrangement from geographic eligibility
+  and places `remote_unclear` and `regional_unconfirmed` rows in verification tiers.
+
+Geographically restricted, onsite, no-remote-evidence, and active-government-clearance-required
+roles are excluded from both CSVs. Verification tiers are research leads, not claims that a
+candidate in Pakistan can apply.
 
 ```bash
 uv run python scripts/analyze_job_funnel.py \
