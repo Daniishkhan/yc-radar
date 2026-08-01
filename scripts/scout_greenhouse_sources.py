@@ -21,7 +21,7 @@ import httpx
 from sqlalchemy import select
 
 from yc_radar.services.company_registry import CompanyRegistry
-from yc_radar.services.commoncrawl_greenhouse import deduplicate_candidate_rows
+from yc_radar.services.commoncrawl_greenhouse import CRAWL_RE, deduplicate_candidate_rows
 from yc_radar.services.database import career_sources_table, companies_table, engine_from_url
 from yc_radar.services.greenhouse_scout import (
     SCOUT_USER_AGENT,
@@ -45,6 +45,12 @@ OUTPUT_FIELDS = [
     "canonical_source_url",
     "example_observed_url",
     "observation_count",
+    "first_observed_at",
+    "last_observed_at",
+    "first_seen_crawl",
+    "last_seen_crawl",
+    "crawl_count",
+    "crawl_ids",
     "verification_status",
     "http_status",
     "board_name",
@@ -61,6 +67,17 @@ OUTPUT_FIELDS = [
     "error",
     "checked_at",
 ]
+CRAWL_PROVENANCE_FIELDS = frozenset(
+    {
+        "first_observed_at",
+        "last_observed_at",
+        "first_seen_crawl",
+        "last_seen_crawl",
+        "crawl_count",
+        "crawl_ids",
+    }
+)
+REQUIRED_RESUME_FIELDS = set(OUTPUT_FIELDS).difference(CRAWL_PROVENANCE_FIELDS)
 
 
 def parse_args() -> argparse.Namespace:
@@ -249,7 +266,7 @@ def ensure_checkpoint_manifest(
 def load_resume_rows(path: Path) -> dict[str, dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as source:
         rows = list(csv.DictReader(source))
-    if rows and set(OUTPUT_FIELDS) - set(rows[0]):
+    if rows and REQUIRED_RESUME_FIELDS - set(rows[0]):
         return {}
     return {
         row["board_token"].strip().lower(): row
@@ -366,8 +383,8 @@ def apply_registration(
             discovered_from_url=candidate["example_observed_url"],
             evidence={
                 "discovery_provider": "commoncrawl_url_index",
-                "crawl": crawl,
                 "observation_count": int(candidate.get("observation_count") or 0),
+                **candidate_crawl_provenance(candidate, fallback_crawl=crawl),
                 "verified_company_name": evidence.company_name,
                 "verified_job_count": evidence.job_count,
                 "website_evidence": website,
@@ -435,6 +452,12 @@ def result_row(candidate: dict[str, str], evidence, resolution) -> dict[str, Any
         "canonical_source_url": candidate["canonical_source_url"],
         "example_observed_url": candidate["example_observed_url"],
         "observation_count": candidate.get("observation_count") or "",
+        "first_observed_at": candidate.get("first_observed_at") or "",
+        "last_observed_at": candidate.get("last_observed_at") or "",
+        "first_seen_crawl": candidate.get("first_seen_crawl") or "",
+        "last_seen_crawl": candidate.get("last_seen_crawl") or "",
+        "crawl_count": candidate.get("crawl_count") or "",
+        "crawl_ids": candidate.get("crawl_ids") or "",
         "verification_status": evidence.verification_status,
         "http_status": evidence.http_status if evidence.http_status is not None else "",
         "board_name": evidence.company_name or "",
@@ -451,6 +474,78 @@ def result_row(candidate: dict[str, str], evidence, resolution) -> dict[str, Any
         "error": resolution.reason or evidence.error or "",
         "checked_at": datetime.now(UTC).isoformat(),
     }
+
+
+def candidate_crawl_provenance(
+    candidate: dict[str, str],
+    *,
+    fallback_crawl: str | None,
+) -> dict[str, Any]:
+    raw_crawl_ids = str(candidate.get("crawl_ids") or "").strip()
+    if raw_crawl_ids:
+        try:
+            parsed_crawl_ids = json.loads(raw_crawl_ids)
+        except json.JSONDecodeError as exc:
+            raise ValueError("crawl_ids must be a JSON array") from exc
+        if not isinstance(parsed_crawl_ids, list) or not parsed_crawl_ids:
+            raise ValueError("crawl_ids must be a non-empty JSON array")
+        crawl_ids = sorted({str(value) for value in parsed_crawl_ids}, key=crawl_sort_key)
+        if len(crawl_ids) != len(parsed_crawl_ids):
+            raise ValueError("crawl_ids must contain unique crawl IDs")
+    elif fallback_crawl:
+        crawl_ids = [fallback_crawl]
+    else:
+        crawl_ids = []
+
+    first_seen = str(candidate.get("first_seen_crawl") or "").strip()
+    last_seen = str(candidate.get("last_seen_crawl") or "").strip()
+    raw_count = str(candidate.get("crawl_count") or "").strip()
+    if crawl_ids:
+        expected_first = crawl_ids[0]
+        expected_last = crawl_ids[-1]
+        if first_seen and first_seen != expected_first:
+            raise ValueError("first_seen_crawl does not match crawl_ids")
+        if last_seen and last_seen != expected_last:
+            raise ValueError("last_seen_crawl does not match crawl_ids")
+        if raw_count:
+            try:
+                crawl_count = int(raw_count)
+            except ValueError as exc:
+                raise ValueError("crawl_count must be a positive integer") from exc
+            if crawl_count != len(crawl_ids):
+                raise ValueError("crawl_count does not match crawl_ids")
+        else:
+            crawl_count = len(crawl_ids)
+    else:
+        crawl_count = 0
+        if first_seen or last_seen or raw_count:
+            raise ValueError("crawl summary fields require crawl_ids or a single-crawl filename")
+
+    provenance: dict[str, Any] = {}
+    for field in ("first_observed_at", "last_observed_at"):
+        if candidate.get(field):
+            provenance[field] = candidate[field]
+    if crawl_ids:
+        provenance.update(
+            {
+                "first_seen_crawl": crawl_ids[0],
+                "last_seen_crawl": crawl_ids[-1],
+                "crawl_count": crawl_count,
+                "crawl_ids": crawl_ids,
+            }
+        )
+        if len(crawl_ids) == 1:
+            provenance["crawl"] = crawl_ids[0]
+    else:
+        provenance["crawl"] = fallback_crawl
+    return provenance
+
+
+def crawl_sort_key(crawl_id: str) -> tuple[int, int]:
+    if not CRAWL_RE.fullmatch(crawl_id):
+        raise ValueError(f"invalid crawl ID: {crawl_id!r}")
+    _, _, year, week = crawl_id.split("-")
+    return int(year), int(week)
 
 
 def write_csv_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -484,8 +579,8 @@ def print_progress(processed: int, selected: int, rows: list[dict[str, Any]]) ->
 
 
 def crawl_from_path(path: Path) -> str | None:
-    match = re.search(r"CC-MAIN-\d{4}-\d{2}", path.name)
-    return match.group(0) if match else None
+    matches = re.findall(r"CC-MAIN-\d{4}-\d{2}", path.name)
+    return matches[0] if len(matches) == 1 else None
 
 
 if __name__ == "__main__":

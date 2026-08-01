@@ -1,7 +1,9 @@
-import importlib.util
 import argparse
 import csv
+import importlib.util
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,3 +88,128 @@ def test_checkpoint_manifest_fails_closed_when_the_input_changes(tmp_path: Path)
 
     with pytest.raises(SystemExit, match="checkpoint manifest does not match"):
         scout.ensure_checkpoint_manifest(args, [candidate("other")])
+
+
+def test_union_crawl_provenance_is_preserved_in_scout_rows_and_registration_evidence() -> None:
+    union_candidate = {
+        **candidate(),
+        "example_observed_url": "https://boards.greenhouse.io/acme/jobs/1",
+        "observation_count": "9",
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": "2",
+        "crawl_ids": json.dumps(["CC-MAIN-2026-21", "CC-MAIN-2026-30"]),
+    }
+    evidence = SimpleNamespace(
+        verification_status="verified",
+        http_status=200,
+        company_name="Acme",
+        job_count=3,
+        external_job_origins=(),
+        board_page_origin=None,
+        cache_source="network",
+        attempt_count=1,
+        error=None,
+    )
+    resolution = SimpleNamespace(
+        status="unresolved_no_domain",
+        company_id=None,
+        website_candidate=None,
+        reason=None,
+    )
+
+    row = scout.result_row(union_candidate, evidence, resolution)
+    provenance = scout.candidate_crawl_provenance(
+        union_candidate, fallback_crawl=None
+    )
+
+    assert {field: row[field] for field in scout.OUTPUT_FIELDS[4:10]} == {
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": "2",
+        "crawl_ids": '["CC-MAIN-2026-21", "CC-MAIN-2026-30"]',
+    }
+    assert provenance == {
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": 2,
+        "crawl_ids": ["CC-MAIN-2026-21", "CC-MAIN-2026-30"],
+    }
+
+
+def test_union_crawl_provenance_fails_closed_on_inconsistent_summary() -> None:
+    inconsistent = {
+        "crawl_ids": '["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+        "crawl_count": "1",
+    }
+
+    with pytest.raises(ValueError, match="crawl_count does not match"):
+        scout.candidate_crawl_provenance(inconsistent, fallback_crawl=None)
+
+
+def test_apply_registration_writes_union_crawl_provenance(monkeypatch) -> None:
+    captured: dict = {}
+
+    class FakeJobSourceRegistry:
+        def __init__(self, _engine) -> None:
+            pass
+
+        def register_url(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(career_source_id=8, created=True)
+
+    monkeypatch.setattr(scout, "JobSourceRegistry", FakeJobSourceRegistry)
+    union_candidate = {
+        **candidate(),
+        "example_observed_url": "https://boards.greenhouse.io/acme/jobs/1",
+        "observation_count": "9",
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": "2",
+        "crawl_ids": '["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+    }
+    row: dict = {}
+    evidence = SimpleNamespace(
+        board_token="acme",
+        company_name="Acme",
+        job_count=3,
+    )
+    resolution = SimpleNamespace(
+        status="existing_exact_name",
+        company_id=1,
+        website_candidate=None,
+    )
+
+    scout.apply_registration(
+        row,
+        evidence=evidence,
+        resolution=resolution,
+        candidate=union_candidate,
+        companies=[{"id": 1}],
+        existing_sources={},
+        crawl=None,
+        engine=object(),
+    )
+
+    assert row["registration_status"] == "company_reused_source_created"
+    assert captured["evidence"] == {
+        "discovery_provider": "commoncrawl_url_index",
+        "observation_count": 9,
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": 2,
+        "crawl_ids": ["CC-MAIN-2026-21", "CC-MAIN-2026-30"],
+        "verified_company_name": "Acme",
+        "verified_job_count": 3,
+        "website_evidence": None,
+    }
