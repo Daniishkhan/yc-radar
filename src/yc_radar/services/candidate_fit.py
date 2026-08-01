@@ -283,8 +283,8 @@ _GENERIC_REMOTE_LOCATION_PATTERNS = (
     r"(?:distributed|remote) first",
 )
 _GLOBAL_REMOTE_CLAIM_PATTERNS = (
-    r"\bremote(?:ly)?\s+(?:from\s+)?(?:anywhere|worldwide|world wide|globally)\b",
-    r"\b(?:worldwide|world wide|global(?:ly)?)\s+(?:remote|distributed)(?:\s+work)?\b(?!\s+(?:colleagues?|company|employees?|members?|organisation|organization|staff|team|workforce)\b)",
+    r"\b(?:this|the)\s+(?:job|role|position|opportunity)\s+(?:is|will\s+be|can\s+be|may\s+be)\s+(?:fully\s+)?remote(?:ly)?\s+(?:from\s+)?(?:anywhere|worldwide|world wide|globally)\b",
+    r"\bwork\s+remotely\s+from\s+(?:anywhere|worldwide|world wide|any\s+country)\b",
     r"\bwork(?:ing)?\s+from\s+anywhere(?:\s+in\s+(?:the\s+)?world)?\b",
     r"\bwork(?:ing)?\s+from\s+any\s+(?:country|location)\b",
     r"\b(?:job|role|position|work)\s+(?:can|may)\s+be\s+performed\s+from\s+any\s+(?:country|location|place)\b",
@@ -857,6 +857,7 @@ def _evidence(label: str, value: str, *, limit: int = 240) -> str:
 
 
 def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
+    title_raw = str(job.get("title") or "").strip()
     location_raw = str(job.get("location") or "").strip()
     description_raw = str(job.get("description_text") or "").strip()
     location = location_raw.casefold()
@@ -927,6 +928,26 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             "restricted_remote",
             "Remote eligibility is explicitly narrower than worldwide",
             _evidence("restriction", global_limitation),
+        )
+
+    restricted_title_scope = _title_region_only_match(
+        title_raw, _RESTRICTED_REGION_PATTERNS
+    )
+    if restricted_title_scope and remote_signal:
+        return _remote_result(
+            "restricted_remote",
+            "Job title explicitly limits the remote role to a region outside Pakistan",
+            _evidence("title restriction", restricted_title_scope),
+        )
+
+    regional_title_scope = _title_region_only_match(
+        title_raw, _REGIONAL_UNCONFIRMED_PATTERNS
+    )
+    if regional_title_scope and remote_signal:
+        return _remote_result(
+            "regional_unconfirmed",
+            "Job title explicitly limits the remote role to a broad region",
+            _evidence("title restriction", regional_title_scope),
         )
 
     remote_negation = _first_pattern_match(description, _REMOTE_NEGATION_PATTERNS)
@@ -1122,6 +1143,20 @@ def _matches_any_pattern(text: str, patterns: tuple[str, ...]) -> bool:
     return _first_pattern_match(text, patterns) is not None
 
 
+def _title_region_only_match(title: str, region_patterns: tuple[str, ...]) -> str | None:
+    for region in region_patterns:
+        match = _first_pattern_match(
+            title,
+            (
+                rf"(?:{region})\s*(?:[-:/]\s*)?only\b",
+                rf"\bonly\s+(?:(?:in|within|for)\s+)?(?:the\s+)?(?:{region})",
+            ),
+        )
+        if match:
+            return match
+    return None
+
+
 def _has_global_remote_claim(text: str) -> bool:
     return _first_pattern_match(text, _GLOBAL_REMOTE_CLAIM_PATTERNS) is not None
 
@@ -1203,6 +1238,12 @@ _GENERIC_LOCATION_RESTRICTION_PATTERNS = (
     r"\b(?:we\s+)?can\s+only\s+(?:hire|employ)\b.{0,60}",
 )
 
+_UNRESTRICTED_GLOBAL_DESTINATION_PATTERNS = (
+    r"\banywhere\s+in\s+(?:the\s+)?world\b",
+    r"\banywhere\b(?!\s+(?:in|within|across)\b)",
+    r"\b(?:worldwide|world wide|globally|any\s+country)\b",
+)
+
 
 def _generic_location_restriction_match(text: str) -> str | None:
     match = _first_pattern_match(text, _GENERIC_LOCATION_RESTRICTION_PATTERNS)
@@ -1212,7 +1253,9 @@ def _generic_location_restriction_match(text: str) -> str | None:
         return None
     if _matches_any_pattern(match, _REGIONAL_UNCONFIRMED_PATTERNS):
         return None
-    if _has_global_remote_claim(match):
+    if _has_global_remote_claim(match) or _matches_any_pattern(
+        match, _UNRESTRICTED_GLOBAL_DESTINATION_PATTERNS
+    ):
         return None
     return match
 

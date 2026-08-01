@@ -388,6 +388,48 @@ def test_greenhouse_global_location_qualifiers_and_marketing_stay_conservative()
     assert distributed_members.status == "remote_unclear"
 
 
+def test_remote_global_text_requires_role_eligibility_not_company_history() -> None:
+    for description in (
+        "Intentionally remote and globally distributed across six continents.",
+        "We operate as a globally distributed team.",
+        "Our history includes thousands of professionals working remotely worldwide.",
+    ):
+        result = classify_remote_eligibility(
+            {"location": "Remote", "description_text": description}
+        )
+        assert result.status == "remote_unclear", description
+
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "Remote",
+                "description_text": "Work remotely from anywhere in the world.",
+            }
+        ).status
+        == "global_explicit"
+    )
+
+
+def test_title_region_only_overrides_global_remote_location() -> None:
+    restricted = classify_remote_eligibility(
+        {
+            "title": "QA Lead Engineer (Europe only)",
+            "location": "Global - Remote",
+        }
+    )
+    assert restricted.status == "restricted_remote"
+    assert restricted.evidence == ["title restriction: Europe only"]
+
+    regional = classify_remote_eligibility(
+        {
+            "title": "QA Lead Engineer (APAC-only)",
+            "location": "Global - Remote",
+        }
+    )
+    assert regional.status == "regional_unconfirmed"
+    assert regional.evidence == ["title restriction: APAC-only"]
+
+
 def test_structured_remote_restrictions_override_global_description_boilerplate() -> None:
     global_boilerplate = "We are a global team, and employees can work from anywhere."
 
