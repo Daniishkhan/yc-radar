@@ -36,6 +36,13 @@ def test_role_classifier_possible_for_backend_heavy_full_stack_and_founding_role
 
 def test_role_classifier_excludes_non_backend_role_lanes() -> None:
     assert classify_role_text("Frontend Engineer").status == "exclude"
+    assert (
+        classify_role_text(
+            "Contract Senior Front End Engineer",
+            "Build platform integrations and backend APIs",
+        ).status
+        == "exclude"
+    )
     assert classify_role_text("Product Designer").status == "exclude"
     assert classify_role_text("Sales Lead").status == "exclude"
     assert classify_role_text("Software Engineering Intern").status == "exclude"
@@ -47,6 +54,34 @@ def test_role_classifier_excludes_non_backend_role_lanes() -> None:
         == "exclude"
     )
     assert classify_role_text("Solutions Engineer", "Build integrations").status == "exclude"
+    assert (
+        classify_role_text(
+            "Senior Software Development Engineer in Test",
+            "Test a distributed API platform",
+        ).status
+        == "exclude"
+    )
+    assert (
+        classify_role_text("Community Engineer", "Support the Ubuntu software community").status
+        == "exclude"
+    )
+
+
+def test_role_classifier_keeps_backend_heavy_web_and_full_stack_titles() -> None:
+    assert (
+        classify_role_text(
+            "Contract Senior Web Engineer",
+            "Architect PHP services, APIs, and backend systems",
+        ).status
+        == "strong"
+    )
+    assert (
+        classify_role_text(
+            "Senior Full Stack Engineer",
+            "Own backend APIs, Postgres, and React clients",
+        ).status
+        == "possible"
+    )
 
 
 def test_role_classifier_marks_frontend_heavy_full_stack_as_weak() -> None:

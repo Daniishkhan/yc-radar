@@ -101,6 +101,14 @@ FRONTEND_TERMS = (
     "react engineer",
     "design engineer",
 )
+FRONTEND_ONLY_TITLE_TERMS = (
+    "frontend",
+    "front end",
+    "front-end",
+    "ui engineer",
+    "react engineer",
+    "design engineer",
+)
 EXCLUDED_ROLE_TERMS = (
     "designer",
     "product designer",
@@ -147,6 +155,10 @@ EXCLUDED_ENGINEERING_TITLE_TERMS = (
     "vice president of engineering",
     "developer advocate",
     "developer relations",
+    "community engineer",
+    "software engineer in test",
+    "software development engineer in test",
+    "sdet",
 )
 ENGINEERING_TITLE_TERMS = (
     "engineer",
@@ -428,16 +440,20 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     title_text = title.lower()
     combined = f"{title} {context}".lower()
     is_full_stack = _has_any_signal(combined, FULL_STACK_TERMS)
+    is_full_stack_title = _has_any_signal(title_text, FULL_STACK_TERMS)
     has_backend_signal = _has_any_signal(combined, BACKEND_ROLE_TERMS)
     has_software_signal = _has_any_signal(title_text, SOFTWARE_ROLE_TERMS)
     has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS)
     is_founding = _has_any_signal(title_text, FOUNDING_TERMS)
     has_frontend_signal = _has_any_signal(combined, FRONTEND_TERMS)
+    has_frontend_only_title = _has_any_signal(title_text, FRONTEND_ONLY_TITLE_TERMS)
 
     if _has_any_signal(title_text, EXCLUDED_ROLE_TERMS):
         return RoleClassification("exclude", ["Non-engineering or junior/intern role"])
     if _has_any_signal(title_text, EXCLUDED_ENGINEERING_TITLE_TERMS):
         return RoleClassification("exclude", ["Engineering-adjacent role is outside the IC SWE lane"])
+    if has_frontend_only_title and not is_full_stack_title:
+        return RoleClassification("exclude", ["Frontend-only title is outside backend/SWE focus"])
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
         return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
     if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
