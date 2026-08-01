@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import signal
 import tempfile
 from collections import Counter
@@ -22,6 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from yc_radar.adapters.greenhouse import GreenhouseAdapter
 from yc_radar.services.company_registry import CompanyRegistry
+from yc_radar.services.commoncrawl_greenhouse import CRAWL_RE
 from yc_radar.services.database import career_sources_table, companies_table, engine_from_url
 from yc_radar.services.google_domain_resolver import (
     DEFAULT_LOCATION,
@@ -53,6 +55,12 @@ OUTPUT_FIELDS = [
     "canonical_source_url",
     "example_observed_url",
     "observation_count",
+    "first_observed_at",
+    "last_observed_at",
+    "first_seen_crawl",
+    "last_seen_crawl",
+    "crawl_count",
+    "crawl_ids",
     "verification_status",
     "board_name",
     "job_count",
@@ -87,6 +95,15 @@ OUTPUT_FIELDS = [
     "error",
     "checked_at",
 ]
+CRAWL_PROVENANCE_FIELDS = (
+    "first_observed_at",
+    "last_observed_at",
+    "first_seen_crawl",
+    "last_seen_crawl",
+    "crawl_count",
+    "crawl_ids",
+)
+REQUIRED_RESUME_FIELDS = set(OUTPUT_FIELDS).difference(CRAWL_PROVENANCE_FIELDS)
 RETRYABLE_RESULT_STATUSES = frozenset({"request_failed", "quota_exhausted"})
 SUCCESSFUL_REGISTRATION_STATUSES = frozenset(
     {
@@ -428,9 +445,19 @@ def load_candidates(path: Path) -> list[dict[str, str]]:
             )
         row["board_token"] = token
         row["canonical_source_url"] = expected_url
+        row.update(
+            normalized_crawl_provenance(
+                row,
+                fallback_crawl=crawl_from_path(path),
+            )
+        )
         prior = by_token.get(token)
         if prior is not None:
-            identity_fields = ("canonical_source_url", "board_name")
+            identity_fields = (
+                "canonical_source_url",
+                "board_name",
+                *CRAWL_PROVENANCE_FIELDS,
+            )
             if any(prior[field] != row[field] for field in identity_fields):
                 raise ValueError(f"conflicting eligible scout rows for board token: {token}")
             continue
@@ -441,7 +468,15 @@ def load_candidates(path: Path) -> list[dict[str, str]]:
 
 def ensure_checkpoint_manifest(args: argparse.Namespace, selected: list[dict[str, str]]) -> None:
     selected_identity = "\n".join(
-        f"{row['board_token']}\t{row['board_name']}\t{row['canonical_source_url']}"
+        "\t".join(
+            str(row.get(field) or "")
+            for field in (
+                "board_token",
+                "board_name",
+                "canonical_source_url",
+                *CRAWL_PROVENANCE_FIELDS,
+            )
+        )
         for row in selected
     ).encode()
     payload = {
@@ -481,7 +516,7 @@ def load_resume_rows(path: Path) -> dict[str, dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
         rows = list(reader)
-        if set(OUTPUT_FIELDS) - set(reader.fieldnames or ()):
+        if REQUIRED_RESUME_FIELDS - set(reader.fieldnames or ()):
             return {}
     by_token: dict[str, dict[str, str]] = {}
     for row in rows:
@@ -506,6 +541,16 @@ def can_resume_row(
         for field in ("board_token", "canonical_source_url", "board_name")
     ):
         return False
+    try:
+        row_provenance = normalized_crawl_provenance(row, fallback_crawl=None)
+        candidate_provenance = normalized_crawl_provenance(
+            candidate,
+            fallback_crawl=None,
+        )
+    except ValueError:
+        return False
+    if row_provenance != candidate_provenance:
+        return False
     if str(row.get("retryable") or "").strip().lower() in {"1", "true", "yes"}:
         return False
     if row.get("domain_resolution_status") in RETRYABLE_RESULT_STATUSES:
@@ -525,11 +570,13 @@ def can_resume_row(
 
 
 def result_row(candidate: dict[str, str], result: DomainResolutionResult) -> dict[str, Any]:
+    provenance = normalized_crawl_provenance(candidate, fallback_crawl=None)
     return {
         "board_token": candidate["board_token"],
         "canonical_source_url": candidate["canonical_source_url"],
         "example_observed_url": candidate.get("example_observed_url", ""),
         "observation_count": candidate.get("observation_count", ""),
+        **provenance,
         "verification_status": candidate["verification_status"],
         "board_name": candidate["board_name"],
         "job_count": candidate.get("job_count", ""),
@@ -639,6 +686,8 @@ def apply_registration(
             discovered_from_url=candidate.get("example_observed_url") or None,
             evidence={
                 "discovery_provider": "vertex_google_search",
+                "observation_count": int(candidate.get("observation_count") or 0),
+                **registration_crawl_provenance(candidate),
                 "google_candidate_is_identity_proof": False,
                 "deterministic_brand_and_reciprocal_link": True,
                 "accepted_domain": result.accepted_domain,
@@ -689,6 +738,12 @@ def validate_apply_invariants(
         raise ValueError("apply candidate canonical source URL does not match board token")
     if row.get("board_token") != token or row.get("canonical_source_url") != canonical_url:
         raise ValueError("accepted row identity does not match apply candidate")
+    expected_provenance = normalized_crawl_provenance(candidate, fallback_crawl=None)
+    if any(
+        str(row.get(field) or "") != expected_provenance[field]
+        for field in CRAWL_PROVENANCE_FIELDS
+    ):
+        raise ValueError("accepted row does not preserve candidate crawl provenance")
 
     accepted_domain = result.accepted_domain
     if not accepted_domain or acceptable_company_domain(accepted_domain) != accepted_domain:
@@ -748,6 +803,135 @@ def parse_non_negative_job_count(value: Any) -> int:
     if job_count < 0:
         raise ValueError("job_count must be a non-negative integer")
     return job_count
+
+
+def normalized_crawl_provenance(
+    candidate: dict[str, Any],
+    *,
+    fallback_crawl: str | None,
+) -> dict[str, str]:
+    """Validate and canonicalize optional union or legacy single-crawl evidence."""
+
+    first_observed_raw = str(candidate.get("first_observed_at") or "").strip()
+    last_observed_raw = str(candidate.get("last_observed_at") or "").strip()
+    if bool(first_observed_raw) != bool(last_observed_raw):
+        raise ValueError("first_observed_at and last_observed_at must be supplied together")
+    first_observed = (
+        parsed_provenance_timestamp(first_observed_raw, field="first_observed_at")
+        if first_observed_raw
+        else None
+    )
+    last_observed = (
+        parsed_provenance_timestamp(last_observed_raw, field="last_observed_at")
+        if last_observed_raw
+        else None
+    )
+    if first_observed is not None and last_observed is not None and first_observed > last_observed:
+        raise ValueError("first_observed_at is after last_observed_at")
+
+    raw_crawl_ids = str(candidate.get("crawl_ids") or "").strip()
+    if raw_crawl_ids:
+        try:
+            parsed_crawl_ids = json.loads(raw_crawl_ids)
+        except json.JSONDecodeError as exc:
+            raise ValueError("crawl_ids must be a JSON array") from exc
+        if not isinstance(parsed_crawl_ids, list) or not parsed_crawl_ids:
+            raise ValueError("crawl_ids must be a non-empty JSON array")
+        crawl_ids = sorted(
+            {str(value) for value in parsed_crawl_ids},
+            key=crawl_sort_key,
+        )
+        if len(crawl_ids) != len(parsed_crawl_ids):
+            raise ValueError("crawl_ids must contain unique crawl IDs")
+    elif fallback_crawl:
+        crawl_ids = [fallback_crawl]
+    else:
+        crawl_ids = []
+
+    first_seen = str(candidate.get("first_seen_crawl") or "").strip()
+    last_seen = str(candidate.get("last_seen_crawl") or "").strip()
+    raw_count = str(candidate.get("crawl_count") or "").strip()
+    if crawl_ids:
+        expected_first = crawl_ids[0]
+        expected_last = crawl_ids[-1]
+        if first_seen and first_seen != expected_first:
+            raise ValueError("first_seen_crawl does not match crawl_ids")
+        if last_seen and last_seen != expected_last:
+            raise ValueError("last_seen_crawl does not match crawl_ids")
+        if raw_count:
+            try:
+                crawl_count = int(raw_count)
+            except ValueError as exc:
+                raise ValueError("crawl_count must be a positive integer") from exc
+            if crawl_count < 1:
+                raise ValueError("crawl_count must be a positive integer")
+            if crawl_count != len(crawl_ids):
+                raise ValueError("crawl_count does not match crawl_ids")
+        else:
+            crawl_count = len(crawl_ids)
+    else:
+        crawl_count = 0
+        if first_seen or last_seen or raw_count:
+            raise ValueError("crawl summary fields require crawl_ids or a single-crawl filename")
+
+    return {
+        "first_observed_at": format_provenance_timestamp(first_observed),
+        "last_observed_at": format_provenance_timestamp(last_observed),
+        "first_seen_crawl": crawl_ids[0] if crawl_ids else "",
+        "last_seen_crawl": crawl_ids[-1] if crawl_ids else "",
+        "crawl_count": str(crawl_count) if crawl_ids else "",
+        "crawl_ids": json.dumps(crawl_ids, separators=(",", ":")) if crawl_ids else "",
+    }
+
+
+def registration_crawl_provenance(candidate: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalized_crawl_provenance(candidate, fallback_crawl=None)
+    provenance: dict[str, Any] = {
+        field: normalized[field]
+        for field in ("first_observed_at", "last_observed_at")
+        if normalized[field]
+    }
+    if normalized["crawl_ids"]:
+        crawl_ids = json.loads(normalized["crawl_ids"])
+        provenance.update(
+            {
+                "first_seen_crawl": normalized["first_seen_crawl"],
+                "last_seen_crawl": normalized["last_seen_crawl"],
+                "crawl_count": int(normalized["crawl_count"]),
+                "crawl_ids": crawl_ids,
+            }
+        )
+        if len(crawl_ids) == 1:
+            provenance["crawl"] = crawl_ids[0]
+    return provenance
+
+
+def parsed_provenance_timestamp(value: str, *, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def format_provenance_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def crawl_sort_key(crawl_id: str) -> tuple[int, int]:
+    if not CRAWL_RE.fullmatch(crawl_id):
+        raise ValueError(f"invalid crawl ID: {crawl_id!r}")
+    _, _, year, week = crawl_id.split("-")
+    return int(year), int(week)
+
+
+def crawl_from_path(path: Path) -> str | None:
+    matches = re.findall(r"CC-MAIN-\d{4}-\d{2}", path.name)
+    return matches[0] if len(matches) == 1 else None
 
 
 def accepted_proof(result: DomainResolutionResult) -> list[dict[str, Any]]:

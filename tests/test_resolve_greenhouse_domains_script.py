@@ -7,6 +7,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,8 +41,11 @@ def scout_row(token: str = "acme", **overrides: str) -> dict[str, str]:
 
 
 def write_scout_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = list(scout_row())
+    for row in rows:
+        fieldnames.extend(field for field in row if field not in fieldnames)
     with path.open("w", newline="", encoding="utf-8") as target:
-        writer = csv.DictWriter(target, fieldnames=list(scout_row()))
+        writer = csv.DictWriter(target, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -139,6 +143,102 @@ def test_load_candidates_canonicalizes_matching_greenhouse_url(tmp_path: Path) -
 
     assert rows[0]["board_token"] == "acme"
     assert rows[0]["canonical_source_url"] == "https://job-boards.greenhouse.io/acme"
+
+
+def test_union_provenance_survives_loading_and_resolver_csv(tmp_path: Path) -> None:
+    path = tmp_path / "scout.csv"
+    write_scout_csv(
+        path,
+        [
+            scout_row(
+                first_observed_at="2026-05-08T00:00:00Z",
+                last_observed_at="2026-07-12T00:00:00+00:00",
+                first_seen_crawl="CC-MAIN-2026-21",
+                last_seen_crawl="CC-MAIN-2026-30",
+                crawl_count="2",
+                crawl_ids='["CC-MAIN-2026-30", "CC-MAIN-2026-21"]',
+            )
+        ],
+    )
+
+    candidate = resolver_script.load_candidates(path)[0]
+    expected = {
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": "2",
+        "crawl_ids": '["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+    }
+    assert {field: candidate[field] for field in expected} == expected
+
+    result = DomainResolutionResult(
+        status="unresolved",
+        model="gemini-3.5-flash-lite",
+        location="global",
+    )
+    row = resolver_script.result_row(candidate, result)
+    output = tmp_path / "result.csv"
+    resolver_script.write_csv_atomic(output, [row])
+    with output.open(newline="", encoding="utf-8") as source:
+        written = next(csv.DictReader(source))
+    assert {field: written[field] for field in expected} == expected
+
+
+def test_legacy_single_crawl_input_derives_crawl_summary_from_filename(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "scout_CC-MAIN-2026-30.csv"
+    write_scout_csv(path, [scout_row()])
+
+    candidate = resolver_script.load_candidates(path)[0]
+
+    assert candidate["first_observed_at"] == ""
+    assert candidate["last_observed_at"] == ""
+    assert candidate["first_seen_crawl"] == "CC-MAIN-2026-30"
+    assert candidate["last_seen_crawl"] == "CC-MAIN-2026-30"
+    assert candidate["crawl_count"] == "1"
+    assert candidate["crawl_ids"] == '["CC-MAIN-2026-30"]'
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"crawl_ids": "not-json"}, "crawl_ids must be a JSON array"),
+        ({"crawl_ids": '["CC-MAIN-invalid"]'}, "invalid crawl ID"),
+        (
+            {
+                "crawl_ids": '["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+                "crawl_count": "1",
+            },
+            "crawl_count does not match crawl_ids",
+        ),
+        (
+            {
+                "crawl_ids": '["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+                "first_seen_crawl": "CC-MAIN-2026-30",
+            },
+            "first_seen_crawl does not match crawl_ids",
+        ),
+        (
+            {
+                "first_observed_at": "2026-07-12T00:00:00Z",
+                "last_observed_at": "2026-05-08T00:00:00Z",
+            },
+            "first_observed_at is after last_observed_at",
+        ),
+    ],
+)
+def test_load_candidates_rejects_invalid_union_provenance(
+    tmp_path: Path,
+    overrides: dict[str, str],
+    error: str,
+) -> None:
+    path = tmp_path / "scout.csv"
+    write_scout_csv(path, [scout_row(**overrides)])
+
+    with pytest.raises(ValueError, match=error):
+        resolver_script.load_candidates(path)
 
 
 @pytest.mark.parametrize(
@@ -248,6 +348,41 @@ def test_resume_retries_request_failures_and_apply_pending_acceptance() -> None:
     assert (
         resolver_script.can_resume_row(
             {**row, "domain_resolution_status": "request_failed"},
+            candidate=candidate,
+            apply=False,
+        )
+        is False
+    )
+
+
+def test_resume_identity_includes_union_crawl_provenance() -> None:
+    provenance = {
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": "2",
+        "crawl_ids": '["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+    }
+    candidate = {**scout_row(), **provenance}
+    row = {
+        **candidate,
+        "domain_resolution_status": "unresolved",
+        "registration_status": "not_requested",
+    }
+
+    assert resolver_script.can_resume_row(row, candidate=candidate, apply=False) is True
+    assert (
+        resolver_script.can_resume_row(
+            {**row, "first_observed_at": "2026-05-09T00:00:00Z"},
+            candidate=candidate,
+            apply=False,
+        )
+        is False
+    )
+    assert (
+        resolver_script.can_resume_row(
+            {**row, "crawl_ids": '["CC-MAIN-2026-21"]'},
             candidate=candidate,
             apply=False,
         )
@@ -624,6 +759,54 @@ def test_apply_registration_rechecks_identity_and_accepted_proof() -> None:
     )
     assert stripped_proof_row["registration_status"] == "registration_failed"
     assert "does not preserve the validated result proof" in stripped_proof_row["error"]
+
+
+def test_apply_registration_writes_union_provenance_to_source_evidence(monkeypatch) -> None:
+    captured: dict = {}
+
+    class FakeJobSourceRegistry:
+        def __init__(self, _engine) -> None:
+            pass
+
+        def register_url(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(career_source_id=8, created=True)
+
+    monkeypatch.setattr(resolver_script, "JobSourceRegistry", FakeJobSourceRegistry)
+    candidate = scout_row(
+        first_observed_at="2026-05-08T00:00:00Z",
+        last_observed_at="2026-07-12T00:00:00Z",
+        first_seen_crawl="CC-MAIN-2026-21",
+        last_seen_crawl="CC-MAIN-2026-30",
+        crawl_count="2",
+        crawl_ids='["CC-MAIN-2026-21","CC-MAIN-2026-30"]',
+    )
+    result = accepted_result()
+    row = resolver_script.result_row(candidate, result)
+
+    resolver_script.apply_registration(
+        row,
+        result=result,
+        candidate=candidate,
+        companies=[{"id": 42, "name": "Acme", "primary_domain": "acme.test"}],
+        existing_sources={},
+        engine=object(),
+    )
+
+    assert row["registration_status"] == "company_reused_source_created"
+    expected_provenance = {
+        "first_observed_at": "2026-05-08T00:00:00Z",
+        "last_observed_at": "2026-07-12T00:00:00Z",
+        "first_seen_crawl": "CC-MAIN-2026-21",
+        "last_seen_crawl": "CC-MAIN-2026-30",
+        "crawl_count": 2,
+        "crawl_ids": ["CC-MAIN-2026-21", "CC-MAIN-2026-30"],
+    }
+    assert captured["evidence"]["observation_count"] == 3
+    assert all(
+        captured["evidence"].get(field) == value
+        for field, value in expected_provenance.items()
+    )
 
 
 @pytest.mark.parametrize("job_count", ["-1", "not-a-number"])
