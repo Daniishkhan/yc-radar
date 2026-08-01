@@ -21,6 +21,7 @@ class NormalizedJob(BaseModel):
     source_published_at: datetime | None = None
     source_updated_at: datetime | None = None
     content_hash: str
+    structured_evidence: dict[str, Any] = Field(default_factory=dict)
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -30,6 +30,10 @@ from yc_radar.services.run_status import (
 from yc_radar.services.source_discovery import discover_job_sources
 
 
+TERMINAL_CHECKPOINT_STATES = frozenset({"completed", "terminal_failed"})
+PERMANENT_HTTP_FAILURES = frozenset({400, 401, 403, 404, 410})
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discover or sync read-only public job sources.")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -141,16 +145,24 @@ def main() -> None:
         results = asyncio.run(sync_sources(engine, args))
         unsuccessful = [result for result in results if result.status != "completed"]
         batch_checkpoint = read_status(getattr(args, "checkpoint_file", None))
-        batch_incomplete = bool(
-            batch_checkpoint
-            and any(
-                entry.get("state") != "completed"
-                for entry in batch_checkpoint.get("sources", {}).values()
-            )
+        checkpoint_summary = (
+            summarize_sync_checkpoint(batch_checkpoint, max_attempts=args.max_attempts)
+            if batch_checkpoint
+            else None
         )
+        batch_incomplete = bool(checkpoint_summary and checkpoint_summary["retryable"])
+        selected = int(checkpoint_summary["selected"]) if checkpoint_summary else len(results)
+        processed = int(checkpoint_summary["processed"]) if checkpoint_summary else len(results)
+        succeeded = (
+            int(checkpoint_summary["succeeded"])
+            if checkpoint_summary
+            else len(results) - len(unsuccessful)
+        )
+        failed = int(checkpoint_summary["failed"]) if checkpoint_summary else len(unsuccessful)
         print(
             f"Processed {len(results)} {args.provider or 'supported'} sources; "
-            f"non-completed runs: {len(unsuccessful)}; batch_incomplete={batch_incomplete}."
+            f"non-completed runs: {len(unsuccessful)}; batch_incomplete={batch_incomplete}; "
+            f"checkpoint_succeeded={succeeded}; checkpoint_failed={failed}."
         )
         for result in results:
             print(
@@ -161,15 +173,29 @@ def main() -> None:
             status_file,
             stage_finished(
                 status,
-                state="completed" if not unsuccessful and not batch_incomplete else "partial",
-                selected=len(results),
-                processed=len(results),
-                succeeded=len(results) - len(unsuccessful),
-                failed=len(unsuccessful),
-                source_run_statuses={result.status: sum(item.status == result.status for item in results) for result in results},
+                state="completed" if not batch_incomplete and not failed else "partial",
+                selected=selected,
+                processed=processed,
+                succeeded=succeeded,
+                failed=failed,
+                retryable=int(checkpoint_summary["retryable"]) if checkpoint_summary else 0,
+                terminal_failures=int(checkpoint_summary["terminal_failures"])
+                if checkpoint_summary
+                else 0,
+                exhausted_failures=int(checkpoint_summary["exhausted_failures"])
+                if checkpoint_summary
+                else 0,
+                source_run_statuses={
+                    result.status: sum(item.status == result.status for item in results)
+                    for result in results
+                },
             ),
         )
-        if unsuccessful or batch_incomplete:
+        # A checkpointed batch is process-complete once every source either succeeded,
+        # failed permanently, or exhausted its bounded attempts. The source failures
+        # remain explicit in the checkpoint/status and never apply lifecycle changes,
+        # but they must not make systemd restart an empty batch forever.
+        if batch_incomplete or (batch_checkpoint is None and unsuccessful):
             raise SystemExit(1)
     except Exception as exc:
         write_status(status_file, stage_finished(status, state="failed", error=exc))
@@ -221,12 +247,31 @@ async def sync_sources(
             source_ids=[int(source["id"]) for source in sources],
         )
         source_by_id = {int(source["id"]): source for source in sources}
+        unavailable_changed = mark_unavailable_checkpoint_sources(
+            checkpoint,
+            available_source_ids=set(source_by_id),
+        )
+        if unavailable_changed:
+            write_status(checkpoint_file, checkpoint)
+            write_sync_stage_checkpoint(
+                getattr(args, "status_file", None),
+                checkpoint,
+                max_attempts=max_attempts,
+            )
         pending_ids = [
             source_id
             for source_id in checkpoint["source_ids"]
-            if checkpoint["sources"].get(str(source_id), {}).get("state") != "completed"
-            and int(checkpoint["sources"].get(str(source_id), {}).get("attempts") or 0)
-            < max_attempts
+            if (
+                checkpoint["sources"].get(str(source_id), {}).get("state") == "running"
+                or (
+                    checkpoint["sources"].get(str(source_id), {}).get("state")
+                    not in TERMINAL_CHECKPOINT_STATES
+                    and int(
+                        checkpoint["sources"].get(str(source_id), {}).get("attempts") or 0
+                    )
+                    < max_attempts
+                )
+            )
         ]
         if args.limit is not None:
             pending_ids = pending_ids[: args.limit]
@@ -299,7 +344,21 @@ async def sync_sources(
         fetched_source = True
         results.append(result)
         if source_state is not None:
-            source_state["state"] = result.status
+            retryable, diagnostics = sync_result_retryability(
+                repository,
+                career_source_id=source_id,
+                run_key=run_key,
+                result=result,
+            )
+            source_state["state"] = (
+                "completed"
+                if result.status == "completed"
+                else result.status
+                if retryable
+                else "terminal_failed"
+            )
+            source_state["retryable"] = retryable
+            source_state["diagnostics"] = diagnostics
             source_state["result"] = sync_result_counts(result)
             write_status(checkpoint_file, checkpoint)
             write_sync_stage_checkpoint(
@@ -308,6 +367,39 @@ async def sync_sources(
                 max_attempts=max_attempts,
             )
     return results
+
+
+def mark_unavailable_checkpoint_sources(
+    checkpoint: dict,
+    *,
+    available_source_ids: set[int],
+) -> bool:
+    """Terminate frozen source entries that are no longer active in the registry.
+
+    Checkpoint source sets are immutable, while operators may explicitly disable a
+    career source between attempts. Without this transition, a disabled source stays
+    pending forever and every detached restart becomes an empty retry loop.
+    """
+    changed = False
+    for source_id in checkpoint.get("source_ids", []):
+        if int(source_id) in available_source_ids:
+            continue
+        entry = checkpoint.get("sources", {}).get(str(source_id))
+        if not isinstance(entry, dict) or entry.get("state") in TERMINAL_CHECKPOINT_STATES:
+            continue
+        entry.update(
+            {
+                "state": "terminal_failed",
+                "retryable": False,
+                "diagnostics": {
+                    "reason": "career_source_not_active",
+                    "career_source_id": int(source_id),
+                },
+                "error": "career source is no longer active in the frozen batch scope",
+            }
+        )
+        changed = True
+    return changed
 
 
 async def sync_one_source(
@@ -419,6 +511,73 @@ def sync_result_counts(result: SyncResult) -> dict[str, int | str]:
     }
 
 
+def sync_result_retryability(
+    repository: JobRepository,
+    *,
+    career_source_id: int,
+    run_key: str,
+    result: SyncResult,
+) -> tuple[bool, dict[str, object]]:
+    """Return whether a failed attempt merits another process-level attempt.
+
+    Provider adapters already perform bounded request-level retries. A missing or
+    forbidden public board is therefore terminal for this immutable batch; transient
+    transport, rate-limit, 5xx, and valid-HTTP partial failures remain retryable.
+    """
+    with repository.engine.connect() as connection:
+        run = repository.get_run(connection, career_source_id, run_key)
+    if run is None:
+        return True, {"reason": "sync_run_missing"}
+    errors = run.get("errors") if isinstance(run.get("errors"), list) else []
+    http_status = run.get("http_status")
+    diagnostics: dict[str, object] = {
+        "http_status": http_status,
+        "error_kinds": sorted(
+            {
+                str(error.get("kind"))
+                for error in errors
+                if isinstance(error, dict) and error.get("kind")
+            }
+        ),
+    }
+    if result.status == "completed":
+        return False, diagnostics
+    if isinstance(http_status, int) and http_status in PERMANENT_HTTP_FAILURES:
+        diagnostics["reason"] = "permanent_http_status"
+        return False, diagnostics
+    diagnostics["reason"] = "retryable_or_unclassified_failure"
+    return True, diagnostics
+
+
+def summarize_sync_checkpoint(checkpoint: dict, *, max_attempts: int) -> dict[str, int]:
+    entries = list(checkpoint.get("sources", {}).values())
+    succeeded = sum(entry.get("state") == "completed" for entry in entries)
+    terminal_failures = sum(entry.get("state") == "terminal_failed" for entry in entries)
+    exhausted_failures = sum(
+        entry.get("state") in {"failed", "partial"}
+        and int(entry.get("attempts") or 0) >= max_attempts
+        for entry in entries
+    )
+    retryable = sum(
+        entry.get("state") == "running"
+        or (
+            entry.get("state") not in TERMINAL_CHECKPOINT_STATES
+            and int(entry.get("attempts") or 0) < max_attempts
+        )
+        for entry in entries
+    )
+    processed = sum(entry.get("state") != "pending" for entry in entries)
+    return {
+        "selected": len(entries),
+        "processed": processed,
+        "succeeded": succeeded,
+        "failed": terminal_failures + exhausted_failures,
+        "terminal_failures": terminal_failures,
+        "exhausted_failures": exhausted_failures,
+        "retryable": retryable,
+    }
+
+
 def write_sync_stage_checkpoint(
     status_file: Path | None,
     checkpoint: dict,
@@ -426,22 +585,20 @@ def write_sync_stage_checkpoint(
     max_attempts: int,
 ) -> None:
     prior = read_status(status_file) or stage_started("ats_sync")
-    entries = list(checkpoint["sources"].values())
-    states = [entry.get("state") for entry in entries]
+    summary = summarize_sync_checkpoint(checkpoint, max_attempts=max_attempts)
     write_status(
         status_file,
         stage_checkpoint(
             prior,
-            selected=len(states),
-            processed=sum(state != "pending" for state in states),
-            succeeded=states.count("completed"),
-            failed=sum(
-                state in {"failed", "partial"}
-                and int(entry.get("attempts") or 0) >= max_attempts
-                for state, entry in zip(states, entries, strict=True)
-            ),
+            selected=summary["selected"],
+            processed=summary["processed"],
+            succeeded=summary["succeeded"],
+            failed=summary["failed"],
+            retryable=summary["retryable"],
+            terminal_failures=summary["terminal_failures"],
+            exhausted_failures=summary["exhausted_failures"],
             batch_key=checkpoint["batch_key"],
-            checkpointed_sources=len(states),
+            checkpointed_sources=summary["selected"],
         ),
     )
 

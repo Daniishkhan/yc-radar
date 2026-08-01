@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -233,58 +233,14 @@ SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
 )
 
 REGION_MATCH_TERMS = ("remote", "pakistan", "india", "asia", "south asia", "mena", "middle east")
-REMOTE_GLOBAL_TERMS = (
-    "remote worldwide",
-    "worldwide remote",
-    "remote world wide",
-    "world wide remote",
-    "work from anywhere",
-    "anywhere in the world",
-    "globally remote",
-    "global remote",
-    "remote anywhere",
-    "remote - anywhere",
-)
-REMOTE_PAKISTAN_COMPATIBLE_TERMS = (
-    "pakistan",
-    "south asia",
-    "asia pacific",
-    "apac",
-)
-REMOTE_RESTRICTED_LOCATION_TERMS = (
-    "united states",
-    "u.s.",
-    "usa",
-    "canada",
-    "north america",
-    "latin america",
-    "latam",
-    "europe",
-    "european union",
-    "united kingdom",
-    "uk only",
-    "australia",
-    "singapore",
-    "india",
-    "emea",
-    "americas",
-)
-REMOTE_DESCRIPTION_TERMS = (
-    "remote role",
-    "remote position",
-    "position is remote",
-    "role is remote",
-    "work remotely",
-    "fully remote",
-    "can be remote",
-    "may be remote",
-)
 REMOTE_ELIGIBILITY_ORDER = {
-    "global_remote": 0,
-    "pakistan_compatible": 1,
-    "remote_unclear": 2,
-    "restricted_remote": 3,
-    "not_remote": 4,
+    "pakistan_explicit": 0,
+    "global_explicit": 1,
+    "regional_unconfirmed": 2,
+    "remote_unclear": 3,
+    "restricted_remote": 4,
+    "onsite_explicit": 5,
+    "no_remote_evidence": 6,
 }
 MAX_MATCHING_JOB_DETAILS = 25
 
@@ -301,6 +257,7 @@ class CandidateScore:
 class RemoteEligibility:
     status: str
     reasons: list[str]
+    evidence: list[str] = field(default_factory=list)
 
 
 _GLOBAL_REMOTE_LOCATION_PATTERNS = (
@@ -316,8 +273,101 @@ _GLOBAL_REMOTE_LOCATION_PATTERNS = (
 _GENERIC_REMOTE_LOCATION_PATTERNS = (
     r"remote",
     r"fully remote",
+    r"100 percent remote",
     r"remote (?:eligible|first|optional|position|role|work)",
     r"(?:distributed|remote) first",
+)
+_GLOBAL_REMOTE_CLAIM_PATTERNS = (
+    r"\bremote(?:ly)?\s+(?:from\s+)?(?:anywhere|worldwide|world wide|globally)\b",
+    r"\b(?:worldwide|world wide|global(?:ly)?)\s+(?:remote|distributed)(?:\s+work)?\b",
+    r"\bwork(?:ing)?\s+from\s+anywhere(?:\s+in\s+(?:the\s+)?world)?\b",
+    r"\bwork(?:ing)?\s+from\s+any\s+(?:country|location)\b",
+    r"\b(?:job|role|position|work)\s+(?:can|may)\s+be\s+performed\s+from\s+any\s+(?:country|location|place)\b",
+    r"\bwork\s+(?:from\s+)?wherever\s+you\s+(?:are|live)\b",
+    r"\b(?:based|located)\s+anywhere(?:\s+in\s+(?:the\s+)?world)?\b",
+    r"\bopen\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:anywhere|worldwide|globally)\b",
+    r"\bopen\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:in|from)\s+any\s+country\b",
+    r"\b(?:hire|hiring|employ)\s+(?:people|employees?|candidates?|talent)?\s*(?:from|in)\s+(?:anywhere|any\s+country|the\s+world|worldwide|globally)\b",
+    r"\b(?:eligible|supported)\s+(?:countries|locations|regions)\b.{0,80}\b(?:worldwide|anywhere|all\s+countries)\b",
+    r"\blocation[- ](?:agnostic|independent)\b",
+    r"\bno\s+(?:geographic|geographical|location|country)\s+restrictions\b",
+)
+_ROLE_REMOTE_CLAIM_PATTERNS = (
+    r"\b(?:this|the)\s+(?:job|role|position|opportunity)\s+(?:is|will\s+be|can\s+be|may\s+be)\s+(?:a\s+)?(?:fully\s+|100%\s+)?remote\b",
+    r"\bthis\s+is\s+(?:a\s+)?(?:fully\s+|100%\s+)?remote\s+(?:job|role|position|opportunity)\b",
+    r"\b(?:fully\s+|100%\s+)?remote[- ](?:job|role|position|opportunity)\b",
+    r"\bwork(?:ing)?\s+(?:fully\s+)?remotely\b",
+    r"\b(?:can|may|will)\s+(?:work|be\s+performed)\s+remotely\b",
+    r"\b(?:home[- ]based|telecommut(?:e|ing))\s+(?:job|role|position|opportunity)\b",
+    r"\bfully\s+distributed\s+(?:job|role|position|opportunity|workforce)\b",
+    r"\blocation[- ]flexible\s+(?:job|role|position|opportunity)\b",
+)
+_ONSITE_CLAIM_PATTERNS = (
+    r"\b(?:on[- ]?site|in[- ]office|office[- ]based)\b",
+    r"\b(?:this|the)\s+(?:job|role|position)\s+is\s+hybrid\b",
+    r"\b(?:must|required\s+to)\s+(?:work|be)\s+(?:from|in|at)\s+(?:the\s+)?office\b",
+)
+_REMOTE_NEGATION_PATTERNS = (
+    r"\b(?:this|the)\s+(?:job|role|position|opportunity)\s+is\s+not\s+remote\b",
+    r"\bnot\s+a\s+remote\s+(?:job|role|position|opportunity)\b",
+    r"\bremote(?:\s+work)?\s+(?:is\s+)?not\s+(?:available|offered|supported|permitted|an\s+option)\b",
+)
+_GLOBAL_SCOPE_LIMITATION_PATTERNS = (
+    r"\bnot\s+(?:a\s+)?(?:remote\s+)?(?:worldwide|world wide|global(?:ly)?)(?:\s+remote)?\b",
+    r"\bremote\s+(?:but\s+)?not\s+(?:worldwide|world wide|global(?:ly)?)\b",
+    r"\b(?:worldwide|world wide|global(?:ly)?)\s+remote\s+(?:is\s+)?not\s+(?:available|offered|supported)\b",
+    r"\b(?:work\s+from\s+)?anywhere\s+(?:in|within|across)\s+(?!the\s+world\b|worldwide\b|any\s+country\b)[a-z][a-z .'-]{0,60}",
+    r"\b(?:anywhere|worldwide|world wide|global(?:ly)?)\b.{0,80}\b(?:except|excluding|other\s+than|but\s+not)\b",
+    r"\b(?:supported|approved|eligible)\s+(?:countries|locations)\s+only\b",
+    r"\b(?:countries|locations)\s+where\s+we\s+(?:have|operate|can\s+hire|can\s+employ)\b",
+    r"\bwhere\s+we\s+have\s+(?:an?\s+)?(?:entity|payroll|office)\b",
+)
+_PAKISTAN_EXCLUSION_PATTERNS = (
+    r"\b(?:except|excluding|excludes?|excluded|other\s+than|but\s+not)\b.{0,60}\bpakistan\b",
+    r"\b(?:not\s+available|not\s+open)\s+(?:to|in|from)\b.{0,50}\bpakistan\b",
+    r"\b(?:do\s+not|cannot|can't|unable\s+to)\s+(?:hire|employ|accept)\b.{0,60}\bpakistan\b",
+    r"\bpakistan\b.{0,50}\b(?:not|isn't|is\s+not|are\s+not)\s+(?:eligible|supported|included|available|permitted)\b",
+    r"\b(?:must\s+not|cannot)\s+(?:be\s+)?(?:based|located|reside|live)\s+in\s+pakistan\b",
+)
+_PAKISTAN_ELIGIBILITY_PATTERNS = (
+    r"\b(?:remote|work\s+remotely|working\s+remotely)\s+(?:from|in)\s+pakistan\b",
+    r"\bpakistan[- ,/]*(?:based\s+)?(?:remote|eligible|supported|accepted)\b",
+    r"\b(?:candidates?|applicants?|employees?|contractors?)\s+(?:based|located|living|residing)\s+in\s+pakistan\b",
+    r"\b(?:open|available)\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:in|from)\s+pakistan\b",
+    r"\b(?:hire|hiring|employ)\s+(?:people|employees?|candidates?|talent)?\s*(?:in|from)\s+pakistan\b",
+    r"\b(?:eligible|supported)\s+(?:countries|locations|regions)\b.{0,100}\bpakistan\b",
+)
+_REGIONAL_UNCONFIRMED_PATTERNS = (
+    r"\bapac\b",
+    r"\basia[- ]pacific\b",
+    r"\bsouth\s+asia\b",
+    r"\basia\b",
+)
+_RESTRICTED_REGION_PATTERNS = (
+    r"\b(?:the\s+)?united\s+states\b",
+    r"\bu\.?s\.?(?:a\.)?\b",
+    r"\bcontiguous\s+(?:united\s+states|u\.?s\.?)\b",
+    r"\bcanada\b",
+    r"\bnorth\s+america\b",
+    r"\blatin\s+america\b",
+    r"\blatam\b",
+    r"\beurope(?:an\s+union)?\b",
+    r"\beu\b",
+    r"\b(?:the\s+)?united\s+kingdom\b",
+    r"\bu\.?k\.?\b",
+    r"\baustralia\b",
+    r"\bsingapore\b",
+    r"\bindia\b",
+    r"\bjapan\b",
+    r"\bnew\s+zealand\b",
+    r"\bphilippines\b",
+    r"\bemea\b",
+    r"\bamericas\b",
+)
+_TIMEZONE_CONSTRAINT_PATTERNS = (
+    r"\b(?:utc|gmt)\s*[+-]\s*\d{1,2}(?::\d{2})?\b",
+    r"\b(?:u\.?s\.?|european|japan|australia|apac)\s+(?:business\s+)?(?:hours|time\s+zones?)\b",
+    r"\b(?:time\s+zones?|hours)\s+(?:between|within|overlapping)\b.{0,60}\b(?:utc|gmt)\b",
 )
 
 
@@ -469,6 +519,52 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return result
 
 
+def _normalise_job_title(title: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+#]+", " ", title.casefold())).strip()
+
+
+def _canonical_job_cluster_key(job: dict[str, Any], fallback_index: int) -> str:
+    title_key = _normalise_job_title(str(job.get("title") or ""))
+    if title_key:
+        return title_key
+    provider = str(job.get("provider") or "unknown")
+    external_job_id = str(job.get("external_job_id") or fallback_index)
+    return f"{provider}:{external_job_id}"
+
+
+def _cluster_matching_job_provenance(
+    classifications: list[tuple[str, RoleClassification, dict[str, Any] | None]],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for index, (title, classification, job) in enumerate(classifications):
+        if job is None or classification.status not in {"strong", "possible"}:
+            continue
+        key = _normalise_job_title(title) or _canonical_job_cluster_key(job, index)
+        groups.setdefault(key, []).append(_canonical_job_provenance(job))
+
+    clusters: list[dict[str, Any]] = []
+    for variants in groups.values():
+        representative = min(
+            variants,
+            key=lambda item: (
+                REMOTE_ELIGIBILITY_ORDER.get(str(item["remote_eligibility"]), 99),
+                str(item.get("provider") or ""),
+                str(item.get("external_job_id") or ""),
+            ),
+        )
+        status_distribution: dict[str, int] = {}
+        for variant in variants:
+            status = str(variant["remote_eligibility"])
+            status_distribution[status] = status_distribution.get(status, 0) + 1
+
+        cluster = dict(representative)
+        cluster["posting_variant_count"] = len(variants)
+        cluster["remote_eligibility_distribution"] = status_distribution
+        cluster["posting_variants"] = variants
+        clusters.append(cluster)
+    return clusters
+
+
 def role_focus_record(
     company: Company,
     *,
@@ -542,11 +638,7 @@ def role_focus_record(
         target_role_lane = "Outside backend/SWE focus"
         application_angle = "Do not prioritize for the backend/SWE shortlist."
 
-    matching_provenance_all = [
-        _canonical_job_provenance(job)
-        for title, classification, job in classifications
-        if job is not None and classification.status in {"strong", "possible"} and title
-    ]
+    matching_provenance_all = _cluster_matching_job_provenance(classifications)
     remote_counts: dict[str, int] = {}
     for job in matching_provenance_all:
         remote_status = str(job["remote_eligibility"])
@@ -554,9 +646,8 @@ def role_focus_record(
     best_remote = min(
         remote_counts,
         key=lambda status: REMOTE_ELIGIBILITY_ORDER.get(status, 99),
-        default="not_remote",
+        default="no_remote_evidence",
     )
-    matching_provenance = matching_provenance_all[:MAX_MATCHING_JOB_DETAILS]
     canonical_classifications = [
         (title, classification)
         for title, classification, job in classifications
@@ -565,22 +656,57 @@ def role_focus_record(
     canonical_role_status = (
         _best_status(canonical_classifications) if canonical_classifications else "none"
     )
+    canonical_jobs_all = canonical_jobs or []
+    canonical_active_cluster_count = len(
+        {
+            _canonical_job_cluster_key(job, index)
+            for index, job in enumerate(canonical_jobs_all)
+        }
+    )
+    canonical_raw_active_count = len(canonical_jobs_all)
+    canonical_raw_matching_count = sum(
+        1
+        for _, classification, job in classifications
+        if job is not None and classification.status in {"strong", "possible"}
+    )
     return {
         "target_role_lane": target_role_lane,
         "matching_job_titles": _dedupe_preserve_order(matching_titles)[:MAX_MATCHING_JOB_DETAILS],
-        "canonical_active_job_count": len(canonical_jobs or []),
+        "canonical_active_job_count": canonical_active_cluster_count,
+        "canonical_raw_active_job_count": canonical_raw_active_count,
+        "canonical_duplicate_posting_count": (
+            canonical_raw_active_count - canonical_active_cluster_count
+        ),
         "canonical_matching_job_count": len(matching_provenance_all),
+        "canonical_raw_matching_job_count": canonical_raw_matching_count,
+        "canonical_duplicate_matching_job_count": (
+            canonical_raw_matching_count - len(matching_provenance_all)
+        ),
         "canonical_role_match_status": canonical_role_status,
-        "canonical_matching_jobs": matching_provenance,
-        "matching_job_provenance": matching_provenance,
+        "canonical_matching_jobs": matching_provenance_all,
+        "matching_job_provenance": matching_provenance_all,
         "best_remote_eligibility": best_remote,
-        "globally_remote_matching_job_count": remote_counts.get("global_remote", 0),
+        "pakistan_explicit_matching_job_count": remote_counts.get(
+            "pakistan_explicit", 0
+        ),
+        "global_explicit_matching_job_count": remote_counts.get("global_explicit", 0),
+        "regional_unconfirmed_matching_job_count": remote_counts.get(
+            "regional_unconfirmed", 0
+        ),
+        "remote_unclear_matching_job_count": remote_counts.get("remote_unclear", 0),
+        # Keep the two historical field names as aliases for existing CSV consumers.
+        "globally_remote_matching_job_count": remote_counts.get("global_explicit", 0),
         "pakistan_compatible_matching_job_count": remote_counts.get(
-            "pakistan_compatible", 0
+            "pakistan_explicit", 0
         ),
         "remote_matching_job_count": sum(
             remote_counts.get(status, 0)
-            for status in ("global_remote", "pakistan_compatible", "remote_unclear")
+            for status in (
+                "pakistan_explicit",
+                "global_explicit",
+                "regional_unconfirmed",
+                "remote_unclear",
+            )
         ),
         "role_match_status": status,
         "role_match_reasons": _dedupe_preserve_order(reasons)[:5],
@@ -605,63 +731,308 @@ def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
         "department": job.get("department"),
         "remote_eligibility": remote.status,
         "remote_reasons": remote.reasons,
+        "remote_evidence": remote.evidence,
+        "structured_evidence": job.get("structured_evidence"),
         "source_published_at": iso(job.get("source_published_at")),
         "source_updated_at": iso(job.get("source_updated_at")),
     }
 
 
-def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
-    location = str(job.get("location") or "").lower()
-    description = str(job.get("description_text") or "").lower()
-    location_is_remote = bool(re.search(r"\bremote\b", location))
-    description_is_global = _has_global_remote_claim(description)
-    description_is_remote = any(
-        term in description for term in REMOTE_DESCRIPTION_TERMS
-    ) or description_is_global
-    if not location_is_remote and not description_is_remote:
-        return RemoteEligibility("not_remote", ["No explicit remote signal"])
+@dataclass(frozen=True)
+class _StructuredRemoteEvidence:
+    remote: bool = False
+    onsite: bool = False
+    workplace_type: str = ""
+    countries: tuple[str, ...] = ()
+    location_labels: tuple[str, ...] = ()
+    eligibility_text: str = ""
 
-    # A structured location is stronger evidence than reusable description copy. In
-    # particular, text such as "work from anywhere" must not turn Remote-US or
-    # Remote-Germany into a globally eligible role.
-    if location_is_remote and "pakistan" in location:
-        return RemoteEligibility(
-            "pakistan_compatible",
-            ["Structured location explicitly includes Pakistan"],
-        )
-    if _structured_remote_location_is_restricted(location):
-        return RemoteEligibility(
-            "restricted_remote",
-            ["Structured remote location is explicitly geographically restricted"],
-        )
-    if _is_unambiguously_global_remote_location(location):
-        return RemoteEligibility("global_remote", ["Role explicitly allows worldwide remote work"])
-    if any(term in location for term in REMOTE_PAKISTAN_COMPATIBLE_TERMS):
-        return RemoteEligibility(
-            "pakistan_compatible",
-            ["Role explicitly includes Pakistan or an APAC/South Asia region"],
-        )
 
-    if description_is_remote and location and not location_is_remote:
-        return RemoteEligibility(
-            "restricted_remote",
-            ["Posting pairs remote language with a specific non-Pakistan location"],
+def _stringify_evidence_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return " ".join(
+            part
+            for key, item in value.items()
+            if (part := f"{key} {_stringify_evidence_value(item)}".strip())
         )
-    if description_is_global:
-        return RemoteEligibility("global_remote", ["Role explicitly allows worldwide remote work"])
-    if _remote_region_claim(description, REMOTE_PAKISTAN_COMPATIBLE_TERMS):
-        return RemoteEligibility(
-            "pakistan_compatible",
-            ["Role explicitly includes Pakistan or an APAC/South Asia region"],
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(
+            part for item in value if (part := _stringify_evidence_value(item))
         )
-    if _remote_region_claim(description, REMOTE_RESTRICTED_LOCATION_TERMS):
-        return RemoteEligibility(
-            "restricted_remote",
-            ["Remote location is explicitly restricted outside Pakistan"],
-        )
+    return str(value).strip()
+
+
+def _structured_remote_evidence(job: dict[str, Any]) -> _StructuredRemoteEvidence:
+    raw = job.get("structured_evidence")
+    if not isinstance(raw, dict):
+        return _StructuredRemoteEvidence()
+
+    workplace = raw.get("workplace")
+    workplace = workplace if isinstance(workplace, dict) else {}
+    workplace_type = _normalise_remote_location(str(workplace.get("type") or ""))
+    is_remote = workplace.get("is_remote")
+    remote = workplace_type == "remote" or is_remote is True
+    onsite = workplace_type in {"hybrid", "on site", "onsite"} or is_remote is False
+
+    countries: list[str] = []
+    raw_countries = raw.get("countries")
+    if isinstance(raw_countries, list):
+        countries.extend(str(value).strip() for value in raw_countries if value)
+
+    locations: list[dict[str, Any]] = []
+    primary = raw.get("primary_location")
+    if isinstance(primary, dict):
+        locations.append(primary)
+    secondary = raw.get("secondary_locations")
+    if isinstance(secondary, list):
+        locations.extend(value for value in secondary if isinstance(value, dict))
+
+    labels: list[str] = []
+    for structured_location in locations:
+        country = str(structured_location.get("country") or "").strip()
+        label = str(structured_location.get("label") or "").strip()
+        if country:
+            countries.append(country)
+        if label:
+            labels.append(label)
+
+    eligibility_parts: list[str] = []
+    signals = raw.get("eligibility_signals")
+    if isinstance(signals, list):
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            name = str(signal.get("name") or "").strip()
+            value = _stringify_evidence_value(signal.get("value"))
+            if name or value:
+                eligibility_parts.append(f"{name} {value}".strip())
+
+    return _StructuredRemoteEvidence(
+        remote=remote,
+        onsite=onsite,
+        workplace_type=workplace_type,
+        countries=tuple(_dedupe_preserve_order(countries)),
+        location_labels=tuple(_dedupe_preserve_order(labels)),
+        eligibility_text=" ".join(eligibility_parts),
+    )
+
+
+def _remote_result(
+    status: str,
+    reason: str,
+    *evidence: str,
+) -> RemoteEligibility:
     return RemoteEligibility(
-        "remote_unclear",
-        ["Role is remote, but eligible countries are not explicit"],
+        status,
+        [reason],
+        _dedupe_preserve_order([item for item in evidence if item]),
+    )
+
+
+def _evidence(label: str, value: str, *, limit: int = 240) -> str:
+    compact = re.sub(r"\s+", " ", value).strip()
+    if not compact:
+        return ""
+    if len(compact) > limit:
+        compact = f"{compact[: limit - 1].rstrip()}…"
+    return f"{label}: {compact}"
+
+
+def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
+    location_raw = str(job.get("location") or "").strip()
+    description_raw = str(job.get("description_text") or "").strip()
+    location = location_raw.casefold()
+    description = description_raw.casefold()
+    structured = _structured_remote_evidence(job)
+    structured_labels = " | ".join(structured.location_labels).casefold()
+    countries = " | ".join(structured.countries).casefold()
+    eligibility_text = structured.eligibility_text.casefold()
+    descriptive_evidence = " ".join(
+        part for part in (description, eligibility_text) if part
+    )
+    location_scope = " | ".join(part for part in (location, structured_labels) if part)
+    location_is_remote = bool(re.search(r"\bremote\b", location_scope))
+
+    global_match = _first_pattern_match(descriptive_evidence, _GLOBAL_REMOTE_CLAIM_PATTERNS)
+    role_remote_match = _first_pattern_match(
+        descriptive_evidence, _ROLE_REMOTE_CLAIM_PATTERNS
+    )
+    remote_signal = bool(location_is_remote or structured.remote or global_match or role_remote_match)
+
+    pakistan_exclusion = _first_pattern_match(
+        " ".join((location_scope, countries, descriptive_evidence)),
+        _PAKISTAN_EXCLUSION_PATTERNS,
+    )
+    if pakistan_exclusion and remote_signal:
+        return _remote_result(
+            "restricted_remote",
+            "Pakistan is explicitly excluded from eligibility",
+            _evidence("restriction", pakistan_exclusion),
+        )
+
+    global_limitation = _first_pattern_match(
+        " ".join((location_scope, descriptive_evidence)),
+        _GLOBAL_SCOPE_LIMITATION_PATTERNS,
+    )
+    if global_limitation and remote_signal:
+        return _remote_result(
+            "restricted_remote",
+            "Remote eligibility is explicitly narrower than worldwide",
+            _evidence("restriction", global_limitation),
+        )
+
+    remote_negation = _first_pattern_match(description, _REMOTE_NEGATION_PATTERNS)
+    onsite_match = _first_pattern_match(
+        " ".join((location, description)), _ONSITE_CLAIM_PATTERNS
+    )
+    if structured.onsite or remote_negation or onsite_match:
+        workplace_evidence = (
+            _evidence("structured workplace", structured.workplace_type)
+            if structured.onsite
+            else ""
+        )
+        return _remote_result(
+            "onsite_explicit",
+            "Posting explicitly requires onsite or hybrid work",
+            workplace_evidence,
+            _evidence("onsite signal", remote_negation or onsite_match or ""),
+        )
+
+    country_values = [value.casefold() for value in structured.countries]
+    country_evidence = _evidence(
+        "structured posting countries", ", ".join(structured.countries)
+    )
+    location_only_country_evidence = ""
+    if country_values:
+        if remote_signal and any(
+            _matches_any_pattern(value, _RESTRICTED_REGION_PATTERNS)
+            for value in country_values
+        ):
+            return _remote_result(
+                "restricted_remote",
+                "Structured posting location restricts the role outside Pakistan",
+                country_evidence,
+            )
+        if remote_signal and any(
+            _matches_any_pattern(value, _REGIONAL_UNCONFIRMED_PATTERNS)
+            for value in country_values
+        ):
+            return _remote_result(
+                "regional_unconfirmed",
+                "A broad posting region is named, but applicant eligibility is unconfirmed",
+                country_evidence,
+            )
+        location_only_country_evidence = country_evidence
+        has_unconfirmed_pakistan_or_global_location = any(
+            re.search(r"\bpakistan\b", value) or _is_global_scope_value(value)
+            for value in country_values
+        )
+        if remote_signal and not has_unconfirmed_pakistan_or_global_location:
+            return _remote_result(
+                "restricted_remote",
+                "Structured posting location restricts the remote role outside Pakistan",
+                country_evidence,
+            )
+
+    scope_with_remote = location_scope
+    if structured.remote and scope_with_remote and not location_is_remote:
+        scope_with_remote = f"remote {scope_with_remote}"
+
+    if _structured_remote_location_is_restricted(scope_with_remote):
+        return _remote_result(
+            "restricted_remote",
+            "Structured remote location is explicitly geographically restricted",
+            _evidence("location", location_raw or " | ".join(structured.location_labels)),
+        )
+
+    restricted_region_match = _region_eligibility_match(
+        descriptive_evidence, _RESTRICTED_REGION_PATTERNS
+    )
+    generic_restriction_match = _generic_location_restriction_match(descriptive_evidence)
+    if remote_signal and (restricted_region_match or generic_restriction_match):
+        return _remote_result(
+            "restricted_remote",
+            "Remote eligibility is explicitly restricted outside Pakistan",
+            _evidence(
+                "restriction",
+                restricted_region_match or generic_restriction_match or "",
+            ),
+        )
+
+    if remote_signal and location_scope and not location_is_remote and not structured.remote:
+        return _remote_result(
+            "restricted_remote",
+            "Posting pairs role-specific remote language with a specific location",
+            _evidence("location", location_raw),
+            _evidence("remote signal", role_remote_match or global_match or ""),
+        )
+
+    pakistan_match = _first_pattern_match(
+        descriptive_evidence, _PAKISTAN_ELIGIBILITY_PATTERNS
+    )
+    if remote_signal and (re.search(r"\bpakistan\b", location_scope) or pakistan_match):
+        return _remote_result(
+            "pakistan_explicit",
+            "Remote eligibility explicitly names Pakistan",
+            _evidence("location", location_raw) if "pakistan" in location else "",
+            _evidence("eligibility", pakistan_match or ""),
+        )
+
+    if _is_unambiguously_global_remote_location(scope_with_remote):
+        return _remote_result(
+            "global_explicit",
+            "Structured location explicitly allows worldwide remote work",
+            _evidence("location", location_raw or " | ".join(structured.location_labels)),
+        )
+
+    regional_location_match = _first_pattern_match(
+        scope_with_remote, _REGIONAL_UNCONFIRMED_PATTERNS
+    )
+    regional_description_match = _region_eligibility_match(
+        descriptive_evidence, _REGIONAL_UNCONFIRMED_PATTERNS
+    )
+    timezone_match = _first_pattern_match(
+        descriptive_evidence, _TIMEZONE_CONSTRAINT_PATTERNS
+    )
+    if remote_signal and (regional_location_match or regional_description_match or timezone_match):
+        return _remote_result(
+            "regional_unconfirmed",
+            "Regional or timezone eligibility is present, but Pakistan is not explicit",
+            _evidence(
+                "regional signal",
+                regional_location_match or regional_description_match or timezone_match or "",
+            ),
+        )
+
+    if global_match:
+        return _remote_result(
+            "global_explicit",
+            "Posting explicitly allows worldwide remote work",
+            _evidence("global signal", global_match),
+        )
+
+    if remote_signal:
+        return _remote_result(
+            "remote_unclear",
+            "Role is remote, but eligible countries are not explicit",
+            _evidence("location", location_raw) if location_is_remote else "",
+            _evidence("structured workplace", structured.workplace_type)
+            if structured.remote
+            else "",
+            location_only_country_evidence,
+            _evidence("remote signal", role_remote_match or ""),
+        )
+
+    return RemoteEligibility(
+        "no_remote_evidence",
+        ["No role-specific remote or onsite evidence was detected"],
+        [],
     )
 
 
@@ -669,9 +1040,33 @@ def _normalise_remote_location(location: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", location.lower())).strip()
 
 
+def _first_pattern_match(text: str, patterns: tuple[str, ...]) -> str | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return re.sub(r"\s+", " ", match.group(0)).strip()
+    return None
+
+
+def _matches_any_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return _first_pattern_match(text, patterns) is not None
+
+
 def _has_global_remote_claim(text: str) -> bool:
-    normalised = _normalise_remote_location(text)
-    return any(term in normalised for term in REMOTE_GLOBAL_TERMS)
+    return _first_pattern_match(text, _GLOBAL_REMOTE_CLAIM_PATTERNS) is not None
+
+
+def _is_global_scope_value(value: str) -> bool:
+    normalised = _normalise_remote_location(value)
+    return normalised in {
+        "all countries",
+        "any country",
+        "anywhere",
+        "global",
+        "globally",
+        "world wide",
+        "worldwide",
+    } or _has_global_remote_claim(value)
 
 
 def _is_unambiguously_global_remote_location(location: str) -> bool:
@@ -682,11 +1077,19 @@ def _is_unambiguously_global_remote_location(location: str) -> bool:
 def _structured_remote_location_is_restricted(location: str) -> bool:
     if not re.search(r"\bremote\b", location):
         return False
-    if any(term in location for term in REMOTE_RESTRICTED_LOCATION_TERMS):
+    if _matches_any_pattern(location, _PAKISTAN_EXCLUSION_PATTERNS):
+        return True
+    if _matches_any_pattern(location, _RESTRICTED_REGION_PATTERNS):
+        return True
+    if _matches_any_pattern(location, _GLOBAL_SCOPE_LIMITATION_PATTERNS):
         return True
     if _is_unambiguously_global_remote_location(location):
         return False
-    if any(term in location for term in REMOTE_PAKISTAN_COMPATIBLE_TERMS):
+    if re.search(r"\bpakistan\b", location):
+        return False
+    if _matches_any_pattern(location, _REGIONAL_UNCONFIRMED_PATTERNS):
+        return False
+    if _matches_any_pattern(location, _TIMEZONE_CONSTRAINT_PATTERNS):
         return False
 
     normalised = _normalise_remote_location(location)
@@ -695,17 +1098,45 @@ def _structured_remote_location_is_restricted(location: str) -> bool:
     )
 
 
-def _remote_region_claim(text: str, terms: tuple[str, ...]) -> bool:
-    claim_terms = ("remote", "based", "located", "reside", "work from", "eligible")
-    for region in terms:
-        region_pattern = re.escape(region)
-        for claim in claim_terms:
-            claim_pattern = re.escape(claim)
-            if re.search(rf"{claim_pattern}.{{0,80}}{region_pattern}", text) or re.search(
-                rf"{region_pattern}.{{0,80}}{claim_pattern}", text
-            ):
-                return True
-    return False
+def _region_eligibility_match(text: str, region_patterns: tuple[str, ...]) -> str | None:
+    for region in region_patterns:
+        patterns = (
+            rf"\bremote(?:ly)?\s+(?:from|in|within|across)\s+(?:the\s+)?{region}",
+            rf"\b(?:work|working)\s+remotely\s+(?:from|in|within)\s+(?:the\s+)?{region}",
+            rf"\b(?:candidates?|applicants?|employees?|contractors?)\s+(?:must\s+|need\s+to\s+|are\s+required\s+to\s+)?(?:be\s+)?(?:based|located|live|living|reside|residing)\s+(?:in|within)\s+(?:the\s+)?{region}",
+            rf"{region}[- ]based\s+(?:candidates?|applicants?|employees?|contractors?)",
+            rf"\b(?:open|available)\s+to\s+(?:the\s+)?{region}[- ]based\s+(?:candidates?|applicants?|employees?)",
+            rf"\b(?:candidates?|applicants?|employees?|contractors?)\s+(?:from|across|throughout)\s+(?:the\s+)?{region}",
+            rf"\b(?:open|available)\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:in|from)\s+(?:the\s+)?{region}",
+            rf"\b(?:hire|hiring|employ)\s+(?:people|employees?|candidates?|talent)?\s*(?:in|from)\s+(?:the\s+)?{region}",
+            rf"\b(?:eligible|approved|supported)\s+(?:countries|locations|regions)\b.{{0,80}}{region}",
+        )
+        match = _first_pattern_match(text, patterns)
+        if match:
+            return match
+    return None
+
+
+_GENERIC_LOCATION_RESTRICTION_PATTERNS = (
+    r"\b(?:candidates?|applicants?|employees?|contractors?)\s+(?:must\s+|need\s+to\s+|are\s+required\s+to\s+)?(?:be\s+)?(?:based|located|live|living|reside|residing)\s+(?:in|within)\s+[a-z][a-z .'-]{1,60}",
+    r"\b(?:must|need\s+to|required\s+to)\s+(?:be\s+)?(?:based|located|reside|live)\s+(?:in|within)\s+[a-z][a-z .'-]{1,60}",
+    r"\bremote(?:ly)?\s+(?:only\s+)?(?:from|in|within)\s+[a-z][a-z .'-]{1,60}",
+    r"\b(?:only\s+)?open\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:in|from)\s+[a-z][a-z .'-]{1,60}",
+    r"\b(?:we\s+)?can\s+only\s+(?:hire|employ)\b.{0,60}",
+)
+
+
+def _generic_location_restriction_match(text: str) -> str | None:
+    match = _first_pattern_match(text, _GENERIC_LOCATION_RESTRICTION_PATTERNS)
+    if not match:
+        return None
+    if re.search(r"\bpakistan\b", match):
+        return None
+    if _matches_any_pattern(match, _REGIONAL_UNCONFIRMED_PATTERNS):
+        return None
+    if _has_global_remote_claim(match):
+        return None
+    return match
 
 
 def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
@@ -738,19 +1169,25 @@ def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
         score += 8
         reasons.append("Backed by a complete canonical provider snapshot")
 
-    remote_status = str(target.get("best_remote_eligibility") or "not_remote")
-    if remote_status == "global_remote":
+    remote_status = str(target.get("best_remote_eligibility") or "no_remote_evidence")
+    if remote_status == "pakistan_explicit":
         score += 30
+        reasons.append("At least one matching role explicitly includes Pakistan")
+    elif remote_status == "global_explicit":
+        score += 28
         reasons.append("At least one matching role is explicitly worldwide remote")
-    elif remote_status == "pakistan_compatible":
-        score += 24
-        reasons.append("At least one matching role explicitly includes Pakistan/APAC")
+    elif remote_status == "regional_unconfirmed":
+        score += 6
+        reasons.append("A matching role names a region or timezone, but Pakistan is unconfirmed")
     elif remote_status == "remote_unclear":
-        score += 10
+        score += 4
         reasons.append("At least one matching role is remote with unclear country eligibility")
     elif remote_status == "restricted_remote":
         score -= 8
         reasons.append("Matching remote roles appear geographically restricted")
+    elif remote_status == "onsite_explicit":
+        score -= 10
+        reasons.append("Matching roles explicitly require onsite or hybrid work")
     return score, reasons
 
 

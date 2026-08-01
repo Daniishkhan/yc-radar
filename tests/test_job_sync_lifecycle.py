@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
 from yc_radar.services.company_registry import CompanyRegistry
@@ -655,3 +655,237 @@ def test_checkpointed_sync_retries_a_failed_source_with_a_new_attempt_key(
         f"retry-batch:{source.career_source_id}:attempt-1",
         f"retry-batch:{source.career_source_id}:attempt-2",
     ]
+
+
+def test_checkpointed_sync_treats_missing_public_board_as_terminal(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    company = CompanyRegistry(engine).register_company(
+        name="Gone Board", website="https://gone-board.example"
+    )
+    source = JobSourceRegistry(engine).register_url(
+        company_id=company.company_id,
+        source_url="https://job-boards.greenhouse.io/gone-board",
+    )
+
+    class MissingAdapter:
+        provider = "greenhouse"
+        adapter_version = "test"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
+            self.calls += 1
+            return SourceSnapshot(
+                provider=self.provider,
+                external_source_id=external_source_id,
+                adapter_version=self.adapter_version,
+                is_complete=False,
+                http_status=404,
+                errors=[{"kind": "http_status", "message": "404"}],
+            )
+
+    checkpoint = tmp_path / "missing-checkpoint.json"
+    args = argparse.Namespace(
+        provider="greenhouse",
+        company_id=None,
+        source_ids=[source.career_source_id],
+        min_source_id=None,
+        limit=None,
+        run_key="missing-batch",
+        delay_seconds=0,
+        checkpoint_file=checkpoint,
+        max_attempts=4,
+        status_file=None,
+    )
+    adapter = MissingAdapter()
+
+    first = asyncio.run(sync_sources(engine, args, adapter=adapter))
+    second = asyncio.run(sync_sources(engine, args, adapter=adapter))
+
+    assert first[0].status == "failed"
+    assert second == []
+    assert adapter.calls == 1
+    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    entry = payload["sources"][str(source.career_source_id)]
+    assert entry["state"] == "terminal_failed"
+    assert entry["retryable"] is False
+    assert entry["diagnostics"] == {
+        "error_kinds": ["http_status"],
+        "http_status": 404,
+        "reason": "permanent_http_status",
+    }
+    assert sync_job_sources.summarize_sync_checkpoint(payload, max_attempts=4) == {
+        "selected": 1,
+        "processed": 1,
+        "succeeded": 0,
+        "failed": 1,
+        "terminal_failures": 1,
+        "exhausted_failures": 0,
+        "retryable": 0,
+    }
+
+
+def test_exhausted_checkpoint_failure_is_terminal_for_the_batch() -> None:
+    checkpoint = {
+        "sources": {
+            "1": {"state": "completed", "attempts": 1},
+            "2": {"state": "failed", "attempts": 4},
+            "3": {"state": "failed", "attempts": 2},
+        }
+    }
+
+    summary = sync_job_sources.summarize_sync_checkpoint(checkpoint, max_attempts=4)
+
+    assert summary == {
+        "selected": 3,
+        "processed": 3,
+        "succeeded": 1,
+        "failed": 1,
+        "terminal_failures": 0,
+        "exhausted_failures": 1,
+        "retryable": 1,
+    }
+
+
+def test_main_exits_successfully_when_checkpoint_failures_exhausted_attempts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    status_file = tmp_path / "status.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "1": {"state": "completed", "attempts": 1},
+                    "2": {"state": "failed", "attempts": 4},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        command="sync",
+        provider="greenhouse",
+        status_file=status_file,
+        checkpoint_file=checkpoint,
+        max_attempts=4,
+    )
+
+    async def no_pending_sources(engine, parsed_args):
+        del engine, parsed_args
+        return []
+
+    monkeypatch.setattr(sync_job_sources, "parse_args", lambda: args)
+    monkeypatch.setattr(sync_job_sources, "engine_from_url", lambda: object())
+    monkeypatch.setattr(sync_job_sources, "create_schema", lambda engine: None)
+    monkeypatch.setattr(sync_job_sources, "sync_sources", no_pending_sources)
+
+    sync_job_sources.main()
+
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["state"] == "partial"
+    assert status["selected"] == 2
+    assert status["succeeded"] == 1
+    assert status["failed"] == 1
+    assert status["exhausted_failures"] == 1
+    assert status["retryable"] == 0
+
+
+def test_main_exits_nonzero_while_checkpoint_has_retryable_work(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"sources": {"1": {"state": "failed", "attempts": 2}}}),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        command="sync",
+        provider="greenhouse",
+        status_file=tmp_path / "status.json",
+        checkpoint_file=checkpoint,
+        max_attempts=4,
+    )
+
+    async def no_results_this_attempt(engine, parsed_args):
+        del engine, parsed_args
+        return []
+
+    monkeypatch.setattr(sync_job_sources, "parse_args", lambda: args)
+    monkeypatch.setattr(sync_job_sources, "engine_from_url", lambda: object())
+    monkeypatch.setattr(sync_job_sources, "create_schema", lambda engine: None)
+    monkeypatch.setattr(sync_job_sources, "sync_sources", no_results_this_attempt)
+
+    with pytest.raises(SystemExit) as exc_info:
+        sync_job_sources.main()
+
+    assert exc_info.value.code == 1
+
+
+def test_checkpointed_sync_terminates_a_source_disabled_between_attempts(
+    postgres_database_url: str,
+    tmp_path: Path,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    company = CompanyRegistry(engine).register_company(
+        name="Disabled Board", website="https://disabled-board.example"
+    )
+    source = JobSourceRegistry(engine).register_url(
+        company_id=company.company_id,
+        source_url="https://job-boards.greenhouse.io/disabled-board",
+    )
+    checkpoint = tmp_path / "disabled-checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "batch_key": "disabled-batch",
+                "scope": {
+                    "provider": "greenhouse",
+                    "company_id": None,
+                    "source_ids": [source.career_source_id],
+                    "min_source_id": None,
+                },
+                "source_ids": [source.career_source_id],
+                "sources": {
+                    str(source.career_source_id): {"attempts": 0, "state": "pending"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            update(career_sources_table)
+            .where(career_sources_table.c.id == source.career_source_id)
+            .values(status="disabled")
+        )
+    args = argparse.Namespace(
+        provider="greenhouse",
+        company_id=None,
+        source_ids=[source.career_source_id],
+        min_source_id=None,
+        limit=None,
+        run_key="disabled-batch",
+        delay_seconds=0,
+        checkpoint_file=checkpoint,
+        max_attempts=4,
+        status_file=None,
+    )
+
+    assert asyncio.run(sync_sources(engine, args)) == []
+    entry = json.loads(checkpoint.read_text(encoding="utf-8"))["sources"][
+        str(source.career_source_id)
+    ]
+    assert entry["state"] == "terminal_failed"
+    assert entry["retryable"] is False
+    assert entry["diagnostics"] == {
+        "career_source_id": source.career_source_id,
+        "reason": "career_source_not_active",
+    }

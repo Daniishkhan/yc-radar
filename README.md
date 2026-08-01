@@ -241,7 +241,11 @@ uv run python scripts/sync_job_sources.py sync \
 A checkpointed sync freezes the original source IDs. Restarts skip completed sources, close an
 orphaned `running` attempt as an audited failure, and retry failed/partial sources under a distinct
 `attempt-N` run key. A Postgres advisory lock prevents two workers from fetching and applying the
-same source concurrently.
+same source concurrently. Missing/forbidden boards and other deterministic 4xx responses become
+explicit terminal failures; transient failures remain retryable up to the configured attempt
+budget. A batch exits successfully once every source is completed, terminal, or exhausted, while
+its status remains `partial` with the failure counts. This prevents a detached worker from
+restarting an empty batch forever without hiding failed sources.
 
 Greenhouse uses only the unauthenticated public GET endpoint documented by the
 [Greenhouse Job Board API](https://developers.greenhouse.io/job-board.html):
@@ -263,10 +267,39 @@ Ashby uses its documented
 visibility are synchronized. Ashby follows the same sequential pacing, bounded retry, complete
 snapshot, and no-application rules as Greenhouse.
 
+Activate the frozen Ashby inventory already present in `company_career_pages`, then synchronize
+the unambiguous boards as a detached/restart-safe two-stage backfill:
+
+```bash
+uv run python scripts/run_ashby_backfill.py \
+  --run-dir data/local/runs/ashby-backfill
+```
+
+Registration checkpoints the exact provider identities and refuses cross-company ownership
+conflicts. A partial registration remains auditable while the unambiguous sources continue to the
+sequential provider sync.
+
+Canonical current jobs and immutable versions retain a provider-neutral `structured_evidence`
+document. Greenhouse preserves offices and custom metadata; Ashby preserves workplace type,
+`isRemote`, primary/secondary addresses, countries, listing visibility, and application URLs.
+These fields are evidence rather than work-authorization claims and participate in content-change
+hashing.
+
 Inspect active canonical jobs without profile/contact data:
 
 ```bash
 uv run python scripts/generate_job_opportunities.py --limit 50
+```
+
+Measure the full canonical funnel and write a conservative application queue. The JSON keeps all
+matching company/title clusters and their posting-variant distributions; the CSV includes only
+`pakistan_explicit` and `global_explicit` evidence. `regional_unconfirmed`, `remote_unclear`,
+geographically restricted, onsite, and no-evidence roles remain measurable but are not presented
+as directly actionable.
+
+```bash
+uv run python scripts/analyze_job_funnel.py \
+  --history-run-dir data/local/runs/greenhouse-history-backfill
 ```
 
 ## Pipeline Mental Model

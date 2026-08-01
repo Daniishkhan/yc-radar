@@ -80,20 +80,44 @@ def test_active_canonical_jobs_change_shortlist_role_evidence_with_public_proven
     )
     assert target["role_match_status"] == "strong"
     assert target["canonical_active_job_count"] == 1
-    assert target["matching_job_provenance"] == [
+    assert target["canonical_raw_active_job_count"] == 1
+    assert target["canonical_duplicate_posting_count"] == 0
+    provenance = target["matching_job_provenance"]
+    assert len(provenance) == 1
+    cluster = provenance[0]
+    assert cluster["title"] == "Senior Backend Engineer"
+    assert cluster["provider"] == "greenhouse"
+    assert cluster["external_job_id"] == "42"
+    assert cluster["career_source_kind"] == "ats_board"
+    assert cluster["career_source_url"] == "https://boards.greenhouse.io/example"
+    assert cluster["posting_url"] == "https://boards.greenhouse.io/example/jobs/42"
+    assert cluster["remote_eligibility"] == "no_remote_evidence"
+    assert cluster["remote_reasons"] == [
+        "No role-specific remote or onsite evidence was detected"
+    ]
+    assert cluster["remote_evidence"] == []
+    assert cluster["structured_evidence"] == {}
+    assert cluster["posting_variant_count"] == 1
+    assert cluster["remote_eligibility_distribution"] == {"no_remote_evidence": 1}
+    assert cluster["posting_variants"] == [
         {
-            "title": "Senior Backend Engineer",
-            "provider": "greenhouse",
-            "external_job_id": "42",
-            "career_source_kind": "ats_board",
-                "career_source_url": "https://boards.greenhouse.io/example",
-                "posting_url": "https://boards.greenhouse.io/example/jobs/42",
-                "location": None,
-                "department": None,
-                "remote_eligibility": "not_remote",
-                "remote_reasons": ["No explicit remote signal"],
-                "source_published_at": None,
-            "source_updated_at": None,
+            key: cluster[key]
+            for key in (
+                "title",
+                "provider",
+                "external_job_id",
+                "career_source_kind",
+                "career_source_url",
+                "posting_url",
+                "location",
+                "department",
+                "remote_eligibility",
+                "remote_reasons",
+                "remote_evidence",
+                "structured_evidence",
+                "source_published_at",
+                "source_updated_at",
+            )
         }
     ]
 

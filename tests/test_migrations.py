@@ -9,6 +9,7 @@ from yc_radar.services.database import (
     companies_table,
     company_sources_table,
     engine_from_url,
+    job_posting_versions_table,
     job_postings_table,
     upsert_yc_companies,
     yc_company_profiles_table,
@@ -52,7 +53,7 @@ def test_alembic_head_contains_legacy_and_source_neutral_schema(postgres_databas
     }
     with engine.connect() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "0004_source_registries"
+    assert revision == "0005_job_structured_evidence"
 
 
 def test_baseline_verifier_rejects_an_unversioned_neutral_schema(
@@ -258,6 +259,14 @@ def test_company_profile_round_trip_preserves_canonical_jobs(postgres_database_u
         profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
     assert profile["yc_company_id"] == 900
     assert profile["batch"] == "S24"
+    with engine.connect() as connection:
+        current_evidence = connection.scalar(select(job_postings_table.c.structured_evidence))
+        version_evidence = connection.scalar(
+            select(job_posting_versions_table.c.structured_evidence)
+        )
+    assert current_evidence == version_evidence
+    assert current_evidence["schema_version"] == 1
+    assert current_evidence["provider"] == "greenhouse"
 
 
 def test_company_schema_downgrade_refuses_independent_yc_local_ids(
@@ -292,7 +301,7 @@ def test_company_schema_downgrade_refuses_independent_yc_local_ids(
 
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0004_source_registries"
+            "0005_job_structured_evidence"
         )
 
 
@@ -318,7 +327,7 @@ def test_company_schema_downgrade_refuses_non_yc_companies(postgres_database_url
     assert "yc_company_profiles" in inspector.get_table_names()
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0004_source_registries"
+            "0005_job_structured_evidence"
         )
 
 
@@ -441,7 +450,7 @@ def test_company_and_job_source_registries_do_not_share_provider_ownership(
 
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0004_source_registries"
+            "0005_job_structured_evidence"
         )
         assert connection.scalar(text("SELECT count(*) FROM companies")) == 2
         assert connection.scalar(text("SELECT count(*) FROM career_sources")) == 1
@@ -471,7 +480,7 @@ def test_rebuild_database_replaces_an_unversioned_legacy_schema(postgres_databas
     )
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0004_source_registries"
+            "0005_job_structured_evidence"
         )
 
 
@@ -506,7 +515,7 @@ def test_destructive_rebuild_handles_non_yc_and_independent_ids(
 
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0004_source_registries"
+            "0005_job_structured_evidence"
         )
         assert connection.scalar(select(func.count()).select_from(companies_table)) == 0
         assert connection.scalar(select(func.count()).select_from(yc_company_profiles_table)) == 0

@@ -11,6 +11,8 @@ def test_extract_source_id_accepts_public_ashby_board_and_job_urls() -> None:
     adapter = AshbyAdapter()
 
     assert adapter.extract_source_id("https://jobs.ashbyhq.com/acme") == "acme"
+    assert adapter.extract_source_id("https://jobs.ashbyhq.com/ambient.ai") == "ambient.ai"
+    assert adapter.extract_source_id("https://jobs.ashbyhq.com/Hamming%20AI") == "hamming ai"
     assert (
         adapter.extract_source_id(
             "https://jobs.ashbyhq.com/acme/8e0d126f-ef56-4af0-a4f7-b008f3792e66"
@@ -30,6 +32,9 @@ def test_extract_source_id_rejects_untrusted_or_malformed_urls() -> None:
     assert adapter.extract_source_id("https://user@jobs.ashbyhq.com/acme") is None
     assert adapter.extract_source_id("https://jobs.ashbyhq.com/%2Fetc") is None
     assert adapter.extract_source_id("https://api.ashbyhq.com/jobPosting.list") is None
+    assert adapter.extract_source_id("https://jobs.ashbyhq.com/%20acme") is None
+    assert adapter.extract_source_id("https://jobs.ashbyhq.com/Greenboard") == "greenboard"
+    assert adapter.canonical_source_url("Hamming AI") == "https://jobs.ashbyhq.com/hamming%20ai"
 
 
 def test_normalization_preserves_public_content_and_stable_identity() -> None:

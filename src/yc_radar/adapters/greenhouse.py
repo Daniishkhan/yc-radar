@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import httpx
 
+from yc_radar.adapters.structured_evidence import greenhouse_structured_evidence
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -31,7 +32,7 @@ class GreenhouseAdapter:
     """Read-only client for Greenhouse's unauthenticated public job-board API."""
 
     provider = "greenhouse"
-    adapter_version = "2"
+    adapter_version = "3"
     source_kind = "ats_board"
     user_agent = (
         "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; "
@@ -232,6 +233,7 @@ def normalize_greenhouse_job(payload: Any) -> NormalizedJob:
     if not department:
         department = _joined_names(payload.get("offices"))
     posting_url = _optional_string(payload.get("absolute_url"))
+    structured_evidence = greenhouse_structured_evidence(payload)
     content = {
         "title": title,
         "description_text": _clean_text(description_html),
@@ -240,6 +242,7 @@ def normalize_greenhouse_job(payload: Any) -> NormalizedJob:
         "employment_type": None,
         "posting_url": posting_url,
         "apply_url": None,
+        "structured_evidence": structured_evidence,
     }
     return NormalizedJob(
         external_job_id=str(raw_id),
@@ -254,6 +257,7 @@ def normalize_greenhouse_job(payload: Any) -> NormalizedJob:
         content_hash=hashlib.sha256(
             json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest(),
+        structured_evidence=structured_evidence,
         raw_payload=payload,
     )
 

@@ -217,11 +217,20 @@ def test_remote_eligibility_distinguishes_global_pakistan_and_restricted_roles()
         classify_remote_eligibility(
             {"location": "Remote", "description_text": "Work from anywhere in the world."}
         ).status
-        == "global_remote"
+        == "global_explicit"
+    )
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "Remote",
+                "description_text": "This remote role is open to candidates based in Pakistan.",
+            }
+        ).status
+        == "pakistan_explicit"
     )
     assert (
         classify_remote_eligibility({"location": "Remote - APAC"}).status
-        == "pakistan_compatible"
+        == "regional_unconfirmed"
     )
     assert (
         classify_remote_eligibility({"location": "Remote - United States"}).status
@@ -234,7 +243,7 @@ def test_remote_eligibility_distinguishes_global_pakistan_and_restricted_roles()
                 "description_text": "We are remote-first and have teams across APAC.",
             }
         ).status
-        == "not_remote"
+        == "no_remote_evidence"
     )
     assert (
         classify_remote_eligibility(
@@ -254,12 +263,12 @@ def test_remote_eligibility_accepts_only_unambiguous_global_location_labels() ->
         "Global - Remote Work",
         "Remote - Anywhere",
     ):
-        assert classify_remote_eligibility({"location": location}).status == "global_remote"
+        assert classify_remote_eligibility({"location": location}).status == "global_explicit"
 
     assert classify_remote_eligibility({"location": "Remote"}).status == "remote_unclear"
     assert (
         classify_remote_eligibility({"location": "Remote - APAC"}).status
-        == "pakistan_compatible"
+        == "regional_unconfirmed"
     )
 
 
@@ -283,8 +292,221 @@ def test_structured_remote_restrictions_override_global_description_boilerplate(
         classify_remote_eligibility(
             {"location": "Remote", "description_text": global_boilerplate}
         ).status
-        == "global_remote"
+        == "global_explicit"
     )
+
+
+def test_remote_restrictions_and_negations_override_global_phrases() -> None:
+    cases = (
+        {
+            "location": "Remote",
+            "description_text": "Work from anywhere in the Contiguous US.",
+        },
+        {
+            "location": "Remote - APAC",
+            "description_text": "Open across APAC, excluding Pakistan.",
+        },
+        {
+            "location": "Remote",
+            "description_text": "This role is remote, but not worldwide.",
+        },
+        {
+            "location": "Remote",
+            "description_text": (
+                "Our global team can work from anywhere. Candidates must reside in Canada."
+            ),
+        },
+    )
+
+    for job in cases:
+        result = classify_remote_eligibility(job)
+        assert result.status == "restricted_remote"
+        assert result.evidence
+
+
+def test_remote_region_mentions_require_role_eligibility_context() -> None:
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "Remote",
+                "description_text": "This remote role supports APAC customers and US accounts.",
+            }
+        ).status
+        == "remote_unclear"
+    )
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "Remote - APAC",
+                "description_text": (
+                    "You must be based in Japan, hold JLPT N1, and work Japan business hours."
+                ),
+            }
+        ).status
+        == "restricted_remote"
+    )
+    assert (
+        classify_remote_eligibility(
+            {
+                "location": "Remote",
+                "description_text": (
+                    "This is a remote opportunity requiring Japan business hours."
+                ),
+            }
+        ).status
+        == "regional_unconfirmed"
+    )
+
+
+def test_uncommon_remote_wording_and_no_evidence_are_distinct_from_onsite() -> None:
+    for description in (
+        "This is a remote opportunity.",
+        "This role may be performed remotely.",
+        "This is a fully distributed position.",
+        "This is a location-flexible role.",
+    ):
+        assert (
+            classify_remote_eligibility({"description_text": description}).status
+            == "remote_unclear"
+        )
+
+    assert (
+        classify_remote_eligibility(
+            {"location": "Karachi", "description_text": "This role is onsite five days a week."}
+        ).status
+        == "onsite_explicit"
+    )
+    assert (
+        classify_remote_eligibility({"location": "San Francisco, CA"}).status
+        == "no_remote_evidence"
+    )
+
+
+def test_structured_provider_evidence_takes_precedence_over_boilerplate() -> None:
+    def structured_job(
+        workplace_type: str,
+        countries: list[str],
+        *,
+        description: str = "",
+        eligibility_signals: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "description_text": description,
+            "structured_evidence": {
+                "schema_version": 1,
+                "provider": "ashby",
+                "workplace": {
+                    "type": workplace_type,
+                    "is_remote": workplace_type == "remote",
+                },
+                "primary_location": None,
+                "secondary_locations": [],
+                "offices": [],
+                "countries": countries,
+                "provider_metadata": [],
+                "eligibility_signals": eligibility_signals or [],
+                "application": {},
+            },
+        }
+
+    # Provider countries are posting-address evidence, not applicant eligibility proof.
+    assert (
+        classify_remote_eligibility(structured_job("remote", ["Pakistan"])).status
+        == "remote_unclear"
+    )
+    assert (
+        classify_remote_eligibility(structured_job("remote", ["Worldwide"])).status
+        == "remote_unclear"
+    )
+    assert classify_remote_eligibility(
+        structured_job(
+            "remote",
+            ["Pakistan"],
+            eligibility_signals=[
+                {"kind": "provider_metadata", "name": "Eligible countries", "value": "Pakistan"}
+            ],
+        )
+    ).status == "pakistan_explicit"
+    assert classify_remote_eligibility(
+        structured_job(
+            "remote",
+            [],
+            eligibility_signals=[
+                {"kind": "provider_metadata", "name": "Eligible countries", "value": "Worldwide"}
+            ],
+        )
+    ).status == "global_explicit"
+    assert classify_remote_eligibility(structured_job("remote", ["United States"])).status == (
+        "restricted_remote"
+    )
+    assert classify_remote_eligibility(structured_job("remote", [])).status == "remote_unclear"
+    assert classify_remote_eligibility(
+        structured_job("on_site", [], description="Employees can work from anywhere.")
+    ).status == "onsite_explicit"
+
+
+def test_role_focus_clusters_location_variants_without_losing_provenance() -> None:
+    company = Company(
+        name="Location Fanout Co",
+        slug="location-fanout-co",
+        website="https://location-fanout.example",
+    )
+    jobs = [
+        {
+            "title": "Senior Backend Engineer",
+            "location": "Remote - United States",
+            "description_text": "Build distributed APIs.",
+            "provider": "greenhouse",
+            "external_job_id": "us-1",
+        },
+        {
+            "title": "Senior Backend Engineer",
+            "location": "Remote - Worldwide",
+            "description_text": "Build distributed APIs.",
+            "provider": "greenhouse",
+            "external_job_id": "world-1",
+        },
+        {
+            "title": "Staff Platform Engineer",
+            "location": "Remote",
+            "description_text": "Own the data platform.",
+            "provider": "greenhouse",
+            "external_job_id": "platform-1",
+        },
+    ]
+
+    target = target_record(
+        score_company(company, DEFAULT_CANDIDATE_PROFILE),
+        rank=1,
+        canonical_jobs=jobs,
+    )
+
+    assert target["canonical_raw_active_job_count"] == 3
+    assert target["canonical_active_job_count"] == 2
+    assert target["canonical_duplicate_posting_count"] == 1
+    assert target["canonical_raw_matching_job_count"] == 3
+    assert target["canonical_matching_job_count"] == 2
+    assert target["canonical_duplicate_matching_job_count"] == 1
+    assert target["best_remote_eligibility"] == "global_explicit"
+
+    backend_cluster = next(
+        item
+        for item in target["matching_job_provenance"]
+        if item["title"] == "Senior Backend Engineer"
+    )
+    assert backend_cluster["posting_variant_count"] == 2
+    assert backend_cluster["remote_eligibility"] == "global_explicit"
+    assert backend_cluster["remote_eligibility_distribution"] == {
+        "restricted_remote": 1,
+        "global_explicit": 1,
+    }
+    assert {
+        (item["external_job_id"], item["location"], item["remote_eligibility"])
+        for item in backend_cluster["posting_variants"]
+    } == {
+        ("us-1", "Remote - United States", "restricted_remote"),
+        ("world-1", "Remote - Worldwide", "global_explicit"),
+    }
 
 
 def test_live_global_remote_backend_role_can_outrank_metadata_rich_company_without_roles() -> None:
@@ -323,6 +545,6 @@ def test_live_global_remote_backend_role_can_outrank_metadata_rich_company_witho
         canonical_jobs=[],
     )
 
-    assert independent_target["best_remote_eligibility"] == "global_remote"
+    assert independent_target["best_remote_eligibility"] == "global_explicit"
     assert independent_target["opportunity_score"] > 80
     assert independent_target["fit_score"] > metadata_target["fit_score"]

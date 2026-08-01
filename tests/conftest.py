@@ -44,7 +44,7 @@ def postgres_database_url() -> str:
             ) == "companies"
             assert connection.scalar(
                 text(f'SELECT version_num FROM "{schema}".alembic_version')
-            ) == "0004_source_registries"
+            ) == "0005_job_structured_evidence"
         yield scoped_url
     finally:
         engine.dispose()

@@ -11,9 +11,10 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
+from yc_radar.adapters.structured_evidence import ashby_structured_evidence
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
 
-_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._ -]{0,126}[A-Za-z0-9])?$")
 _ASHBY_BOARD_HOST = "jobs.ashbyhq.com"
 _ASHBY_API_HOST = "api.ashbyhq.com"
 
@@ -22,7 +23,7 @@ class AshbyAdapter:
     """Read-only client for Ashby's public lightweight job-posting API."""
 
     provider = "ashby"
-    adapter_version = "1"
+    adapter_version = "2"
     source_kind = "ats_board"
     user_agent = (
         "yc-radar/0.2 (+https://github.com/Daniishkhan/yc-radar; "
@@ -66,15 +67,18 @@ class AshbyAdapter:
                 candidate = parts[2]
         if not candidate or "/" in candidate or not _SOURCE_ID_RE.fullmatch(candidate):
             return None
-        return candidate
+        return candidate.lower()
 
     def canonical_source_url(self, external_source_id: str) -> str:
         if not _SOURCE_ID_RE.fullmatch(external_source_id):
             raise ValueError("invalid Ashby job-board name")
-        return f"https://jobs.ashbyhq.com/{quote(external_source_id, safe='')}"
+        source_id = external_source_id.lower()
+        return f"https://jobs.ashbyhq.com/{quote(source_id, safe='')}"
 
     async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-        source_id = external_source_id if _SOURCE_ID_RE.fullmatch(external_source_id) else None
+        source_id = (
+            external_source_id.lower() if _SOURCE_ID_RE.fullmatch(external_source_id) else None
+        )
         if source_id is None:
             return self._failure_snapshot(external_source_id, "invalid_source_id")
         url = (
@@ -229,6 +233,7 @@ def normalize_ashby_job(payload: Any) -> NormalizedJob:
     posting_url = _optional_string(payload.get("jobUrl"))
     apply_url = _optional_string(payload.get("applyUrl"))
     employment_type = _optional_string(payload.get("employmentType"))
+    structured_evidence = ashby_structured_evidence(payload)
     content = {
         "title": title,
         "description_text": description_text,
@@ -238,6 +243,7 @@ def normalize_ashby_job(payload: Any) -> NormalizedJob:
         "posting_url": posting_url,
         "apply_url": apply_url,
         "compensation": payload.get("compensation"),
+        "structured_evidence": structured_evidence,
     }
     return NormalizedJob(
         external_job_id=str(raw_id),
@@ -253,6 +259,7 @@ def normalize_ashby_job(payload: Any) -> NormalizedJob:
         content_hash=hashlib.sha256(
             json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest(),
+        structured_evidence=structured_evidence,
         raw_payload=payload,
     )
 
