@@ -18,6 +18,7 @@ RUN uv sync --frozen --no-dev
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts ./scripts
+COPY sql ./sql
 COPY data/snapshots ./data/snapshots
 
 RUN mkdir -p /app/data/local \
