@@ -234,6 +234,7 @@ PHYSICAL_ENGINEERING_TITLE_PATTERNS = (
     r"(?:mechanical|stress|structural)\b",
     r"\bscada\b.{0,40}\bengineer(?:ing)?\b",
     r"\bengineer(?:ing)?\b.{0,24}\bscada\b",
+    r"\b(?:project\s+)?commissioning\s+engineer(?:ing)?\b",
 )
 NON_OPENING_CONTEXT_PATTERNS = (
     r"\bjoin\s+(?:our|the)\s+(?:contractor|freelance)\s+(?:pool|network)\b",

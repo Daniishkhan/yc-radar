@@ -132,6 +132,7 @@ def test_role_classifier_excludes_physical_and_industrial_engineering_titles() -
         "Engineer, Mechanical Systems",
         "Senior SCADA Engineer",
         "SCADA Controls Engineer",
+        "Senior Project Commissioning Engineer - Battery Storage",
     ):
         assert classify_role_text(title, "Build backend APIs").status == "exclude", title
 
@@ -141,6 +142,7 @@ def test_role_classifier_excludes_physical_and_industrial_engineering_titles() -
         "Senior Backend Platform Engineer, SCADA Integrations",
         "Full Stack Engineer, Mechanical Design Tools",
         "Senior SDE, Mechanical Simulation",
+        "Senior Software Engineer, Commissioning Platform",
     ):
         assert classify_role_text(title, "Build backend APIs").status != "exclude", title
 
