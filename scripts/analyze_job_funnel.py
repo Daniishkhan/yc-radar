@@ -239,9 +239,14 @@ def classification_context(row: Mapping[str, Any]) -> str:
     )
 
 
-def analyzed_variant(row: Mapping[str, Any]) -> dict[str, Any] | None:
+def analyzed_variant(
+    row: Mapping[str, Any],
+    *,
+    role: Any | None = None,
+) -> dict[str, Any] | None:
     title = str(row.get("title") or "").strip()
-    role = classify_role_text(title, classification_context(row))
+    if role is None:
+        role = classify_role_text(title, classification_context(row))
     if role.status not in {"strong", "possible"}:
         return None
     remote = classify_remote_eligibility(dict(row))
@@ -311,7 +316,11 @@ def build_role_clusters(
         title = str(row.get("title") or "").strip()
         role = classify_role_text(title, classification_context(row))
         prefilter_statuses[role.status] += 1
-        variant = analyzed_variant(row) if role.status in {"strong", "possible"} else None
+        variant = (
+            analyzed_variant(row, role=role)
+            if role.status in {"strong", "possible"}
+            else None
+        )
         if variant is None:
             continue
         remote_statuses[str(variant["remote_eligibility"])] += 1

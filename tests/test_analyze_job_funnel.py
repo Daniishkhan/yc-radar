@@ -106,6 +106,24 @@ def test_role_clustering_preserves_variants_and_selects_explicit_pakistan() -> N
     assert "This remote role is open" not in serialized
 
 
+def test_role_clustering_reuses_the_prefilter_classification(monkeypatch) -> None:
+    original = funnel.classify_role_text
+    calls = 0
+
+    def count_classification(title: str, context: str = ""):
+        nonlocal calls
+        calls += 1
+        return original(title, context)
+
+    monkeypatch.setattr(funnel, "classify_role_text", count_classification)
+
+    funnel.build_role_clusters(
+        [job(1, description="This role is remote worldwide.")]
+    )
+
+    assert calls == 1
+
+
 def test_actionable_csv_rejects_unclear_and_writes_only_explicit_clusters(
     tmp_path: Path,
 ) -> None:

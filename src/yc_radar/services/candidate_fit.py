@@ -261,8 +261,13 @@ class RemoteEligibility:
 
 
 _GLOBAL_REMOTE_LOCATION_PATTERNS = (
+    r"(?:worldwide|world wide)",
+    r"home based (?:worldwide|world wide)",
+    r"(?:worldwide|world wide) home based",
     r"remote anywhere(?: in (?:the )?world)?",
     r"anywhere(?: in (?:the )?world)? remote",
+    r"global anywhere",
+    r"anywhere global",
     r"remote (?:worldwide|world wide)",
     r"(?:worldwide|world wide) remote",
     r"global remote(?: work)?",
@@ -279,7 +284,7 @@ _GENERIC_REMOTE_LOCATION_PATTERNS = (
 )
 _GLOBAL_REMOTE_CLAIM_PATTERNS = (
     r"\bremote(?:ly)?\s+(?:from\s+)?(?:anywhere|worldwide|world wide|globally)\b",
-    r"\b(?:worldwide|world wide|global(?:ly)?)\s+(?:remote|distributed)(?:\s+work)?\b",
+    r"\b(?:worldwide|world wide|global(?:ly)?)\s+(?:remote|distributed)(?:\s+work)?\b(?!\s+(?:colleagues?|company|employees?|members?|organisation|organization|staff|team|workforce)\b)",
     r"\bwork(?:ing)?\s+from\s+anywhere(?:\s+in\s+(?:the\s+)?world)?\b",
     r"\bwork(?:ing)?\s+from\s+any\s+(?:country|location)\b",
     r"\b(?:job|role|position|work)\s+(?:can|may)\s+be\s+performed\s+from\s+any\s+(?:country|location|place)\b",
@@ -744,6 +749,7 @@ class _StructuredRemoteEvidence:
     onsite: bool = False
     workplace_type: str = ""
     countries: tuple[str, ...] = ()
+    primary_location_label: str = ""
     location_labels: tuple[str, ...] = ()
     eligibility_text: str = ""
 
@@ -785,13 +791,18 @@ def _structured_remote_evidence(job: dict[str, Any]) -> _StructuredRemoteEvidenc
     if isinstance(raw_countries, list):
         countries.extend(str(value).strip() for value in raw_countries if value)
 
+    primary_label = ""
     locations: list[dict[str, Any]] = []
     primary = raw.get("primary_location")
     if isinstance(primary, dict):
         locations.append(primary)
+        primary_label = str(primary.get("label") or "").strip()
     secondary = raw.get("secondary_locations")
     if isinstance(secondary, list):
-        locations.extend(value for value in secondary if isinstance(value, dict))
+        structured_secondary = [
+            value for value in secondary if isinstance(value, dict)
+        ]
+        locations.extend(structured_secondary)
 
     labels: list[str] = []
     for structured_location in locations:
@@ -818,6 +829,7 @@ def _structured_remote_evidence(job: dict[str, Any]) -> _StructuredRemoteEvidenc
         onsite=onsite,
         workplace_type=workplace_type,
         countries=tuple(_dedupe_preserve_order(countries)),
+        primary_location_label=primary_label,
         location_labels=tuple(_dedupe_preserve_order(labels)),
         eligibility_text=" ".join(eligibility_parts),
     )
@@ -856,14 +868,44 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     descriptive_evidence = " ".join(
         part for part in (description, eligibility_text) if part
     )
-    location_scope = " | ".join(part for part in (location, structured_labels) if part)
+    location_scope = " | ".join(
+        _dedupe_preserve_order(
+            [part for part in (location, structured_labels) if part]
+        )
+    )
     location_is_remote = bool(re.search(r"\bremote\b", location_scope))
+    # Greenhouse repeats the provider's primary label in both ``location`` and
+    # ``structured_evidence.primary_location``. Treat that one label as the authoritative
+    # location scope. Office membership and other posting locations are useful provenance, but
+    # they do not narrow an otherwise unqualified worldwide primary label.
+    primary_location_scope = structured.primary_location_label or location_raw
+    primary_location_for_global_check = primary_location_scope
+    if (
+        structured.remote
+        and primary_location_scope
+        and not re.search(r"\bremote\b", primary_location_scope, flags=re.IGNORECASE)
+    ):
+        primary_location_for_global_check = f"remote {primary_location_scope}"
+    global_primary_location = (
+        primary_location_scope
+        if _is_unambiguously_global_remote_location(primary_location_for_global_check)
+        else ""
+    )
+    global_location_signal = _first_pattern_match(
+        primary_location_scope, _GLOBAL_REMOTE_LOCATION_PATTERNS
+    )
 
     global_match = _first_pattern_match(descriptive_evidence, _GLOBAL_REMOTE_CLAIM_PATTERNS)
     role_remote_match = _first_pattern_match(
         descriptive_evidence, _ROLE_REMOTE_CLAIM_PATTERNS
     )
-    remote_signal = bool(location_is_remote or structured.remote or global_match or role_remote_match)
+    remote_signal = bool(
+        location_is_remote
+        or structured.remote
+        or global_location_signal
+        or global_match
+        or role_remote_match
+    )
 
     pakistan_exclusion = _first_pattern_match(
         " ".join((location_scope, countries, descriptive_evidence)),
@@ -888,8 +930,12 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
         )
 
     remote_negation = _first_pattern_match(description, _REMOTE_NEGATION_PATTERNS)
-    onsite_match = _first_pattern_match(
-        " ".join((location, description)), _ONSITE_CLAIM_PATTERNS
+    location_onsite_match = _first_pattern_match(location, _ONSITE_CLAIM_PATTERNS)
+    description_onsite_match = _first_pattern_match(
+        description, _ONSITE_CLAIM_PATTERNS
+    )
+    onsite_match = description_onsite_match or (
+        location_onsite_match if not global_primary_location else None
     )
     if structured.onsite or remote_negation or onsite_match:
         workplace_evidence = (
@@ -941,10 +987,17 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             )
 
     scope_with_remote = location_scope
-    if structured.remote and scope_with_remote and not location_is_remote:
+    if (
+        (structured.remote or global_location_signal)
+        and scope_with_remote
+        and not location_is_remote
+    ):
         scope_with_remote = f"remote {scope_with_remote}"
 
-    if _structured_remote_location_is_restricted(scope_with_remote):
+    if (
+        not global_primary_location
+        and _structured_remote_location_is_restricted(scope_with_remote)
+    ):
         return _remote_result(
             "restricted_remote",
             "Structured remote location is explicitly geographically restricted",
@@ -965,7 +1018,28 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             ),
         )
 
-    if remote_signal and location_scope and not location_is_remote and not structured.remote:
+    regional_description_match = _region_eligibility_match(
+        descriptive_evidence, _REGIONAL_UNCONFIRMED_PATTERNS
+    )
+    timezone_match = _first_pattern_match(
+        descriptive_evidence, _TIMEZONE_CONSTRAINT_PATTERNS
+    )
+    if global_primary_location and (regional_description_match or timezone_match):
+        return _remote_result(
+            "regional_unconfirmed",
+            "Regional or timezone eligibility narrows an otherwise global location label",
+            _evidence(
+                "regional signal", regional_description_match or timezone_match or ""
+            ),
+        )
+
+    if (
+        remote_signal
+        and location_scope
+        and not location_is_remote
+        and not structured.remote
+        and not global_primary_location
+    ):
         return _remote_result(
             "restricted_remote",
             "Posting pairs role-specific remote language with a specific location",
@@ -984,21 +1058,17 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("eligibility", pakistan_match or ""),
         )
 
-    if _is_unambiguously_global_remote_location(scope_with_remote):
+    if global_primary_location or _is_unambiguously_global_remote_location(
+        scope_with_remote
+    ):
         return _remote_result(
             "global_explicit",
             "Structured location explicitly allows worldwide remote work",
-            _evidence("location", location_raw or " | ".join(structured.location_labels)),
+            _evidence("location", global_primary_location or location_raw),
         )
 
     regional_location_match = _first_pattern_match(
         scope_with_remote, _REGIONAL_UNCONFIRMED_PATTERNS
-    )
-    regional_description_match = _region_eligibility_match(
-        descriptive_evidence, _REGIONAL_UNCONFIRMED_PATTERNS
-    )
-    timezone_match = _first_pattern_match(
-        descriptive_evidence, _TIMEZONE_CONSTRAINT_PATTERNS
     )
     if remote_signal and (regional_location_match or regional_description_match or timezone_match):
         return _remote_result(
@@ -1070,8 +1140,16 @@ def _is_global_scope_value(value: str) -> bool:
 
 
 def _is_unambiguously_global_remote_location(location: str) -> bool:
-    normalised = _normalise_remote_location(location)
-    return any(re.fullmatch(pattern, normalised) for pattern in _GLOBAL_REMOTE_LOCATION_PATTERNS)
+    # Provider labels sometimes encode mutually exclusive work-location alternatives with a
+    # semicolon. An unqualified worldwide remote alternative remains actionable even when a
+    # sibling alternative names an office or narrower region. Qualifiers inside the same segment
+    # (for example ``Remote Global (US, EU)``) deliberately fail the full match.
+    alternatives = re.split(r"[;|\n]+", location)
+    return any(
+        re.fullmatch(pattern, _normalise_remote_location(alternative))
+        for alternative in alternatives
+        for pattern in _GLOBAL_REMOTE_LOCATION_PATTERNS
+    )
 
 
 def _structured_remote_location_is_restricted(location: str) -> bool:

@@ -10,12 +10,12 @@ import json
 import os
 import re
 import tempfile
-import time
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select
@@ -24,10 +24,8 @@ from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.commoncrawl_greenhouse import CRAWL_RE, deduplicate_candidate_rows
 from yc_radar.services.database import career_sources_table, companies_table, engine_from_url
 from yc_radar.services.greenhouse_scout import (
-    SCOUT_USER_AGENT,
     GreenhouseBoardEvidence,
     GreenhouseBoardScout,
-    domains_compatible,
     resolve_company,
 )
 from yc_radar.services.job_source_registry import JobSourceRegistry
@@ -38,7 +36,6 @@ from yc_radar.services.run_status import (
     stage_started,
     write_status,
 )
-from yc_radar.services.source_providers import is_ats_domain
 
 OUTPUT_FIELDS = [
     "board_token",
@@ -205,6 +202,7 @@ def main() -> None:
                     existing_sources=existing_sources,
                     crawl=crawl,
                     engine=engine,
+                    homepage_verifier=scout.verify_homepage,
                 )
             rows.append(row)
             if index % args.checkpoint_every == 0:
@@ -292,7 +290,11 @@ def can_resume_row(
     registration = row.get("registration_status")
     if resolution not in {"existing_exact_name", "new_company_domain_candidate"}:
         return True
-    return registration not in {"not_requested", "homepage_unverified", ""}
+    # The checkpoint manifest binds this row to an immutable input/scope. Do not
+    # re-probe a failed homepage on every service restart inside that same run. A
+    # deliberately short-lived negative disk cache covers rows lost since the last
+    # checkpoint, while a later run can try the website again after the TTL expires.
+    return registration not in {"not_requested", ""}
 
 
 def checkpoint(
@@ -354,13 +356,14 @@ def apply_registration(
     existing_sources: dict[str, int],
     crawl: str | None,
     engine,
+    homepage_verifier: Callable[[str], str | None],
 ) -> None:
     company_id = resolution.company_id
     website = resolution.website_candidate
     registration_status = "skipped"
     try:
         if resolution.status == "new_company_domain_candidate" and website:
-            verified_website = verify_homepage(website)
+            verified_website = homepage_verifier(website)
             if verified_website is None:
                 row["registration_status"] = "homepage_unverified"
                 return
@@ -408,42 +411,6 @@ def apply_registration(
     except (ValueError, httpx.HTTPError) as exc:
         row["registration_status"] = "conflict"
         row["error"] = str(exc)[:500]
-
-
-def verify_homepage(url: str, *, sleeper=time.sleep) -> str | None:
-    headers = {
-        "User-Agent": SCOUT_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
-        "Accept-Language": "en-US,en;q=0.8",
-    }
-    final = None
-    with httpx.Client(timeout=15, follow_redirects=True, headers=headers) as client:
-        for attempt in range(1, 5):
-            try:
-                with client.stream("GET", url, headers=headers) as response:
-                    if 200 <= response.status_code < 400:
-                        final = urlparse(str(response.url))
-                        break
-                    if response.status_code not in {408, 425, 429, 500, 502, 503, 504}:
-                        return None
-                    retry_after = response.headers.get("Retry-After", "")
-            except httpx.RequestError as exc:
-                retry_after = ""
-                if not isinstance(exc, httpx.TransportError):
-                    break
-            if attempt < 4:
-                sleeper(float(retry_after) if retry_after.isdigit() else float(2 ** (attempt - 1)))
-    if final is None:
-        return None
-    host = (final.hostname or "").lower().rstrip(".")
-    if (
-        final.scheme not in {"http", "https"}
-        or not host
-        or is_ats_domain(host)
-        or not domains_compatible(url, host)
-    ):
-        return None
-    return urlunparse((final.scheme, host, "", "", "", ""))
 
 
 def result_row(candidate: dict[str, str], evidence, resolution) -> dict[str, Any]:

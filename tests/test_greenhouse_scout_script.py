@@ -34,7 +34,7 @@ def result(**overrides: str) -> dict[str, str]:
     return row
 
 
-def test_resume_reuses_completed_rows_and_retries_transient_failures() -> None:
+def test_resume_reuses_completed_and_checkpointed_homepage_negative_rows() -> None:
     assert scout.can_resume_row(result(), candidate=candidate(), apply=True) is True
     assert (
         scout.can_resume_row(
@@ -48,7 +48,7 @@ def test_resume_reuses_completed_rows_and_retries_transient_failures() -> None:
             candidate=candidate(),
             apply=True,
         )
-        is False
+        is True
     )
 
 
@@ -197,6 +197,7 @@ def test_apply_registration_writes_union_crawl_provenance(monkeypatch) -> None:
         existing_sources={},
         crawl=None,
         engine=object(),
+        homepage_verifier=lambda _url: None,
     )
 
     assert row["registration_status"] == "company_reused_source_created"

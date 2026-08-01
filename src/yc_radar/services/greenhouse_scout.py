@@ -25,6 +25,22 @@ SCOUT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.8",
 }
 RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+# Homepage verification is deliberately much tighter than board synchronization. A
+# candidate domain is supporting identity evidence, so one unhealthy website must not
+# hold the sequential scout open for minutes. Four timeout phases share each request's
+# remaining wall-clock budget, redirects are followed manually, and both redirects and
+# retries count toward this fixed request ceiling.
+HOMEPAGE_WALL_CLOCK_BUDGET_SECONDS = 20.0
+HOMEPAGE_REQUEST_PHASE_TIMEOUT_SECONDS = 5.0
+HOMEPAGE_MAX_REDIRECTS = 5
+HOMEPAGE_MAX_RETRIES = 2
+HOMEPAGE_MAX_REQUESTS = 8
+# A checkpointed ``homepage_unverified`` row is final for that immutable run manifest.
+# This persistent negative cache covers crashes before the next checkpoint, but expires
+# so a temporary outage never becomes cross-run identity truth.
+HOMEPAGE_NEGATIVE_CACHE_TTL_SECONDS = 24 * 60 * 60
+HOMEPAGE_POSITIVE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+HOMEPAGE_CACHE_KIND = "greenhouse_homepage_verification_v1"
 # Large employers can expose thousands of jobs even when Greenhouse omits job
 # descriptions. Keep the response bounded, but high enough to validate those boards
 # instead of silently parsing a truncated JSON document.
@@ -82,6 +98,15 @@ class _FetchResult:
     truncated: bool = False
 
 
+@dataclass(frozen=True)
+class _HomepageProbeResult:
+    verified_origin: str | None
+    status_code: int | None
+    final_url: str
+    error: str | None
+    request_count: int
+
+
 class GreenhouseBoardScout:
     """Sequential, cached reader for the public Greenhouse jobs-list endpoint."""
 
@@ -92,17 +117,43 @@ class GreenhouseBoardScout:
         client: httpx.Client | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
         delay_seconds: float = 1.0,
         timeout_seconds: float = 15.0,
+        homepage_wall_clock_budget_seconds: float = HOMEPAGE_WALL_CLOCK_BUDGET_SECONDS,
+        homepage_request_phase_timeout_seconds: float = (
+            HOMEPAGE_REQUEST_PHASE_TIMEOUT_SECONDS
+        ),
+        homepage_negative_cache_ttl_seconds: float = (
+            HOMEPAGE_NEGATIVE_CACHE_TTL_SECONDS
+        ),
+        homepage_positive_cache_ttl_seconds: float = (
+            HOMEPAGE_POSITIVE_CACHE_TTL_SECONDS
+        ),
     ) -> None:
         if delay_seconds < 0:
             raise ValueError("delay_seconds must be zero or greater")
+        if homepage_wall_clock_budget_seconds <= 0:
+            raise ValueError("homepage wall-clock budget must be positive")
+        if homepage_request_phase_timeout_seconds <= 0:
+            raise ValueError("homepage request phase timeout must be positive")
+        if homepage_negative_cache_ttl_seconds <= 0:
+            raise ValueError("homepage negative cache TTL must be positive")
+        if homepage_positive_cache_ttl_seconds <= 0:
+            raise ValueError("homepage positive cache TTL must be positive")
         self.cache = DiskHttpCache(cache_dir)
         self._client = client
         self._sleeper = sleeper
         self._clock = clock
+        self._wall_clock = wall_clock
         self._delay_seconds = delay_seconds
         self._timeout_seconds = timeout_seconds
+        self._homepage_wall_clock_budget_seconds = homepage_wall_clock_budget_seconds
+        self._homepage_request_phase_timeout_seconds = (
+            homepage_request_phase_timeout_seconds
+        )
+        self._homepage_negative_cache_ttl_seconds = homepage_negative_cache_ttl_seconds
+        self._homepage_positive_cache_ttl_seconds = homepage_positive_cache_ttl_seconds
         self._last_request_at: float | None = None
 
     def verify(self, board_token: str) -> GreenhouseBoardEvidence:
@@ -205,6 +256,52 @@ class GreenhouseBoardScout:
         )
         return replace(evidence, board_page_origin=choose_company_website(origins))
 
+    def verify_homepage(self, url: str) -> str | None:
+        """Return a safe canonical origin from a bounded, persistent verification.
+
+        Positive results are cached for seven days by default. Negative results are
+        cached for one day: long enough to make an immediate restart cheap, but never a
+        permanent assertion that a company website is unavailable. The scout's atomic
+        output checkpoint separately makes ``homepage_unverified`` final within one
+        immutable input/run.
+        """
+        cache_key = _homepage_cache_key(url)
+        cached = self.cache.load(cache_key, allow_retryable=True)
+        now = self._wall_clock()
+        if (
+            cached is not None
+            and cached.get("cache_kind") == HOMEPAGE_CACHE_KIND
+            and (_optional_float(cached.get("expires_at")) or 0) > now
+        ):
+            return _optional_string(cached.get("verified_origin"))
+
+        result = self._probe_homepage(url)
+        ttl = (
+            self._homepage_positive_cache_ttl_seconds
+            if result.verified_origin
+            else self._homepage_negative_cache_ttl_seconds
+        )
+        self.cache.store(
+            cache_key,
+            metadata={
+                "cache_kind": HOMEPAGE_CACHE_KIND,
+                "requested_homepage": url,
+                "status_code": result.status_code,
+                "final_url": result.final_url,
+                "verified_origin": result.verified_origin,
+                "error": result.error,
+                "attempt_count": result.request_count,
+                "checked_at": now,
+                "expires_at": now + ttl,
+                # DiskHttpCache normally excludes transient failures. Homepage
+                # negatives use their explicit TTL instead so a restart cannot repeat
+                # the same bounded-but-expensive probe before its next checkpoint.
+                "retryable": False,
+            },
+            text="",
+        )
+        return result.verified_origin
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
@@ -304,11 +401,146 @@ class GreenhouseBoardScout:
             truncated=truncated,
         )
 
-    def _pace_request(self) -> None:
+    def _probe_homepage(self, url: str) -> _HomepageProbeResult:
+        parsed = _safe_urlparse(url)
+        if parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return _HomepageProbeResult(None, None, url, "invalid_homepage_url", 0)
+
+        client = self._ensure_client()
+        deadline = self._clock() + self._homepage_wall_clock_budget_seconds
+        current_url = url
+        status_code: int | None = None
+        error: str | None = None
+        request_count = 0
+        redirect_count = 0
+        retry_count = 0
+        headers = {
+            "User-Agent": SCOUT_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5",
+            "Accept-Language": "en-US,en;q=0.8",
+        }
+
+        while request_count < HOMEPAGE_MAX_REQUESTS:
+            self._pace_request(deadline=deadline)
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                error = "homepage_wall_clock_budget_exhausted"
+                break
+            # HTTPX applies a timeout to four independent phases (pool, connect,
+            # write, read). Giving each at most one quarter of the remaining budget
+            # bounds the whole request even when more than one phase times out.
+            phase_timeout = max(
+                0.001,
+                min(self._homepage_request_phase_timeout_seconds, remaining / 4),
+            )
+            request_count += 1
+            response: httpx.Response | None = None
+            retry_delay: float | None = None
+            try:
+                with client.stream(
+                    "GET",
+                    current_url,
+                    headers=headers,
+                    follow_redirects=False,
+                    timeout=httpx.Timeout(phase_timeout),
+                ) as response:
+                    status_code = response.status_code
+                    location = response.headers.get("Location")
+                    if status_code in RETRYABLE_STATUS_CODES:
+                        error = f"http_status:{status_code}"
+                        retry_delay = _retry_delay(response, retry_count + 1)
+            except httpx.RequestError as exc:
+                error = f"{type(exc).__name__}:{exc}"
+                if isinstance(exc, httpx.TransportError):
+                    retry_delay = float(2**retry_count)
+            finally:
+                self._last_request_at = self._clock()
+
+            if response is None:
+                if retry_delay is None:
+                    break
+            elif status_code in RETRYABLE_STATUS_CODES:
+                pass
+            elif status_code is not None and 300 <= status_code < 400:
+                if not location:
+                    error = f"redirect_without_location:{status_code}"
+                    break
+                redirect_count += 1
+                if redirect_count > HOMEPAGE_MAX_REDIRECTS:
+                    error = "homepage_redirect_limit_exhausted"
+                    break
+                redirected = urljoin(current_url, location)
+                redirected_parsed = _safe_urlparse(redirected)
+                if (
+                    redirected_parsed is None
+                    or redirected_parsed.scheme not in {"http", "https"}
+                    or not redirected_parsed.hostname
+                    or redirected_parsed.username is not None
+                    or redirected_parsed.password is not None
+                    or is_ats_domain(redirected_parsed.hostname)
+                    or not domains_compatible(url, redirected_parsed.hostname)
+                ):
+                    error = "invalid_homepage_redirect"
+                    break
+                current_url = redirected
+                continue
+            elif status_code is not None and 200 <= status_code < 300:
+                final = _safe_urlparse(current_url)
+                host = ((final.hostname if final else None) or "").lower().rstrip(".")
+                if (
+                    final is None
+                    or final.scheme not in {"http", "https"}
+                    or not host
+                    or final.username is not None
+                    or final.password is not None
+                    or is_ats_domain(host)
+                    or not domains_compatible(url, host)
+                ):
+                    error = "homepage_identity_mismatch"
+                    break
+                origin = urlunparse((final.scheme, host, "", "", "", ""))
+                return _HomepageProbeResult(
+                    origin,
+                    status_code,
+                    current_url,
+                    None,
+                    request_count,
+                )
+            else:
+                error = f"http_status:{status_code}"
+                break
+
+            if retry_delay is None or retry_count >= HOMEPAGE_MAX_RETRIES:
+                break
+            retry_count += 1
+            remaining = deadline - self._clock()
+            if retry_delay >= remaining:
+                error = "homepage_wall_clock_budget_exhausted"
+                break
+            self._sleeper(retry_delay)
+
+        if request_count >= HOMEPAGE_MAX_REQUESTS and error is None:
+            error = "homepage_request_limit_exhausted"
+        return _HomepageProbeResult(None, status_code, current_url, error, request_count)
+
+    def _ensure_client(self) -> httpx.Client:
+        client = self._client
+        if client is None:
+            client = httpx.Client(
+                timeout=httpx.Timeout(self._timeout_seconds),
+                headers=SCOUT_HEADERS,
+                follow_redirects=False,
+            )
+            self._client = client
+        return client
+
+    def _pace_request(self, *, deadline: float | None = None) -> None:
         if self._last_request_at is None or not self._delay_seconds:
             return
         remaining = self._delay_seconds - (self._clock() - self._last_request_at)
         if remaining > 0:
+            if deadline is not None:
+                remaining = min(remaining, max(0.0, deadline - self._clock()))
             self._sleeper(remaining)
 
 
@@ -543,6 +775,19 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
     return float(2 ** (attempt - 1))
 
 
+def _homepage_cache_key(url: str) -> str:
+    # Namespace the key so a header-only homepage probe can never shadow a full-body
+    # cache entry for the same public URL.
+    return f"{HOMEPAGE_CACHE_KIND}:{url}"
+
+
+def _safe_urlparse(url: str):
+    try:
+        return urlparse(url)
+    except ValueError:
+        return None
+
+
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
@@ -553,5 +798,12 @@ def _optional_string(value: Any) -> str | None:
 def _optional_int(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None

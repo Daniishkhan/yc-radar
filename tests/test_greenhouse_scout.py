@@ -240,3 +240,115 @@ def test_board_page_redirect_loop_is_a_failed_enrichment_not_a_process_error(
     assert enriched.verification_status == "verified"
     assert enriched.error is not None
     assert enriched.error.startswith("TooManyRedirects:")
+
+
+def test_homepage_negative_cache_survives_restart_but_expires(
+    tmp_path: Path,
+) -> None:
+    now = [1_000.0]
+    requests: list[httpx.Request] = []
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(404)
+
+    cache_dir = tmp_path / "cache"
+    with GreenhouseBoardScout(
+        cache_dir,
+        client=httpx.Client(transport=httpx.MockTransport(unavailable)),
+        delay_seconds=0,
+        wall_clock=lambda: now[0],
+        homepage_negative_cache_ttl_seconds=60,
+    ) as scout:
+        assert scout.verify_homepage("https://acme.example") is None
+    assert len(requests) == 1
+
+    def must_not_probe(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unexpired negative cache entry must avoid the network")
+
+    with GreenhouseBoardScout(
+        cache_dir,
+        client=httpx.Client(transport=httpx.MockTransport(must_not_probe)),
+        delay_seconds=0,
+        wall_clock=lambda: now[0],
+        homepage_negative_cache_ttl_seconds=60,
+    ) as scout:
+        assert scout.verify_homepage("https://acme.example") is None
+
+    now[0] += 61
+
+    def recovered(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    with GreenhouseBoardScout(
+        cache_dir,
+        client=httpx.Client(transport=httpx.MockTransport(recovered)),
+        delay_seconds=0,
+        wall_clock=lambda: now[0],
+        homepage_negative_cache_ttl_seconds=60,
+    ) as scout:
+        assert scout.verify_homepage("https://acme.example") == "https://acme.example"
+    assert len(requests) == 2
+
+
+def test_homepage_probe_shares_remaining_budget_across_httpx_timeout_phases(
+    tmp_path: Path,
+) -> None:
+    monotonic = [0.0]
+    requests: list[httpx.Request] = []
+
+    def consume_full_timeout_budget(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        phase_timeouts = request.extensions["timeout"]
+        # HTTPX can spend time in pool, connect, write, and read independently.
+        monotonic[0] += sum(float(value) for value in phase_timeouts.values())
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    with GreenhouseBoardScout(
+        tmp_path / "cache",
+        client=httpx.Client(transport=httpx.MockTransport(consume_full_timeout_budget)),
+        delay_seconds=0,
+        clock=lambda: monotonic[0],
+        homepage_wall_clock_budget_seconds=4,
+        homepage_request_phase_timeout_seconds=15,
+    ) as scout:
+        assert scout.verify_homepage("https://slow.example") is None
+
+    assert len(requests) == 1
+    assert monotonic[0] == 4
+    assert set(requests[0].extensions["timeout"].values()) == {1.0}
+
+
+def test_homepage_redirects_are_manual_and_bounded(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def redirect_loop(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": str(request.url)})
+
+    with GreenhouseBoardScout(
+        tmp_path / "cache",
+        client=httpx.Client(transport=httpx.MockTransport(redirect_loop)),
+        delay_seconds=0,
+    ) as scout:
+        assert scout.verify_homepage("https://loop.example") is None
+
+    assert len(requests) == greenhouse_scout_module.HOMEPAGE_MAX_REDIRECTS + 1
+
+
+def test_homepage_does_not_follow_an_unrelated_redirect(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    def redirect_away(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "http://169.254.169.254/latest"})
+
+    with GreenhouseBoardScout(
+        tmp_path / "cache",
+        client=httpx.Client(transport=httpx.MockTransport(redirect_away)),
+        delay_seconds=0,
+    ) as scout:
+        assert scout.verify_homepage("https://acme.example") is None
+
+    assert [str(request.url) for request in requests] == ["https://acme.example"]

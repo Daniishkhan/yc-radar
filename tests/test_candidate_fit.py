@@ -272,6 +272,122 @@ def test_remote_eligibility_accepts_only_unambiguous_global_location_labels() ->
     )
 
 
+def test_greenhouse_global_primary_location_is_not_poisoned_by_office_alternatives() -> None:
+    def greenhouse_job(
+        location: str,
+        offices: list[dict[str, str]],
+        *,
+        description: str = "",
+    ) -> dict[str, object]:
+        return {
+            "location": location,
+            "description_text": description,
+            "structured_evidence": {
+                "schema_version": 1,
+                "provider": "greenhouse",
+                "workplace": {},
+                "primary_location": {"label": location},
+                "secondary_locations": [
+                    {"label": office.get("location") or office.get("name") or ""}
+                    for office in offices
+                ],
+                "offices": offices,
+                "countries": [],
+                "provider_metadata": [],
+                "eligibility_signals": [],
+                "application": {"is_listed": True},
+            },
+        }
+
+    restricted_offices = [
+        {"name": "North America", "location": "United States"},
+        {"name": "Hungary", "location": "Budapest, Hungary"},
+        {"name": "European TZ", "location": "Europe"},
+        {
+            "name": "Remote - Global (Eastern Time Zone)",
+            "location": "Global",
+        },
+    ]
+    cases = (
+        ("Remote - Global", restricted_offices),
+        ("Remote - Anywhere", restricted_offices),
+        ("Remote (Worldwide)", restricted_offices),
+        (
+            "Global Anywhere",
+            [
+                {
+                    "name": "Remote - Global - Anywhere",
+                    "location": "Global Anywhere",
+                }
+            ],
+        ),
+        ("Worldwide", restricted_offices),
+        ("Home based - Worldwide", restricted_offices),
+        (
+            "Home based - Worldwide; Office Based - Taipei, Taiwan",
+            restricted_offices,
+        ),
+        (
+            "Palo Alto, CA; Remote, Global; US & Europe Remote; US Remote",
+            restricted_offices,
+        ),
+    )
+
+    for location, offices in cases:
+        result = classify_remote_eligibility(greenhouse_job(location, offices))
+        assert result.status == "global_explicit", location
+        assert result.evidence == [f"location: {location}"]
+
+
+def test_greenhouse_global_location_qualifiers_and_marketing_stay_conservative() -> None:
+    def greenhouse_job(location: str, *, description: str = "") -> dict[str, object]:
+        return {
+            "location": location,
+            "description_text": description,
+            "structured_evidence": {
+                "schema_version": 1,
+                "provider": "greenhouse",
+                "workplace": {},
+                "primary_location": {"label": location},
+                "secondary_locations": [],
+                "offices": [
+                    {"name": "Global Remote Team", "location": "Worldwide"}
+                ],
+                "countries": [],
+                "provider_metadata": [],
+                "eligibility_signals": [],
+                "application": {"is_listed": True},
+            },
+        }
+
+    for location in (
+        "Global Anywhere - Eastern or European Time Zones",
+        "Remote - Global - Eastern Time Zone",
+        "Remote Global (US, EU)",
+        "Fully Remote - can be based anywhere in the U.S.",
+        "Remote/Anywhere in Latin America",
+    ):
+        assert classify_remote_eligibility(greenhouse_job(location)).status in {
+            "regional_unconfirmed",
+            "restricted_remote",
+        }, location
+
+    marketing = classify_remote_eligibility(
+        greenhouse_job(
+            "Remote",
+            description="We are a global remote team serving customers worldwide.",
+        )
+    )
+    assert marketing.status == "remote_unclear"
+    distributed_members = classify_remote_eligibility(
+        greenhouse_job(
+            "Remote",
+            description="We are globally distributed members working across many countries.",
+        )
+    )
+    assert distributed_members.status == "remote_unclear"
+
+
 def test_structured_remote_restrictions_override_global_description_boilerplate() -> None:
     global_boilerplate = "We are a global team, and employees can work from anywhere."
 
