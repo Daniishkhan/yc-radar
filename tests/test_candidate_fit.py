@@ -84,6 +84,15 @@ def test_role_classifier_keeps_backend_heavy_web_and_full_stack_titles() -> None
     )
 
 
+def test_role_classifier_excludes_contractor_pool_invitations() -> None:
+    description = (
+        "Join our Contractor Pool. Upon meeting the criteria, you'll join our contractor "
+        "network and receive project invitations tailored to your availability when they arise."
+    )
+    assert classify_role_text("Contract Senior Web Engineer", description).status == "exclude"
+    assert classify_role_text("Senior Full Stack Engineer", description).status == "exclude"
+
+
 def test_role_classifier_marks_frontend_heavy_full_stack_as_weak() -> None:
     assert classify_role_text("Full Stack Engineer", "React, design systems, CSS").status == "weak"
 
@@ -508,6 +517,14 @@ def test_remote_restrictions_and_negations_override_global_phrases() -> None:
             "description_text": (
                 "Our global team can work from anywhere. Candidates must reside in Canada."
             ),
+        },
+        {
+            "location": "Global - Remote Work",
+            "description_text": "You can be located anywhere that our EOR (Deel) supports.",
+        },
+        {
+            "location": "Global - Remote",
+            "description_text": "Applicants must be available on weekends. Be based within Europe or Latin America.",
         },
     )
 

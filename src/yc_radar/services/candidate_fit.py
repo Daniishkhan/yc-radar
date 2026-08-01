@@ -176,6 +176,11 @@ RESEARCH_ONLY_TERMS = (
     "machine learning researcher",
 )
 DATA_ANALYST_TERMS = ("data analyst", "business analyst", "analytics analyst")
+NON_OPENING_CONTEXT_PATTERNS = (
+    r"\bjoin\s+(?:our|the)\s+(?:contractor|freelance)\s+(?:pool|network)\b",
+    r"\b(?:contractor|freelance)\s+network\b.{0,240}\bproject\s+invitations?\b",
+    r"\bproject\s+invitations?\b.{0,160}\bwhen\s+they\s+arise\b",
+)
 
 
 @dataclass(frozen=True)
@@ -338,6 +343,7 @@ _GLOBAL_SCOPE_LIMITATION_PATTERNS = (
     r"\b(?:supported|approved|eligible)\s+(?:countries|locations)\s+only\b",
     r"\b(?:countries|locations)\s+where\s+we\s+(?:have|operate|can\s+hire|can\s+employ)\b",
     r"\bwhere\s+we\s+have\s+(?:an?\s+)?(?:entity|payroll|office)\b",
+    r"\b(?:located|based|work(?:ing)?)\s+anywhere\s+(?:that|where)\s+(?:our|the|an?)?\s*(?:eor|employer\s+of\s+record|payroll|entity)\b.{0,80}\b(?:supports?|allows?|operates?)\b",
 )
 _PAKISTAN_EXCLUSION_PATTERNS = (
     r"\b(?:except|excluding|excludes?|excluded|other\s+than|but\s+not)\b.{0,60}\bpakistan\b",
@@ -454,6 +460,8 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         return RoleClassification("exclude", ["Engineering-adjacent role is outside the IC SWE lane"])
     if has_frontend_only_title and not is_full_stack_title:
         return RoleClassification("exclude", ["Frontend-only title is outside backend/SWE focus"])
+    if _first_pattern_match(combined, NON_OPENING_CONTEXT_PATTERNS):
+        return RoleClassification("exclude", ["Listing is a contractor pool, not a current opening"])
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
         return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
     if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
@@ -1233,6 +1241,7 @@ def _region_eligibility_match(text: str, region_patterns: tuple[str, ...]) -> st
             rf"\bremote(?:ly)?\s+(?:from|in|within|across)\s+(?:the\s+)?{region}",
             rf"\b(?:work|working)\s+remotely\s+(?:from|in|within)\s+(?:the\s+)?{region}",
             rf"\b(?:candidates?|applicants?|employees?|contractors?)\s+(?:must\s+|need\s+to\s+|are\s+required\s+to\s+)?(?:be\s+)?(?:based|located|live|living|reside|residing)\s+(?:in|within)\s+(?:the\s+)?{region}",
+            rf"\b(?:be|must\s+be|need\s+to\s+be|required\s+to\s+be)\s+(?:based|located|living|residing)\s+(?:in|within)\s+(?:the\s+)?{region}",
             rf"{region}[- ]based\s+(?:candidates?|applicants?|employees?|contractors?)",
             rf"\b(?:open|available)\s+to\s+(?:the\s+)?{region}[- ]based\s+(?:candidates?|applicants?|employees?)",
             rf"\b(?:candidates?|applicants?|employees?|contractors?)\s+(?:from|across|throughout)\s+(?:the\s+)?{region}",
