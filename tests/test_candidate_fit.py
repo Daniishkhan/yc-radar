@@ -247,6 +247,46 @@ def test_remote_eligibility_distinguishes_global_pakistan_and_restricted_roles()
     )
 
 
+def test_remote_eligibility_accepts_only_unambiguous_global_location_labels() -> None:
+    for location in (
+        "World Wide - Remote",
+        "Worldwide Remote",
+        "Global - Remote Work",
+        "Remote - Anywhere",
+    ):
+        assert classify_remote_eligibility({"location": location}).status == "global_remote"
+
+    assert classify_remote_eligibility({"location": "Remote"}).status == "remote_unclear"
+    assert (
+        classify_remote_eligibility({"location": "Remote - APAC"}).status
+        == "pakistan_compatible"
+    )
+
+
+def test_structured_remote_restrictions_override_global_description_boilerplate() -> None:
+    global_boilerplate = "We are a global team, and employees can work from anywhere."
+
+    for location in (
+        "Remote - United States",
+        "Remote-Germany",
+        "Remote - Anywhere within the UK",
+        "Canada - Remote",
+    ):
+        assert (
+            classify_remote_eligibility(
+                {"location": location, "description_text": global_boilerplate}
+            ).status
+            == "restricted_remote"
+        )
+
+    assert (
+        classify_remote_eligibility(
+            {"location": "Remote", "description_text": global_boilerplate}
+        ).status
+        == "global_remote"
+    )
+
+
 def test_live_global_remote_backend_role_can_outrank_metadata_rich_company_without_roles() -> None:
     independent = Company(
         name="Independent Systems",

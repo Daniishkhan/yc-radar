@@ -236,6 +236,8 @@ REGION_MATCH_TERMS = ("remote", "pakistan", "india", "asia", "south asia", "mena
 REMOTE_GLOBAL_TERMS = (
     "remote worldwide",
     "worldwide remote",
+    "remote world wide",
+    "world wide remote",
     "work from anywhere",
     "anywhere in the world",
     "globally remote",
@@ -299,6 +301,24 @@ class CandidateScore:
 class RemoteEligibility:
     status: str
     reasons: list[str]
+
+
+_GLOBAL_REMOTE_LOCATION_PATTERNS = (
+    r"remote anywhere(?: in (?:the )?world)?",
+    r"anywhere(?: in (?:the )?world)? remote",
+    r"remote (?:worldwide|world wide)",
+    r"(?:worldwide|world wide) remote",
+    r"global remote(?: work)?",
+    r"remote global(?: work)?",
+    r"globally remote(?: work)?",
+    r"remote globally(?: work)?",
+)
+_GENERIC_REMOTE_LOCATION_PATTERNS = (
+    r"remote",
+    r"fully remote",
+    r"remote (?:eligible|first|optional|position|role|work)",
+    r"(?:distributed|remote) first",
+)
 
 
 def load_candidate_profile(profile_path: Path) -> dict[str, Any]:
@@ -593,37 +613,85 @@ def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
 def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     location = str(job.get("location") or "").lower()
     description = str(job.get("description_text") or "").lower()
-    combined = f"{location} {description}"
     location_is_remote = bool(re.search(r"\bremote\b", location))
+    description_is_global = _has_global_remote_claim(description)
     description_is_remote = any(
         term in description for term in REMOTE_DESCRIPTION_TERMS
-    )
+    ) or description_is_global
     if not location_is_remote and not description_is_remote:
         return RemoteEligibility("not_remote", ["No explicit remote signal"])
-    if any(term in combined for term in REMOTE_GLOBAL_TERMS):
+
+    # A structured location is stronger evidence than reusable description copy. In
+    # particular, text such as "work from anywhere" must not turn Remote-US or
+    # Remote-Germany into a globally eligible role.
+    if location_is_remote and "pakistan" in location:
+        return RemoteEligibility(
+            "pakistan_compatible",
+            ["Structured location explicitly includes Pakistan"],
+        )
+    if _structured_remote_location_is_restricted(location):
+        return RemoteEligibility(
+            "restricted_remote",
+            ["Structured remote location is explicitly geographically restricted"],
+        )
+    if _is_unambiguously_global_remote_location(location):
         return RemoteEligibility("global_remote", ["Role explicitly allows worldwide remote work"])
-    if any(term in location for term in REMOTE_PAKISTAN_COMPATIBLE_TERMS) or _remote_region_claim(
-        description, REMOTE_PAKISTAN_COMPATIBLE_TERMS
-    ):
+    if any(term in location for term in REMOTE_PAKISTAN_COMPATIBLE_TERMS):
         return RemoteEligibility(
             "pakistan_compatible",
             ["Role explicitly includes Pakistan or an APAC/South Asia region"],
         )
-    if any(term in location for term in REMOTE_RESTRICTED_LOCATION_TERMS) or _remote_region_claim(
-        description, REMOTE_RESTRICTED_LOCATION_TERMS
-    ):
-        return RemoteEligibility(
-            "restricted_remote",
-            ["Remote location is explicitly restricted outside Pakistan"],
-        )
+
     if description_is_remote and location and not location_is_remote:
         return RemoteEligibility(
             "restricted_remote",
             ["Posting pairs remote language with a specific non-Pakistan location"],
         )
+    if description_is_global:
+        return RemoteEligibility("global_remote", ["Role explicitly allows worldwide remote work"])
+    if _remote_region_claim(description, REMOTE_PAKISTAN_COMPATIBLE_TERMS):
+        return RemoteEligibility(
+            "pakistan_compatible",
+            ["Role explicitly includes Pakistan or an APAC/South Asia region"],
+        )
+    if _remote_region_claim(description, REMOTE_RESTRICTED_LOCATION_TERMS):
+        return RemoteEligibility(
+            "restricted_remote",
+            ["Remote location is explicitly restricted outside Pakistan"],
+        )
     return RemoteEligibility(
         "remote_unclear",
         ["Role is remote, but eligible countries are not explicit"],
+    )
+
+
+def _normalise_remote_location(location: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", location.lower())).strip()
+
+
+def _has_global_remote_claim(text: str) -> bool:
+    normalised = _normalise_remote_location(text)
+    return any(term in normalised for term in REMOTE_GLOBAL_TERMS)
+
+
+def _is_unambiguously_global_remote_location(location: str) -> bool:
+    normalised = _normalise_remote_location(location)
+    return any(re.fullmatch(pattern, normalised) for pattern in _GLOBAL_REMOTE_LOCATION_PATTERNS)
+
+
+def _structured_remote_location_is_restricted(location: str) -> bool:
+    if not re.search(r"\bremote\b", location):
+        return False
+    if any(term in location for term in REMOTE_RESTRICTED_LOCATION_TERMS):
+        return True
+    if _is_unambiguously_global_remote_location(location):
+        return False
+    if any(term in location for term in REMOTE_PAKISTAN_COMPATIBLE_TERMS):
+        return False
+
+    normalised = _normalise_remote_location(location)
+    return not any(
+        re.fullmatch(pattern, normalised) for pattern in _GENERIC_REMOTE_LOCATION_PATTERNS
     )
 
 
