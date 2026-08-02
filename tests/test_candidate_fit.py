@@ -312,6 +312,7 @@ def test_role_classifier_includes_production_ai_engineering(title: str) -> None:
     (
         ("Senior Backend Engineer", "backend"),
         ("Senior Full Stack Engineer", "full_stack"),
+        ("Full-Stack Developer", "full_stack"),
         ("Senior Frontend Engineer", "frontend"),
         ("Senior Software Engineer", "software_engineering"),
         ("Applied AI Engineer", "ai_engineering"),

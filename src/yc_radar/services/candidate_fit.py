@@ -291,7 +291,7 @@ class RoleClassification:
 
 
 ROLE_FAMILY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("full_stack", (r"\bfull ?stack\b",)),
+    ("full_stack", (r"\bfull[ -]?stack\b",)),
     (
         "frontend",
         (
