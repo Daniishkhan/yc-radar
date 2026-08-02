@@ -299,9 +299,11 @@ matching company/title clusters and their posting-variant distributions.
   software-engineering titles. It separates remote work arrangement from geographic eligibility
   and places `remote_unclear` and `regional_unconfirmed` rows in verification tiers.
 - `jobs_to_apply.csv` is the final ranked application list. It includes both primary and expanded
-  role lanes, but only when the posting explicitly names Pakistan or worldwide remote scope.
+  role lanes only when the title is explicitly backend/software/full-stack/platform aligned and
+  the posting explicitly names Pakistan or worldwide remote scope.
 - `jobs_to_verify.csv` ranks otherwise-relevant remote roles whose country or regional eligibility
-  must be checked before applying, so conservative evidence rules do not silently discard them.
+  or adjacent engineering title must be checked before applying, so conservative evidence rules
+  do not silently discard them.
 
 Application priority uses explicit eligibility evidence, role fit, primary-lane scope, posting
 freshness, and availability of a public application URL. Old postings that remain active in a
@@ -315,6 +317,14 @@ candidate in Pakistan can apply.
 ```bash
 uv run python scripts/analyze_job_funnel.py \
   --history-run-dir data/local/runs/greenhouse-history-backfill
+```
+
+Rebuild rankings and all queue CSVs after changing only scoring or final selection rules without
+repeating the expensive database classification pass:
+
+```bash
+uv run python scripts/analyze_job_funnel.py \
+  --rerank-report data/local/runs/job-funnel-2026-08-02/job_funnel_report.json
 ```
 
 ## Pipeline Mental Model

@@ -105,6 +105,16 @@ EXPANDED_TITLE_PATTERN = re.compile(
     r"infrastructure) )?(?:engineer|developer)\b|\bsde\b)",
     flags=re.IGNORECASE,
 )
+APPLICATION_TITLE_ALIGNMENT_PATTERN = re.compile(
+    r"(?:\bback ?end\b|\bfull ?stack\b|\bsoftware\b|\bsite reliability\b|"
+    r"\bdevops\b|\bsre\b|\bsde\b|\bswe\b|\bapi\b.{0,40}\b(?:developer|engineer)\b|"
+    r"\b(?:developer|engineer)\b.{0,40}\bapi\b|"
+    r"\b(?:platform|infrastructure|product|data|cloud|founding)\b.{0,40}"
+    r"\b(?:developer|engineer)\b|\b(?:developer|engineer)\b.{0,40}"
+    r"\b(?:platform|infrastructure|product|data|cloud)\b|"
+    r"\bmember of technical staff\b)",
+    flags=re.IGNORECASE,
+)
 ACTIVE_CLEARANCE_LEVEL_PATTERN = (
     r"(?:secret|top\s+secret|ts\s*[/\-]\s*sci|top\s+secret\s*[/\-]\s*sci|"
     r"dod(?:\s+security)?)"
@@ -295,6 +305,7 @@ APPLICATION_QUEUE_CSV_FIELDS = (
     "title",
     "role_match_status",
     "role_scope",
+    "title_alignment",
     "geographic_eligibility",
     "remote_eligibility",
     "posting_age_days",
@@ -347,7 +358,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=settings.runs_dir / f"job-funnel-{date.today().isoformat()}",
+        help=(
+            "Artifact directory; defaults to today's run directory, or the source report "
+            "directory in --rerank-report mode."
+        ),
+    )
+    parser.set_defaults(
+        default_output_dir=settings.runs_dir / f"job-funnel-{date.today().isoformat()}"
     )
     parser.add_argument(
         "--as-of",
@@ -361,6 +378,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Optional Greenhouse backfill run directory whose JSON artifacts are summarized.",
     )
     parser.add_argument("--top-boards", type=positive_int, default=25)
+    parser.add_argument(
+        "--rerank-report",
+        type=Path,
+        help=(
+            "Rebuild queue rankings from an existing job_funnel_report.json without querying "
+            "Postgres or reclassifying descriptions."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -446,6 +471,11 @@ def classification_context(row: Mapping[str, Any]) -> str:
 def is_expanded_remote_lead_title(title: str) -> bool:
     """Return whether a weak role has an explicit software/full-stack title."""
     return EXPANDED_TITLE_PATTERN.search(normalize_title(title)) is not None
+
+
+def is_application_title_aligned(title: str) -> bool:
+    """Keep the final apply queue in the explicit backend/software/full-stack lane."""
+    return APPLICATION_TITLE_ALIGNMENT_PATTERN.search(normalize_title(title)) is not None
 
 
 def _clearance_clause_sides(description: str, *, start: int, end: int) -> tuple[str, str]:
@@ -950,19 +980,31 @@ def application_queue_row(cluster: Mapping[str, Any], *, as_of: datetime) -> dic
     remote_status = str(cluster["best_remote_eligibility"])
     role_status = str(cluster["role_match_status"])
     role_scope = str(cluster["role_scope"])
+    title_aligned = is_application_title_aligned(str(cluster["representative_title"]))
     age_days = posting_age_days(cluster, as_of=as_of)
     freshness_points, freshness_bucket = _freshness_score(age_days)
     application_url = str(best.get("apply_url") or best.get("posting_url") or "")
-    score = min(
-        100,
-        APPLICATION_ELIGIBILITY_POINTS[remote_status]
-        + APPLICATION_ROLE_POINTS[role_status]
-        + APPLICATION_SCOPE_POINTS[role_scope]
-        + freshness_points
-        + (5 if application_url else 0),
+    score = max(
+        0,
+        min(
+            100,
+            APPLICATION_ELIGIBILITY_POINTS[remote_status]
+            + APPLICATION_ROLE_POINTS[role_status]
+            + APPLICATION_SCOPE_POINTS[role_scope]
+            + freshness_points
+            + (5 if application_url else 0),
+        )
+        - (0 if title_aligned else 15),
     )
     priority_band = "P0" if score >= 85 else "P1" if score >= 70 else "P2"
-    if remote_status in ACTIONABLE_REMOTE_STATUSES:
+    if not title_aligned:
+        recommendation = "verify_role_fit_then_apply"
+        geography_check = LEAD_REVIEW_NOTES[str(cluster["lead_tier"])]
+        manual_check = (
+            "Confirm that this adjacent engineering title is sufficiently software/backend "
+            f"aligned. {geography_check}"
+        )
+    elif remote_status in ACTIONABLE_REMOTE_STATUSES:
         recommendation = "apply_now"
         manual_check = (
             "Confirm Pakistan engagement, compensation, and timezone terms before submitting."
@@ -998,6 +1040,9 @@ def application_queue_row(cluster: Mapping[str, Any], *, as_of: datetime) -> dic
         "title": cluster["representative_title"],
         "role_match_status": role_status,
         "role_scope": role_scope,
+        "title_alignment": (
+            "primary_backend_software" if title_aligned else "supporting_engineering"
+        ),
         "geographic_eligibility": cluster["geographic_eligibility"],
         "remote_eligibility": remote_status,
         "posting_age_days": age_days,
@@ -1049,19 +1094,66 @@ def build_application_queues(
         "verify_before_apply_count": len(verify_rows),
         "recommendation_distribution": ordered_counts(
             Counter(str(row["recommendation"]) for row in all_rows),
-            ("apply_now", "verify_country_then_apply", "verify_region_then_apply"),
+            (
+                "apply_now",
+                "verify_country_then_apply",
+                "verify_region_then_apply",
+                "verify_role_fit_then_apply",
+            ),
+        ),
+        "title_alignment_distribution": ordered_counts(
+            Counter(str(row["title_alignment"]) for row in all_rows),
+            ("primary_backend_software", "supporting_engineering"),
         ),
         "priority_band_distribution": ordered_counts(
             Counter(str(row["priority_band"]) for row in all_rows),
             ("P0", "P1", "P2"),
         ),
         "ranking": (
-            "Eligibility evidence, role fit, primary-lane scope, publication freshness, and "
-            "availability of a public application URL; old active jobs are ranked down, not "
-            "silently discarded."
+            "Eligibility evidence, explicit title alignment, role fit, primary-lane scope, "
+            "publication freshness, and availability of a public application URL; old active "
+            "jobs are ranked down, not silently discarded."
         ),
     }
     return apply_rows, verify_rows, summary
+
+
+def rerank_existing_report(
+    report_path: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Rebuild only final queues from durable classified leads in an existing report."""
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("funnel report root must be an object")
+    remote_leads = payload.get("remote_role_leads")
+    actionable = payload.get("actionable_clusters")
+    if not isinstance(remote_leads, list) or not isinstance(actionable, list):
+        raise ValueError("funnel report must contain remote_role_leads and actionable_clusters")
+    as_of_value = payload.get("as_of")
+    if not isinstance(as_of_value, str):
+        raise ValueError("funnel report must contain an ISO-8601 as_of timestamp")
+    try:
+        as_of = datetime.fromisoformat(as_of_value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("funnel report as_of timestamp is invalid") from exc
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=UTC)
+    as_of = as_of.astimezone(UTC)
+    jobs_to_apply, jobs_to_verify, queue_summary = build_application_queues(
+        remote_leads,
+        as_of=as_of,
+    )
+    report = dict(payload)
+    report.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "application_queue_generated_at": datetime.now(UTC).isoformat(),
+            "application_queue_analysis": queue_summary,
+            "jobs_to_apply": jobs_to_apply,
+            "jobs_to_verify": jobs_to_verify,
+        }
+    )
+    return report, actionable
 
 
 def _grouped_counts(
@@ -1726,6 +1818,26 @@ def publish_report_artifacts(
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.rerank_report is not None:
+        report, actionable = rerank_existing_report(args.rerank_report)
+        output_dir = args.output_dir or args.rerank_report.parent
+        published = publish_report_artifacts(
+            output_dir,
+            report=report,
+            actionable=actionable,
+        )
+        print(f"Reranked durable funnel report: {published['job_funnel_report.json'].resolve()}")
+        print(
+            f"Wrote {len(report['jobs_to_apply'])} ranked apply-now jobs: "
+            f"{published['jobs_to_apply.csv'].resolve()}"
+        )
+        print(
+            f"Wrote {len(report['jobs_to_verify'])} ranked verification jobs: "
+            f"{published['jobs_to_verify.csv'].resolve()}"
+        )
+        return
+
+    output_dir = args.output_dir or args.default_output_dir
     engine = engine_from_url(args.database_url)
     try:
         with engine.connect() as connection, connection.begin():
@@ -1748,7 +1860,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         history_run_dir=args.history_run_dir,
     )
     published = publish_report_artifacts(
-        args.output_dir,
+        output_dir,
         report=report,
         actionable=actionable,
     )
@@ -1771,7 +1883,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Wrote tiered remote leads CSV: {remote_leads_path.resolve()}")
     print(f"Wrote {len(report['jobs_to_apply'])} ranked apply-now jobs: {apply_path.resolve()}")
     print(
-        f"Wrote {len(report['jobs_to_verify'])} ranked country-verification jobs: "
+        f"Wrote {len(report['jobs_to_verify'])} ranked verification jobs: "
         f"{verify_path.resolve()}"
     )
 

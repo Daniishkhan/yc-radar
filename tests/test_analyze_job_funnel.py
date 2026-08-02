@@ -585,6 +585,67 @@ def test_application_queue_csv_is_atomic_and_has_no_profile_or_description(
     assert "description_text" not in written[0]
 
 
+def test_adjacent_engineering_title_requires_role_fit_review() -> None:
+    row = job(
+        1,
+        title="Senior Security Engineer",
+        description=(
+            "Build backend platform and infrastructure security. This role is remote worldwide."
+        ),
+    )
+    row["source_published_at"] = datetime(2026, 7, 31, tzinfo=UTC)
+    analysis = funnel._analyze_role_rows([row])
+
+    apply_rows, verify_rows, summary = funnel.build_application_queues(
+        analysis.remote_leads,
+        as_of=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    assert apply_rows == []
+    assert len(verify_rows) == 1
+    assert verify_rows[0]["recommendation"] == "verify_role_fit_then_apply"
+    assert verify_rows[0]["title_alignment"] == "supporting_engineering"
+    assert verify_rows[0]["remote_eligibility"] == "global_explicit"
+    assert "software/backend aligned" in verify_rows[0]["manual_check"]
+    assert summary["title_alignment_distribution"] == {"supporting_engineering": 1}
+
+
+def test_rerank_mode_rebuilds_queues_without_database_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    analysis = funnel._analyze_role_rows(
+        [job(1, description="This role is remote worldwide.")]
+    )
+    report_path = tmp_path / "job_funnel_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "as_of": "2026-08-01T00:00:00+00:00",
+                "remote_role_leads": analysis.remote_leads,
+                "actionable_clusters": analysis.actionable_clusters,
+            },
+            default=funnel.iso_value,
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_database_access(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("rerank mode must not open Postgres")
+
+    monkeypatch.setattr(funnel, "engine_from_url", fail_database_access)
+    funnel.main(["--rerank-report", str(report_path)])
+
+    with (tmp_path / "jobs_to_apply.csv").open(newline="", encoding="utf-8") as source:
+        apply_rows = list(csv.DictReader(source))
+    assert len(apply_rows) == 1
+    assert apply_rows[0]["recommendation"] == "apply_now"
+    rewritten = json.loads(report_path.read_text())
+    assert rewritten["schema_version"] == funnel.SCHEMA_VERSION
+    assert rewritten["application_queue_analysis"]["apply_now_count"] == 1
+    assert "application_queue_generated_at" in rewritten
+
+
 def test_report_artifacts_publish_as_one_prevalidated_set(tmp_path: Path) -> None:
     report = {"generation": "new", "remote_role_leads": []}
 
