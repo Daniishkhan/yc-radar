@@ -115,6 +115,15 @@ APPLICATION_TITLE_ALIGNMENT_PATTERN = re.compile(
     r"\bmember of technical staff\b)",
     flags=re.IGNORECASE,
 )
+APPLICATION_ADJACENT_TITLE_PATTERN = re.compile(
+    r"\b(?:network|storage|security) engineer\b|\bsystems engineer\b",
+    flags=re.IGNORECASE,
+)
+APPLICATION_ADJACENT_OVERRIDE_PATTERN = re.compile(
+    r"\b(?:software|back ?end|full ?stack)\b|"
+    r"\b(?:platform|infrastructure)\b.{0,24}\bengineer\b",
+    flags=re.IGNORECASE,
+)
 ACTIVE_CLEARANCE_LEVEL_PATTERN = (
     r"(?:secret|top\s+secret|ts\s*[/\-]\s*sci|top\s+secret\s*[/\-]\s*sci|"
     r"dod(?:\s+security)?)"
@@ -475,7 +484,12 @@ def is_expanded_remote_lead_title(title: str) -> bool:
 
 def is_application_title_aligned(title: str) -> bool:
     """Keep the final apply queue in the explicit backend/software/full-stack lane."""
-    return APPLICATION_TITLE_ALIGNMENT_PATTERN.search(normalize_title(title)) is not None
+    normalized = normalize_title(title)
+    if APPLICATION_ADJACENT_TITLE_PATTERN.search(
+        normalized
+    ) and not APPLICATION_ADJACENT_OVERRIDE_PATTERN.search(normalized):
+        return False
+    return APPLICATION_TITLE_ALIGNMENT_PATTERN.search(normalized) is not None
 
 
 def _clearance_clause_sides(description: str, *, start: int, end: int) -> tuple[str, str]:

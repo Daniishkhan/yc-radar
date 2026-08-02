@@ -610,6 +610,32 @@ def test_adjacent_engineering_title_requires_role_fit_review() -> None:
     assert summary["title_alignment_distribution"] == {"supporting_engineering": 1}
 
 
+@pytest.mark.parametrize(
+    "title",
+    (
+        "Network Engineer (Trading Infrastructure)",
+        "Senior Storage Engineer",
+        "Senior Security Engineer",
+        "Systems Engineer (Trading Infrastructure)",
+    ),
+)
+def test_adjacent_title_parentheticals_do_not_bypass_alignment_gate(title: str) -> None:
+    assert not funnel.is_application_title_aligned(title)
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
+        "Security Software Engineer",
+        "Backend Security Engineer",
+        "Platform Engineer, Security",
+        "Infrastructure Engineer - Network Platform",
+    ),
+)
+def test_explicit_software_platform_titles_override_adjacent_domain(title: str) -> None:
+    assert funnel.is_application_title_aligned(title)
+
+
 def test_rerank_mode_rebuilds_queues_without_database_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
