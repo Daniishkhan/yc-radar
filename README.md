@@ -291,13 +291,22 @@ Inspect active canonical jobs without profile/contact data:
 uv run python scripts/generate_job_opportunities.py --limit 50
 ```
 
-Measure the full canonical funnel and write two application-research queues. The JSON keeps all
+Measure the full canonical funnel and write application and research queues. The JSON keeps all
 matching company/title clusters and their posting-variant distributions.
 
 - `actionable_job_clusters.csv` remains strict: only `pakistan_explicit` and `global_explicit`.
 - `remote_role_leads.csv` unions the primary backend/platform lane with explicit full-stack and
   software-engineering titles. It separates remote work arrangement from geographic eligibility
   and places `remote_unclear` and `regional_unconfirmed` rows in verification tiers.
+- `jobs_to_apply.csv` is the final ranked application list. It includes both primary and expanded
+  role lanes, but only when the posting explicitly names Pakistan or worldwide remote scope.
+- `jobs_to_verify.csv` ranks otherwise-relevant remote roles whose country or regional eligibility
+  must be checked before applying, so conservative evidence rules do not silently discard them.
+
+Application priority uses explicit eligibility evidence, role fit, primary-lane scope, posting
+freshness, and availability of a public application URL. Old postings that remain active in a
+complete provider snapshot are ranked down rather than removed. The report also records role
+classification reasons and queue-exclusion counts so filter changes can be based on measured loss.
 
 Geographically restricted, onsite, no-remote-evidence, and active-government-clearance-required
 roles are excluded from both CSVs. Verification tiers are research leads, not claims that a

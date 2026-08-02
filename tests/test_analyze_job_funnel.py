@@ -80,6 +80,10 @@ def test_role_clustering_preserves_variants_and_selects_explicit_pakistan() -> N
     assert summary == {
         "title_prefiltered_job_count": 4,
         "prefilter_role_status_distribution": {"strong": 3, "exclude": 1},
+        "prefilter_role_reason_distribution": {
+            "Backend/platform role matches primary target lane": 3,
+            "Non-engineering or junior/intern role": 1,
+        },
         "matching_raw_variant_count": 3,
         "matching_company_title_cluster_count": 2,
         "matching_duplicate_variant_count": 1,
@@ -166,9 +170,7 @@ def test_remote_leads_expand_only_explicit_weak_titles_and_assign_review_tiers()
             job(
                 6,
                 title="Software Developer",
-                description=(
-                    "This remote role is open to candidates based in Pakistan."
-                ),
+                description=("This remote role is open to candidates based in Pakistan."),
                 location="Pakistan - Remote",
             ),
             job(
@@ -203,16 +205,12 @@ def test_remote_leads_expand_only_explicit_weak_titles_and_assign_review_tiers()
         "software developer",
     }
     assert by_title["software engineer"]["role_match_status"] == "weak"
-    assert by_title["software engineer"]["role_scope"] == (
-        "expanded_fullstack_software"
-    )
+    assert by_title["software engineer"]["role_scope"] == ("expanded_fullstack_software")
     assert by_title["software engineer"]["lead_tier"] == "verify_country"
     assert by_title["software engineer"]["work_arrangement"] == "remote"
     assert by_title["software engineer"]["geographic_eligibility"] == "unknown"
     assert by_title["full stack developer"]["lead_tier"] == "verify_region"
-    assert by_title["full stack developer"]["geographic_eligibility"] == (
-        "regional_unconfirmed"
-    )
+    assert by_title["full stack developer"]["geographic_eligibility"] == ("regional_unconfirmed")
     assert by_title["senior backend engineer"]["role_scope"] == "primary_target"
     assert by_title["senior backend engineer"]["lead_tier"] == "confirmed"
     assert by_title["senior backend engineer"]["geographic_eligibility"] == "global"
@@ -235,6 +233,21 @@ def test_remote_leads_expand_only_explicit_weak_titles_and_assign_review_tiers()
         "global": 1,
         "unknown": 1,
         "regional_unconfirmed": 1,
+    }
+    assert summary["candidate_variant_count"] == 7
+    assert summary["candidate_remote_status_distribution"] == {
+        "pakistan_explicit": 1,
+        "global_explicit": 1,
+        "regional_unconfirmed": 1,
+        "remote_unclear": 1,
+        "restricted_remote": 1,
+        "onsite_explicit": 1,
+        "no_remote_evidence": 1,
+    }
+    assert summary["queue_exclusion_distribution"] == {
+        "no_remote_evidence": 1,
+        "onsite_explicit": 1,
+        "restricted_remote": 1,
     }
 
 
@@ -298,9 +311,7 @@ def test_remote_leads_include_sde_but_preserve_role_lane_exclusions() -> None:
     assert leads[0]["role_scope"] == "expanded_fullstack_software"
     assert leads[0]["lead_tier"] == "confirmed"
     assert summary["lead_company_title_cluster_count"] == 3
-    assert summary["role_scope_distribution"] == {
-        "expanded_fullstack_software": 3
-    }
+    assert summary["role_scope_distribution"] == {"expanded_fullstack_software": 3}
 
 
 def test_required_active_clearance_stays_measurable_but_is_excluded_from_queues() -> None:
@@ -346,13 +357,9 @@ def test_required_active_clearance_stays_measurable_but_is_excluded_from_queues(
         funnel.actionable_csv_row(strict[0])
     with pytest.raises(ValueError, match="active government clearance"):
         funnel.remote_lead_csv_row(strict[0])
-    assert [item["best_variant"]["external_job_id"] for item in leads] == [
-        "external-3"
-    ]
+    assert [item["best_variant"]["external_job_id"] for item in leads] == ["external-3"]
     assert lead_summary["clearance_excluded_variant_count"] == 2
-    assert all(
-        item["required_active_clearance_variant_count"] == 0 for item in leads
-    )
+    assert all(item["required_active_clearance_variant_count"] == 0 for item in leads)
     assert "Candidates must be able to obtain" not in json.dumps(leads)
 
 
@@ -374,13 +381,12 @@ def test_required_clearance_in_title_is_excluded_without_active_keyword() -> Non
 
     assert analysis.role_summary["clearance_required_matching_variant_count"] == 1
     assert analysis.role_summary["actionable_clearance_excluded_variant_count"] == 1
-    assert [
-        item["best_variant"]["external_job_id"]
-        for item in analysis.actionable_clusters
-    ] == ["external-2"]
-    assert [
-        item["best_variant"]["external_job_id"] for item in analysis.remote_leads
-    ] == ["external-2"]
+    assert [item["best_variant"]["external_job_id"] for item in analysis.actionable_clusters] == [
+        "external-2"
+    ]
+    assert [item["best_variant"]["external_job_id"] for item in analysis.remote_leads] == [
+        "external-2"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -396,13 +402,8 @@ def test_required_clearance_in_title_is_excluded_without_active_keyword() -> Non
         "TS/SCI Clearance Required.",
         "A Top Secret clearance is mandatory.",
         "Candidates must hold a Secret clearance.",
-        (
-            "<p>Required Qualifications:</p><ul><li>Active Secret clearance"
-            "</li></ul>"
-        ),
-        (
-            "<li><strong>Investigative Requirement</strong>: Secret clearance.</li>"
-        ),
+        ("<p>Required Qualifications:</p><ul><li>Active Secret clearance</li></ul>"),
+        ("<li><strong>Investigative Requirement</strong>: Secret clearance.</li>"),
     ),
 )
 def test_active_clearance_filter_detects_clause_local_requirements(
@@ -427,10 +428,7 @@ def test_active_clearance_filter_detects_clause_local_requirements(
         "Ability to obtain a TS/SCI clearance is required.",
         "No TS/SCI clearance is required.",
         "A Top Secret clearance is optional.",
-        (
-            "<p>Preferred Qualifications:</p><ul><li>Active Secret clearance"
-            "</li></ul>"
-        ),
+        ("<p>Preferred Qualifications:</p><ul><li>Active Secret clearance</li></ul>"),
         (
             "<p>Required Qualifications:</p><ul><li>Ability to obtain an active "
             "Secret clearance</li></ul>"
@@ -508,6 +506,85 @@ def test_remote_lead_clustering_and_atomic_csv_do_not_expose_descriptions(
     assert list(tmp_path.glob(f".{output.name}.*")) == []
 
 
+def test_application_queues_separate_and_rank_apply_and_verification_work() -> None:
+    rows = [
+        job(
+            1,
+            title="Senior Backend Engineer",
+            description="This role is remote worldwide.",
+        ),
+        job(
+            2,
+            title="Software Engineer",
+            description="This role is remote worldwide.",
+        ),
+        job(
+            3,
+            title="Senior Platform Engineer",
+            description="This is a fully remote role.",
+        ),
+        job(
+            4,
+            title="Senior Software Engineer",
+            description="This is a remote APAC role.",
+            location="Remote - APAC",
+        ),
+    ]
+    rows[0]["source_published_at"] = datetime(2026, 7, 30, tzinfo=UTC)
+    rows[1]["source_published_at"] = datetime(2026, 7, 31, tzinfo=UTC)
+    rows[2]["source_published_at"] = datetime(2026, 7, 29, tzinfo=UTC)
+    rows[3]["source_published_at"] = datetime(2026, 7, 28, tzinfo=UTC)
+    analysis = funnel._analyze_role_rows(rows)
+
+    apply_rows, verify_rows, summary = funnel.build_application_queues(
+        analysis.remote_leads,
+        as_of=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    assert [row["title"] for row in apply_rows] == [
+        "Senior Backend Engineer",
+        "Software Engineer",
+    ]
+    assert [row["priority_rank"] for row in apply_rows] == [1, 2]
+    assert all(row["recommendation"] == "apply_now" for row in apply_rows)
+    assert apply_rows[0]["recommendation_score"] > apply_rows[1]["recommendation_score"]
+    assert [row["recommendation"] for row in verify_rows] == [
+        "verify_country_then_apply",
+        "verify_region_then_apply",
+    ]
+    assert summary["apply_now_count"] == 2
+    assert summary["verify_before_apply_count"] == 2
+    assert summary["recommendation_distribution"] == {
+        "apply_now": 2,
+        "verify_country_then_apply": 1,
+        "verify_region_then_apply": 1,
+    }
+    assert "description_text" not in json.dumps([*apply_rows, *verify_rows])
+
+
+def test_application_queue_csv_is_atomic_and_has_no_profile_or_description(
+    tmp_path: Path,
+) -> None:
+    analysis = funnel._analyze_role_rows(
+        [job(1, description="This role is remote worldwide. PRIVATE_DESCRIPTION")]
+    )
+    apply_rows, _, _ = funnel.build_application_queues(
+        analysis.remote_leads,
+        as_of=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    output = tmp_path / "jobs_to_apply.csv"
+
+    funnel.write_application_queue_csv_atomic(output, apply_rows)
+
+    with output.open(newline="", encoding="utf-8") as source:
+        written = list(csv.DictReader(source))
+    assert len(written) == 1
+    assert written[0]["recommendation"] == "apply_now"
+    assert written[0]["application_url"] == "https://jobs.example/1/apply"
+    assert "PRIVATE_DESCRIPTION" not in output.read_text()
+    assert "description_text" not in written[0]
+
+
 def test_report_artifacts_publish_as_one_prevalidated_set(tmp_path: Path) -> None:
     report = {"generation": "new", "remote_role_leads": []}
 
@@ -519,11 +596,21 @@ def test_report_artifacts_publish_as_one_prevalidated_set(tmp_path: Path) -> Non
 
     assert tuple(published) == funnel.REPORT_ARTIFACT_FILENAMES
     assert json.loads(published["job_funnel_report.json"].read_text()) == report
-    assert published["actionable_job_clusters.csv"].read_text().startswith(
-        "company_name,company_slug,"
+    assert (
+        published["actionable_job_clusters.csv"]
+        .read_text()
+        .startswith("company_name,company_slug,")
     )
-    assert published["remote_role_leads.csv"].read_text().startswith(
-        "lead_tier,role_scope,"
+    assert published["remote_role_leads.csv"].read_text().startswith("lead_tier,role_scope,")
+    assert (
+        published["jobs_to_apply.csv"]
+        .read_text()
+        .startswith("priority_rank,priority_band,recommendation,")
+    )
+    assert (
+        published["jobs_to_verify.csv"]
+        .read_text()
+        .startswith("priority_rank,priority_band,recommendation,")
     )
     assert list(tmp_path.glob(".*.stage-*")) == []
     assert list(tmp_path.glob(".*.backup-*")) == []
@@ -545,8 +632,7 @@ def test_report_artifact_prevalidation_preserves_existing_set(tmp_path: Path) ->
         )
 
     assert {
-        name: (tmp_path / name).read_bytes()
-        for name in funnel.REPORT_ARTIFACT_FILENAMES
+        name: (tmp_path / name).read_bytes() for name in funnel.REPORT_ARTIFACT_FILENAMES
     } == originals
     assert list(tmp_path.glob(".*.stage-*")) == []
     assert list(tmp_path.glob(".*.backup-*")) == []
@@ -587,8 +673,7 @@ def test_report_artifact_publish_failure_rolls_back_entire_set(
         )
 
     assert {
-        name: (tmp_path / name).read_bytes()
-        for name in funnel.REPORT_ARTIFACT_FILENAMES
+        name: (tmp_path / name).read_bytes() for name in funnel.REPORT_ARTIFACT_FILENAMES
     } == originals
     assert list(tmp_path.glob(".*.stage-*")) == []
     assert list(tmp_path.glob(".*.backup-*")) == []
@@ -753,16 +838,16 @@ def test_build_report_emits_bounded_evidence_without_full_descriptions() -> None
     assert report["remote_role_leads"][0]["lead_tier"] == "confirmed"
     assert report["remote_role_leads"][0]["work_arrangement"] == "remote"
     assert report["remote_role_leads"][0]["geographic_eligibility"] == "global"
+    assert report["application_queue_analysis"]["apply_now_count"] == 1
+    assert report["application_queue_analysis"]["verify_before_apply_count"] == 0
+    assert report["jobs_to_apply"][0]["recommendation"] == "apply_now"
+    assert report["jobs_to_verify"] == []
     serialized = json.dumps(report)
     assert "global signal: this role is remote worldwide" in serialized
     assert "FULL_DESCRIPTION_PRIVATE_TAIL" not in serialized
     assert '"description_text":' not in serialized
-    assert "Bounded evidence excerpts may be emitted" in report["scope"][
-        "description_handling"
-    ]
-    assert "full descriptions" in report["remote_leads_analysis"][
-        "description_handling"
-    ]
+    assert "Bounded evidence excerpts may be emitted" in report["scope"]["description_handling"]
+    assert "full descriptions" in report["remote_leads_analysis"]["description_handling"]
     assert report["scope"]["remote_eligibility"].startswith("Deterministic")
 
 
@@ -782,9 +867,7 @@ def test_structured_evidence_coverage_query_executes_against_migrated_postgres(
         {
             "id": 123,
             "title": "Senior Backend Engineer",
-            "absolute_url": (
-                "https://job-boards.greenhouse.io/funnel-evidence-example/jobs/123"
-            ),
+            "absolute_url": ("https://job-boards.greenhouse.io/funnel-evidence-example/jobs/123"),
             "content": "<p>This role is remote worldwide.</p>",
             "location": {"name": "Remote"},
             "departments": [{"name": "Engineering"}],

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Produce a read-only canonical-job funnel report and tiered remote-role queues.
+"""Produce a read-only canonical-job funnel report and ranked application queues.
 
 The command deliberately separates remote work arrangement from applicant geography.  The strict
 actionable CSV only contains matching role clusters whose public evidence explicitly names
 Pakistan or an unrestricted global scope.  A second CSV broadens the role lane to full-stack and
-software-engineering titles while keeping unclear country or regional eligibility in verification
-tiers.  Those labels are evidence summaries, not work-authorization or visa conclusions.
+software-engineering titles while keeping unclear country or regional eligibility in a separate
+ranked verification queue.  Those labels are evidence summaries, not work-authorization or visa
+conclusions.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from yc_radar.services.database import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ACTIONABLE_REMOTE_STATUSES = frozenset({"pakistan_explicit", "global_explicit"})
 REMOTE_LEAD_STATUSES = frozenset(
     {
@@ -68,6 +69,14 @@ GEOGRAPHIC_ELIGIBILITY_BY_REMOTE_STATUS = {
 LEAD_TIER_ORDER = {"confirmed": 0, "verify_country": 1, "verify_region": 2}
 ROLE_SCOPE_ORDER = {"primary_target": 0, "expanded_fullstack_software": 1}
 ROLE_STATUS_ORDER = {"strong": 0, "possible": 1, "weak": 2, "exclude": 3}
+APPLICATION_ROLE_POINTS = {"strong": 30, "possible": 22, "weak": 12}
+APPLICATION_SCOPE_POINTS = {"primary_target": 10, "expanded_fullstack_software": 4}
+APPLICATION_ELIGIBILITY_POINTS = {
+    "pakistan_explicit": 35,
+    "global_explicit": 35,
+    "remote_unclear": 20,
+    "regional_unconfirmed": 15,
+}
 ROLE_TITLE_PREFILTER_PATTERN = (
     r"engineer|developer|architect|site[[:space:]-]+reliability|"
     r"(^|[^a-z])sre([^a-z]|$)|(^|[^a-z])sde([^a-z]|$)|devops|"
@@ -276,10 +285,40 @@ REMOTE_LEADS_CSV_FIELDS = (
     "remote_evidence",
     "eligibility_caveat",
 )
+APPLICATION_QUEUE_CSV_FIELDS = (
+    "priority_rank",
+    "priority_band",
+    "recommendation",
+    "recommendation_score",
+    "company_name",
+    "company_slug",
+    "title",
+    "role_match_status",
+    "role_scope",
+    "geographic_eligibility",
+    "remote_eligibility",
+    "posting_age_days",
+    "freshness_bucket",
+    "provider",
+    "external_job_id",
+    "location",
+    "department",
+    "application_url",
+    "posting_url",
+    "apply_url",
+    "source_published_at",
+    "source_updated_at",
+    "recommendation_reasons",
+    "eligibility_evidence",
+    "manual_check",
+    "eligibility_caveat",
+)
 REPORT_ARTIFACT_FILENAMES = (
     "job_funnel_report.json",
     "actionable_job_clusters.csv",
     "remote_role_leads.csv",
+    "jobs_to_apply.csv",
+    "jobs_to_verify.csv",
 )
 
 
@@ -296,8 +335,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     settings = get_settings()
     parser = argparse.ArgumentParser(
         description=(
-            "Measure the canonical job funnel and export a strict Pakistan/global queue plus "
-            "tiered remote full-stack/software-engineering leads without modifying Postgres."
+            "Measure the canonical job funnel and export ranked apply-now and verification "
+            "queues for remote backend/full-stack/software roles without modifying Postgres."
         )
     )
     parser.add_argument(
@@ -409,9 +448,7 @@ def is_expanded_remote_lead_title(title: str) -> bool:
     return EXPANDED_TITLE_PATTERN.search(normalize_title(title)) is not None
 
 
-def _clearance_clause_sides(
-    description: str, *, start: int, end: int
-) -> tuple[str, str]:
+def _clearance_clause_sides(description: str, *, start: int, end: int) -> tuple[str, str]:
     clause_start = 0
     for boundary in CLEARANCE_CLAUSE_BOUNDARY_PATTERN.finditer(description, 0, start):
         clause_start = boundary.end()
@@ -420,9 +457,7 @@ def _clearance_clause_sides(
     return description[clause_start:start], description[end:clause_end]
 
 
-def requires_active_government_clearance(
-    description: Any, *, title: Any = ""
-) -> bool:
+def requires_active_government_clearance(description: Any, *, title: Any = "") -> bool:
     """Detect a required pre-existing Secret/TS-SCI clearance in title or description."""
     for value in (title, description):
         if not isinstance(value, str) or not value.strip():
@@ -431,9 +466,7 @@ def requires_active_government_clearance(
             return True
         for match in ACTIVE_CLEARANCE_PHRASE_PATTERN.finditer(value):
             html_section_before = value[max(0, match.start() - 4_000) : match.start()]
-            before, after = _clearance_clause_sides(
-                value, start=match.start(), end=match.end()
-            )
+            before, after = _clearance_clause_sides(value, start=match.start(), end=match.end())
             if CLEARANCE_OPTIONAL_BEFORE_PATTERN.search(before):
                 continue
             after_nearby = after[:160]
@@ -565,9 +598,7 @@ def _cluster_variants(
                 not bool(item.get("location")) for item in variants
             ),
             "locations": locations,
-            "role_status_distribution": ordered_counts(
-                role_distribution, ROLE_STATUS_ORDER
-            ),
+            "role_status_distribution": ordered_counts(role_distribution, ROLE_STATUS_ORDER),
             "remote_eligibility_distribution": ordered_counts(
                 remote_distribution, REMOTE_ELIGIBILITY_ORDER
             ),
@@ -613,9 +644,7 @@ def _cluster_variants(
             key=lambda item: (
                 LEAD_TIER_ORDER[item["lead_tier"]],
                 ROLE_SCOPE_ORDER[item["role_scope"]],
-                REMOTE_ELIGIBILITY_ORDER.get(
-                    item["best_remote_eligibility"], 10_000
-                ),
+                REMOTE_ELIGIBILITY_ORDER.get(item["best_remote_eligibility"], 10_000),
                 ROLE_STATUS_ORDER.get(item["role_match_status"], 10_000),
                 item["company_name"].casefold(),
                 item["normalized_title"],
@@ -624,9 +653,7 @@ def _cluster_variants(
     else:
         clusters.sort(
             key=lambda item: (
-                REMOTE_ELIGIBILITY_ORDER.get(
-                    item["best_remote_eligibility"], 10_000
-                ),
+                REMOTE_ELIGIBILITY_ORDER.get(item["best_remote_eligibility"], 10_000),
                 ROLE_STATUS_ORDER.get(item["role_match_status"], 10_000),
                 item["company_name"].casefold(),
                 item["normalized_title"],
@@ -639,7 +666,10 @@ def _analyze_role_rows(
     rows: Iterable[Mapping[str, Any]],
 ) -> RoleAnalysis:
     prefilter_statuses: Counter[str] = Counter()
+    prefilter_reasons: Counter[str] = Counter()
     remote_statuses: Counter[str] = Counter()
+    candidate_remote_statuses: Counter[str] = Counter()
+    queue_exclusions: Counter[str] = Counter()
     grouped: dict[tuple[int, str], list[dict[str, Any]]] = {}
     cleared_grouped: dict[tuple[int, str], list[dict[str, Any]]] = {}
     lead_grouped: dict[tuple[int, str], list[dict[str, Any]]] = {}
@@ -654,6 +684,7 @@ def _analyze_role_rows(
         title = str(row.get("title") or "").strip()
         role = classify_role_text(title, classification_context(row))
         prefilter_statuses[role.status] += 1
+        prefilter_reasons.update(str(reason) for reason in role.reasons)
         primary_target = role.status in {"strong", "possible"}
         expanded_title = role.status == "weak" and is_expanded_remote_lead_title(title)
         if not primary_target and not expanded_title:
@@ -671,6 +702,7 @@ def _analyze_role_rows(
         )
         key = (int(variant["company_id"]), str(variant["normalized_title"]))
         remote_status = str(variant["remote_eligibility"])
+        candidate_remote_statuses[remote_status] += 1
         if primary_target:
             remote_statuses[remote_status] += 1
             grouped.setdefault(key, []).append(variant)
@@ -682,32 +714,29 @@ def _analyze_role_rows(
                 cleared_grouped.setdefault(key, []).append(variant)
 
         if remote_status not in REMOTE_LEAD_STATUSES:
+            queue_exclusions[remote_status] += 1
             continue
         if requires_clearance:
             lead_clearance_excluded += 1
+            queue_exclusions["active_clearance_required"] += 1
             continue
         lead_variant = {
             **variant,
-            "role_scope": (
-                "primary_target" if primary_target else "expanded_fullstack_software"
-            ),
+            "role_scope": ("primary_target" if primary_target else "expanded_fullstack_software"),
         }
         lead_remote_statuses[remote_status] += 1
         lead_grouped.setdefault(key, []).append(lead_variant)
 
     clusters = _cluster_variants(grouped)
     actionable_clusters = [
-        item
-        for item in _cluster_variants(cleared_grouped)
-        if is_actionable_cluster(item)
+        item for item in _cluster_variants(cleared_grouped) if is_actionable_cluster(item)
     ]
     lead_clusters = _cluster_variants(lead_grouped, remote_leads=True)
     matching_raw = sum(len(variants) for variants in grouped.values())
     summary = {
         "title_prefiltered_job_count": prefiltered_count,
-        "prefilter_role_status_distribution": ordered_counts(
-            prefilter_statuses, ROLE_STATUS_ORDER
-        ),
+        "prefilter_role_status_distribution": ordered_counts(prefilter_statuses, ROLE_STATUS_ORDER),
+        "prefilter_role_reason_distribution": ordered_counts(prefilter_reasons),
         "matching_raw_variant_count": matching_raw,
         "matching_company_title_cluster_count": len(clusters),
         "matching_duplicate_variant_count": matching_raw - len(clusters),
@@ -742,6 +771,11 @@ def _analyze_role_rows(
         "lead_variant_remote_status_distribution": ordered_counts(
             lead_remote_statuses, REMOTE_ELIGIBILITY_ORDER
         ),
+        "candidate_variant_count": sum(candidate_remote_statuses.values()),
+        "candidate_remote_status_distribution": ordered_counts(
+            candidate_remote_statuses, REMOTE_ELIGIBILITY_ORDER
+        ),
+        "queue_exclusion_distribution": ordered_counts(queue_exclusions),
     }
     return RoleAnalysis(
         matching_clusters=clusters,
@@ -760,11 +794,9 @@ def build_role_clusters(
 
 
 def is_actionable_cluster(cluster: Mapping[str, Any]) -> bool:
-    return (
-        str(cluster.get("best_remote_eligibility") or "")
-        in ACTIONABLE_REMOTE_STATUSES
-        and not _cluster_has_required_active_clearance(cluster)
-    )
+    return str(
+        cluster.get("best_remote_eligibility") or ""
+    ) in ACTIONABLE_REMOTE_STATUSES and not _cluster_has_required_active_clearance(cluster)
 
 
 def _cluster_has_required_active_clearance(cluster: Mapping[str, Any]) -> bool:
@@ -829,9 +861,7 @@ def remote_lead_csv_row(cluster: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("remote lead rows require work_arrangement=remote")
     geographic_eligibility = str(cluster.get("geographic_eligibility") or "")
     if geographic_eligibility != GEOGRAPHIC_ELIGIBILITY_BY_REMOTE_STATUS[remote_status]:
-        raise ValueError(
-            "remote lead geographic eligibility does not match its eligibility status"
-        )
+        raise ValueError("remote lead geographic eligibility does not match its eligibility status")
     best = cluster["best_variant"]
     return {
         "lead_tier": lead_tier,
@@ -845,9 +875,7 @@ def remote_lead_csv_row(cluster: Mapping[str, Any]) -> dict[str, Any]:
         "role_match_status": cluster["role_match_status"],
         "best_remote_eligibility": remote_status,
         "posting_variant_count": cluster["posting_variant_count"],
-        "missing_location_variant_count": cluster[
-            "missing_location_variant_count"
-        ],
+        "missing_location_variant_count": cluster["missing_location_variant_count"],
         "locations": json.dumps(cluster["locations"], separators=(",", ":")),
         "role_status_distribution": json.dumps(
             cluster["role_status_distribution"], separators=(",", ":")
@@ -867,13 +895,173 @@ def remote_lead_csv_row(cluster: Mapping[str, Any]) -> dict[str, Any]:
         "source_published_at": best["source_published_at"],
         "source_updated_at": best["source_updated_at"],
         "review_note": cluster["review_note"],
-        "review_evidence": json.dumps(
-            cluster["review_evidence"], separators=(",", ":")
-        ),
+        "review_evidence": json.dumps(cluster["review_evidence"], separators=(",", ":")),
         "remote_reasons": json.dumps(best["remote_reasons"], separators=(",", ":")),
         "remote_evidence": json.dumps(best["remote_evidence"], separators=(",", ":")),
         "eligibility_caveat": REMOTE_ELIGIBILITY_CAVEAT,
     }
+
+
+def _optional_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def posting_age_days(cluster: Mapping[str, Any], *, as_of: datetime) -> int | None:
+    best = cluster.get("best_variant")
+    if not isinstance(best, Mapping):
+        return None
+    published = _optional_datetime(best.get("source_published_at"))
+    if published is None:
+        return None
+    return max(0, int((as_of - published).total_seconds() // 86_400))
+
+
+def _freshness_score(age_days: int | None) -> tuple[int, str]:
+    if age_days is None:
+        return 0, "unknown"
+    if age_days <= 14:
+        return 20, "0_14_days"
+    if age_days <= 30:
+        return 16, "15_30_days"
+    if age_days <= 60:
+        return 10, "31_60_days"
+    if age_days <= 90:
+        return 6, "61_90_days"
+    if age_days <= 180:
+        return 3, "91_180_days"
+    return 0, "over_180_days"
+
+
+def application_queue_row(cluster: Mapping[str, Any], *, as_of: datetime) -> dict[str, Any]:
+    """Build a bounded, auditable application recommendation from one remote lead."""
+    remote_lead_csv_row(cluster)
+    best = cluster["best_variant"]
+    remote_status = str(cluster["best_remote_eligibility"])
+    role_status = str(cluster["role_match_status"])
+    role_scope = str(cluster["role_scope"])
+    age_days = posting_age_days(cluster, as_of=as_of)
+    freshness_points, freshness_bucket = _freshness_score(age_days)
+    application_url = str(best.get("apply_url") or best.get("posting_url") or "")
+    score = min(
+        100,
+        APPLICATION_ELIGIBILITY_POINTS[remote_status]
+        + APPLICATION_ROLE_POINTS[role_status]
+        + APPLICATION_SCOPE_POINTS[role_scope]
+        + freshness_points
+        + (5 if application_url else 0),
+    )
+    priority_band = "P0" if score >= 85 else "P1" if score >= 70 else "P2"
+    if remote_status in ACTIONABLE_REMOTE_STATUSES:
+        recommendation = "apply_now"
+        manual_check = (
+            "Confirm Pakistan engagement, compensation, and timezone terms before submitting."
+        )
+    elif remote_status == "remote_unclear":
+        recommendation = "verify_country_then_apply"
+        manual_check = (
+            "Confirm that the employer accepts applicants working from Pakistan before submitting."
+        )
+    else:
+        recommendation = "verify_region_then_apply"
+        manual_check = (
+            "Confirm that the named region includes Pakistan and that its timezone terms work."
+        )
+    freshness_reason = (
+        "Publication date unavailable"
+        if age_days is None
+        else f"Published {age_days} days before this run"
+    )
+    reasons = [
+        *[str(value) for value in best.get("role_match_reasons") or []],
+        *[str(value) for value in best.get("remote_reasons") or []],
+        freshness_reason,
+    ]
+    evidence = cluster.get("review_evidence") or best.get("remote_evidence") or []
+    return {
+        "priority_rank": 0,
+        "priority_band": priority_band,
+        "recommendation": recommendation,
+        "recommendation_score": score,
+        "company_name": cluster["company_name"],
+        "company_slug": cluster["company_slug"],
+        "title": cluster["representative_title"],
+        "role_match_status": role_status,
+        "role_scope": role_scope,
+        "geographic_eligibility": cluster["geographic_eligibility"],
+        "remote_eligibility": remote_status,
+        "posting_age_days": age_days,
+        "freshness_bucket": freshness_bucket,
+        "provider": best["provider"],
+        "external_job_id": best["external_job_id"],
+        "location": best["location"],
+        "department": best["department"],
+        "application_url": application_url,
+        "posting_url": best["posting_url"],
+        "apply_url": best["apply_url"],
+        "source_published_at": best["source_published_at"],
+        "source_updated_at": best["source_updated_at"],
+        "recommendation_reasons": " | ".join(dict.fromkeys(reasons)),
+        "eligibility_evidence": " | ".join(str(value) for value in evidence),
+        "manual_check": manual_check,
+        "eligibility_caveat": REMOTE_ELIGIBILITY_CAVEAT,
+    }
+
+
+def build_application_queues(
+    remote_leads: Sequence[Mapping[str, Any]], *, as_of: datetime
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    apply_rows: list[dict[str, Any]] = []
+    verify_rows: list[dict[str, Any]] = []
+    for cluster in remote_leads:
+        row = application_queue_row(cluster, as_of=as_of)
+        if row["recommendation"] == "apply_now":
+            apply_rows.append(row)
+        else:
+            verify_rows.append(row)
+
+    def sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (
+            -int(row["recommendation_score"]),
+            int(row["posting_age_days"]) if row.get("posting_age_days") is not None else 1_000_000,
+            str(row["company_name"]).casefold(),
+            str(row["title"]).casefold(),
+        )
+
+    for rows in (apply_rows, verify_rows):
+        rows.sort(key=sort_key)
+        for rank, row in enumerate(rows, start=1):
+            row["priority_rank"] = rank
+
+    all_rows = [*apply_rows, *verify_rows]
+    summary = {
+        "apply_now_count": len(apply_rows),
+        "verify_before_apply_count": len(verify_rows),
+        "recommendation_distribution": ordered_counts(
+            Counter(str(row["recommendation"]) for row in all_rows),
+            ("apply_now", "verify_country_then_apply", "verify_region_then_apply"),
+        ),
+        "priority_band_distribution": ordered_counts(
+            Counter(str(row["priority_band"]) for row in all_rows),
+            ("P0", "P1", "P2"),
+        ),
+        "ranking": (
+            "Eligibility evidence, role fit, primary-lane scope, publication freshness, and "
+            "availability of a public application URL; old active jobs are ranked down, not "
+            "silently discarded."
+        ),
+    }
+    return apply_rows, verify_rows, summary
 
 
 def _grouped_counts(
@@ -1249,6 +1437,9 @@ def build_report(
     actionable = analysis.actionable_clusters
     remote_leads = analysis.remote_leads
     remote_leads_summary = analysis.remote_leads_summary
+    jobs_to_apply, jobs_to_verify, application_queue_summary = build_application_queues(
+        remote_leads, as_of=as_of
+    )
     raw_active = int(active_overview["raw_active_job_count"])
     matching = int(role_summary["matching_raw_variant_count"])
     prefilter_distribution = Counter(role_summary["prefilter_role_status_distribution"])
@@ -1301,9 +1492,7 @@ def build_report(
             ),
             "dimensions": {
                 "work_arrangement": "All emitted leads have explicit remote evidence.",
-                "geographic_eligibility": dict(
-                    GEOGRAPHIC_ELIGIBILITY_BY_REMOTE_STATUS
-                ),
+                "geographic_eligibility": dict(GEOGRAPHIC_ELIGIBILITY_BY_REMOTE_STATUS),
             },
             "clearance_filter": (
                 "Rows explicitly requiring an active Secret, TS-SCI, or DoD clearance "
@@ -1317,20 +1506,21 @@ def build_report(
             ),
             "eligibility_caveat": REMOTE_ELIGIBILITY_CAVEAT,
         },
+        "application_queue_analysis": application_queue_summary,
         "structured_evidence_coverage": structured_evidence,
         "jobs_per_board": jobs_per_board,
         "history_backfill": summarize_history_run_dir(history_run_dir),
         "matching_role_clusters": clusters,
         "actionable_clusters": actionable,
         "remote_role_leads": remote_leads,
+        "jobs_to_apply": jobs_to_apply,
+        "jobs_to_verify": jobs_to_verify,
     }
     return report, actionable
 
 
 def _serialize_json(payload: Mapping[str, Any]) -> bytes:
-    return (
-        json.dumps(payload, indent=2, sort_keys=True, default=iso_value) + "\n"
-    ).encode()
+    return (json.dumps(payload, indent=2, sort_keys=True, default=iso_value) + "\n").encode()
 
 
 def _serialize_csv(
@@ -1348,9 +1538,7 @@ def _serialize_csv(
 
 def _stage_bytes(path: Path, payload: bytes) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.stage-", dir=path.parent
-    )
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.stage-", dir=path.parent)
     temporary_path = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as target:
@@ -1393,9 +1581,7 @@ def write_actionable_csv_atomic(path: Path, clusters: Sequence[Mapping[str, Any]
     )
 
 
-def write_remote_leads_csv_atomic(
-    path: Path, clusters: Sequence[Mapping[str, Any]]
-) -> None:
+def write_remote_leads_csv_atomic(path: Path, clusters: Sequence[Mapping[str, Any]]) -> None:
     _write_bytes_atomic(
         path,
         _serialize_csv(
@@ -1406,12 +1592,27 @@ def write_remote_leads_csv_atomic(
     )
 
 
+def write_application_queue_csv_atomic(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    _write_bytes_atomic(
+        path,
+        _serialize_csv(
+            fieldnames=APPLICATION_QUEUE_CSV_FIELDS,
+            clusters=rows,
+            row_builder=lambda row: dict(row),
+        ),
+    )
+
+
 def _report_artifact_payloads(
     report: Mapping[str, Any], actionable: Sequence[Mapping[str, Any]]
 ) -> dict[str, bytes]:
     remote_leads = report.get("remote_role_leads")
     if not isinstance(remote_leads, list):
         raise ValueError("report remote_role_leads must be a list")
+    jobs_to_apply = report.get("jobs_to_apply", [])
+    jobs_to_verify = report.get("jobs_to_verify", [])
+    if not isinstance(jobs_to_apply, list) or not isinstance(jobs_to_verify, list):
+        raise ValueError("report application queues must be lists")
     return {
         "job_funnel_report.json": _serialize_json(report),
         "actionable_job_clusters.csv": _serialize_csv(
@@ -1423,6 +1624,16 @@ def _report_artifact_payloads(
             fieldnames=REMOTE_LEADS_CSV_FIELDS,
             clusters=remote_leads,
             row_builder=remote_lead_csv_row,
+        ),
+        "jobs_to_apply.csv": _serialize_csv(
+            fieldnames=APPLICATION_QUEUE_CSV_FIELDS,
+            clusters=jobs_to_apply,
+            row_builder=lambda row: dict(row),
+        ),
+        "jobs_to_verify.csv": _serialize_csv(
+            fieldnames=APPLICATION_QUEUE_CSV_FIELDS,
+            clusters=jobs_to_verify,
+            row_builder=lambda row: dict(row),
         ),
     }
 
@@ -1436,9 +1647,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _backup_path(target: Path) -> Path:
-    descriptor, name = tempfile.mkstemp(
-        prefix=f".{target.name}.backup-", dir=target.parent
-    )
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.backup-", dir=target.parent)
     os.close(descriptor)
     backup = Path(name)
     backup.unlink()
@@ -1520,9 +1729,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     engine = engine_from_url(args.database_url)
     try:
         with engine.connect() as connection, connection.begin():
-            connection.exec_driver_sql(
-                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-            )
+            connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             provider_funnel = collect_provider_funnel(connection)
             active_overview = collect_active_overview(connection, as_of=args.as_of)
             structured_evidence = collect_structured_evidence_coverage(connection)
@@ -1548,6 +1755,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     json_path = published["job_funnel_report.json"]
     csv_path = published["actionable_job_clusters.csv"]
     remote_leads_path = published["remote_role_leads.csv"]
+    apply_path = published["jobs_to_apply.csv"]
+    verify_path = published["jobs_to_verify.csv"]
 
     print(
         f"Measured {active_overview['raw_active_job_count']} active jobs into "
@@ -1560,6 +1769,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Wrote JSON report: {json_path.resolve()}")
     print(f"Wrote actionable CSV: {csv_path.resolve()}")
     print(f"Wrote tiered remote leads CSV: {remote_leads_path.resolve()}")
+    print(f"Wrote {len(report['jobs_to_apply'])} ranked apply-now jobs: {apply_path.resolve()}")
+    print(
+        f"Wrote {len(report['jobs_to_verify'])} ranked country-verification jobs: "
+        f"{verify_path.resolve()}"
+    )
 
 
 if __name__ == "__main__":
