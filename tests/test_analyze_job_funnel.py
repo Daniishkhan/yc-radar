@@ -205,7 +205,7 @@ def test_remote_leads_expand_only_explicit_weak_titles_and_assign_review_tiers()
         "software developer",
     }
     assert by_title["software engineer"]["role_match_status"] == "weak"
-    assert by_title["software engineer"]["role_scope"] == ("expanded_fullstack_software")
+    assert by_title["software engineer"]["role_scope"] == ("expanded_engineering")
     assert by_title["software engineer"]["lead_tier"] == "verify_country"
     assert by_title["software engineer"]["work_arrangement"] == "remote"
     assert by_title["software engineer"]["geographic_eligibility"] == "unknown"
@@ -219,8 +219,8 @@ def test_remote_leads_expand_only_explicit_weak_titles_and_assign_review_tiers()
     assert all("apply-now" not in item["review_note"].casefold() for item in leads)
     assert summary["lead_company_title_cluster_count"] == 4
     assert summary["role_scope_distribution"] == {
-        "primary_target": 1,
-        "expanded_fullstack_software": 3,
+        "primary_target": 2,
+        "expanded_engineering": 2,
     }
     assert summary["lead_tier_distribution"] == {
         "confirmed": 2,
@@ -308,10 +308,10 @@ def test_remote_leads_include_sde_but_preserve_role_lane_exclusions() -> None:
         "software systems engineer",
     ]
     assert leads[0]["role_match_status"] == "weak"
-    assert leads[0]["role_scope"] == "expanded_fullstack_software"
+    assert leads[0]["role_scope"] == "expanded_engineering"
     assert leads[0]["lead_tier"] == "confirmed"
     assert summary["lead_company_title_cluster_count"] == 3
-    assert summary["role_scope_distribution"] == {"expanded_fullstack_software": 3}
+    assert summary["role_scope_distribution"] == {"expanded_engineering": 3}
 
 
 def test_required_active_clearance_stays_measurable_but_is_excluded_from_queues() -> None:
@@ -482,7 +482,7 @@ def test_remote_lead_clustering_and_atomic_csv_do_not_expose_descriptions(
         rows = list(csv.DictReader(source))
     assert len(rows) == 1
     assert rows[0]["lead_tier"] == "confirmed"
-    assert rows[0]["role_scope"] == "expanded_fullstack_software"
+    assert rows[0]["role_scope"] == "expanded_engineering"
     assert rows[0]["work_arrangement"] == "remote"
     assert rows[0]["geographic_eligibility"] == "global"
     assert rows[0]["posting_url"] == "https://jobs.example/1"
@@ -562,6 +562,48 @@ def test_application_queues_separate_and_rank_apply_and_verification_work() -> N
     assert "description_text" not in json.dumps([*apply_rows, *verify_rows])
 
 
+def test_application_queues_include_frontend_and_production_ai_role_families() -> None:
+    analysis = funnel._analyze_role_rows(
+        [
+            job(
+                1,
+                title="Senior Frontend Engineer",
+                description="Build our React product. This role is remote worldwide.",
+            ),
+            job(
+                2,
+                title="Applied AI Engineer",
+                description="Deploy production LLM systems. This role is remote worldwide.",
+            ),
+            job(
+                3,
+                title="Machine Learning Research Scientist",
+                description="Research new model architectures. This role is remote worldwide.",
+            ),
+        ]
+    )
+
+    apply_rows, verify_rows, summary = funnel.build_application_queues(
+        analysis.remote_leads,
+        as_of=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    assert {(row["title"], row["role_family"]) for row in apply_rows} == {
+        ("Senior Frontend Engineer", "frontend"),
+        ("Applied AI Engineer", "ai_engineering"),
+    }
+    assert verify_rows == []
+    assert summary["apply_now_count"] == 2
+    assert summary["role_family_distribution"] == {
+        "frontend": 1,
+        "ai_engineering": 1,
+    }
+    assert all(
+        row["representative_title"] != "Machine Learning Research Scientist"
+        for row in analysis.remote_leads
+    )
+
+
 def test_application_queue_csv_is_atomic_and_has_no_profile_or_description(
     tmp_path: Path,
 ) -> None:
@@ -606,7 +648,7 @@ def test_adjacent_engineering_title_requires_role_fit_review() -> None:
     assert verify_rows[0]["recommendation"] == "verify_role_fit_then_apply"
     assert verify_rows[0]["title_alignment"] == "supporting_engineering"
     assert verify_rows[0]["remote_eligibility"] == "global_explicit"
-    assert "software/backend aligned" in verify_rows[0]["manual_check"]
+    assert "target software engineering lanes" in verify_rows[0]["manual_check"]
     assert summary["title_alignment_distribution"] == {"supporting_engineering": 1}
 
 

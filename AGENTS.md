@@ -14,7 +14,7 @@ useful loop is:
    Docker-backed Postgres.
 7. Fetch/classify URL evidence separately from source-board synchronization.
 8. Rank active jobs and companies against the candidate profile.
-9. Use deterministic logic and optional agents to refine a backend/SWE shortlist.
+9. Use deterministic logic and optional agents to refine the target engineering shortlist.
 10. Write local CSV/JSON and/or Postgres outputs.
 
 ## Project Shape
@@ -47,13 +47,14 @@ useful loop is:
 
 ## Product Focus
 
-The current role lane is senior backend / senior software engineering. Prioritize companies and
-roles where the work maps to system design, infrastructure, performance, caching, production
-debugging, security, reliability, DevOps-adjacent ownership, and backend platform work.
+The current role lane includes full-stack, frontend, backend, software engineering, and production
+AI engineering. Prioritize IC roles at an appropriate level where the candidate can use shipped
+full-stack products, React/TypeScript, backend systems, infrastructure, data pipelines, or deployed
+LLM/AI systems as direct evidence of fit.
 
-AI, LLM, data engineering, full-stack, and DevOps experience are supporting strengths. They should
-make the backend/SWE case sharper, not turn the shortlist into generic AI engineer, frontend-only,
-research-only, sales, marketing, or intern roles.
+Keep junior, QA/test, engineering leadership, non-engineering, and research-only roles out of the
+application shortlist. Data, platform, infrastructure, DevOps, and founding-engineer roles remain
+useful when their titles and responsibilities show concrete software engineering work.
 
 No external service consumes this repo. Do not add API endpoints, web servers, Docker service
 flows, or public exposure unless the user explicitly asks for a served interface. Prefer scripts,
@@ -133,10 +134,10 @@ and never submit applications, spoof browser identity, or use browser automation
 exclude postings whose public `isListed` flag is false.
 
 Weekly target ranking must consider every registered company before truncating the candidate pool.
-Current canonical backend/SWE openings should outweigh directory metadata. Remote labels must stay
-conservative and deterministic: distinguish explicit worldwide or Pakistan/APAC eligibility from
-unclear and geographically restricted remote language, and never present them as work-authorization
-or visa conclusions.
+Current canonical target engineering openings should outweigh directory metadata. Remote labels
+must stay conservative and deterministic: distinguish explicit worldwide or Pakistan/APAC
+eligibility from unclear and geographically restricted remote language, and never present them as
+work-authorization or visa conclusions.
 
 Current checked-in discovery inventory:
 

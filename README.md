@@ -47,9 +47,8 @@ without turning the repo into a service.
 - Verify live career pages and hidden jobs.
 - Use agents to inspect company websites, products, docs, GitHub repos, and job pages when that
   improves the output.
-- Score companies against my profile: senior backend/SWE fit, backend-heavy full-stack fit,
-  systems/infrastructure depth, DevOps fit, LLM/data systems proof points, remote/global
-  eligibility, and team size.
+- Score companies against my profile across full-stack, frontend, backend, software, and production
+  AI engineering, plus systems/infrastructure depth, remote/global eligibility, and team size.
 - Return roughly 50 to 100 companies worth actioning in a CSV or DB table.
 - For each company, suggest a demo or contribution I can ship in a few hours.
 - Help draft founder/CTO outreach tied to the actual artifact.
@@ -295,12 +294,12 @@ Measure the full canonical funnel and write application and research queues. The
 matching company/title clusters and their posting-variant distributions.
 
 - `actionable_job_clusters.csv` remains strict: only `pakistan_explicit` and `global_explicit`.
-- `remote_role_leads.csv` unions the primary backend/platform lane with explicit full-stack and
-  software-engineering titles. It separates remote work arrangement from geographic eligibility
-  and places `remote_unclear` and `regional_unconfirmed` rows in verification tiers.
+- `remote_role_leads.csv` covers explicit full-stack, frontend, backend, software, platform/data,
+  and production AI/ML engineering titles. It separates remote work arrangement from geographic
+  eligibility and places `remote_unclear` and `regional_unconfirmed` rows in verification tiers.
 - `jobs_to_apply.csv` is the final ranked application list. It includes both primary and expanded
-  role lanes only when the title is explicitly backend/software/full-stack/platform aligned and
-  the posting explicitly names Pakistan or worldwide remote scope.
+  role lanes only when the title is explicitly aligned with the target engineering families and the
+  posting explicitly names Pakistan or worldwide remote scope.
 - `jobs_to_verify.csv` ranks otherwise-relevant remote roles whose country or regional eligibility
   or adjacent engineering title must be checked before applying, so conservative evidence rules
   do not silently discard them.
@@ -614,14 +613,13 @@ uv run python scripts/generate_weekly_targets.py --verify-hiring --no-llm --limi
 Firecrawl should stay free-plan-safe for now: exact pages only, no wildcard crawls, at most
 three pages per company, low concurrency, and cached results.
 
-The shortlist is intentionally backend/SWE-focused. AI, LLM, data engineering, full-stack, and
-DevOps experience are supporting proof points; they should not turn the list into generic AI
-engineer, frontend, research, sales, or marketing roles. Strong matches should point toward system
-design, infrastructure, performance, caching, production debugging, security, reliability, or
-backend platform ownership.
+The shortlist covers full-stack, frontend, backend, software, and production AI engineering. Data,
+platform, infrastructure, DevOps, and founding-engineer roles can also qualify when they contain
+concrete software engineering work. Junior, QA/test, engineering leadership, non-engineering, and
+research-only roles stay excluded.
 
 The candidate pool is scored across every registered company, not preselected from YC metadata.
-A complete canonical provider snapshot with a current senior backend/SWE opening receives the
+A complete canonical provider snapshot with a current target engineering opening receives the
 largest opportunity boost. Matching roles that explicitly allow worldwide remote work or name
 Pakistan, South Asia, or APAC receive an additional boost; geographically restricted remote roles
 are retained as evidence but do not count as Pakistan-compatible. The emitted job provenance is

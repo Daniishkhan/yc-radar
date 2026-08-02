@@ -4,6 +4,7 @@ from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import (
     DEFAULT_CANDIDATE_PROFILE,
     classify_remote_eligibility,
+    classify_role_family,
     classify_role_text,
     rank_companies,
     rerank_verified_targets,
@@ -36,14 +37,14 @@ def test_role_classifier_possible_for_backend_heavy_full_stack_and_founding_role
     )
 
 
-def test_role_classifier_excludes_non_backend_role_lanes() -> None:
-    assert classify_role_text("Frontend Engineer").status == "exclude"
+def test_role_classifier_includes_frontend_and_excludes_non_engineering_lanes() -> None:
+    assert classify_role_text("Frontend Engineer").status == "possible"
     assert (
         classify_role_text(
             "Contract Senior Front End Engineer",
             "Build platform integrations and backend APIs",
         ).status
-        == "exclude"
+        in {"strong", "possible"}
     )
     assert classify_role_text("Product Designer").status == "exclude"
     assert classify_role_text("Sales Lead").status == "exclude"
@@ -283,8 +284,43 @@ def test_role_classifier_excludes_future_non_openings() -> None:
         assert result.reasons == ["Listing is not a current opening"]
 
 
-def test_role_classifier_marks_frontend_heavy_full_stack_as_weak() -> None:
-    assert classify_role_text("Full Stack Engineer", "React, design systems, CSS").status == "weak"
+def test_role_classifier_includes_frontend_heavy_full_stack() -> None:
+    assert (
+        classify_role_text("Full Stack Engineer", "React, design systems, CSS").status
+        == "possible"
+    )
+
+
+@pytest.mark.parametrize(
+    "title",
+    (
+        "AI Engineer",
+        "Applied AI Engineer",
+        "Machine Learning Engineer",
+        "LLM Engineer",
+        "MLOps Engineer",
+    ),
+)
+def test_role_classifier_includes_production_ai_engineering(title: str) -> None:
+    result = classify_role_text(title, "Build and deploy production AI systems")
+    assert result.status == "possible"
+    assert result.reasons == ["Production AI/ML engineering role matches expanded target lane"]
+
+
+@pytest.mark.parametrize(
+    ("title", "family"),
+    (
+        ("Senior Backend Engineer", "backend"),
+        ("Senior Full Stack Engineer", "full_stack"),
+        ("Senior Frontend Engineer", "frontend"),
+        ("Senior Software Engineer", "software_engineering"),
+        ("Applied AI Engineer", "ai_engineering"),
+        ("Staff Data Engineer", "data_engineering"),
+        ("Platform Engineer", "platform_infrastructure"),
+    ),
+)
+def test_role_family_is_visible_for_supported_lanes(title: str, family: str) -> None:
+    assert classify_role_family(title) == family
 
 
 def test_score_company_rewards_candidate_skill_overlap() -> None:
@@ -386,7 +422,9 @@ def test_ai_and_data_signals_boost_backend_relevance_without_becoming_primary_la
     assert {"Backend systems", "AI/LLM", "Data engineering"}.issubset(
         set(score.candidate_strength_matches)
     )
-    assert role_focus["target_role_lane"] == "Senior Backend / Senior Software"
+    assert role_focus["target_role_lane"] == (
+        "Senior Software / Backend / Full Stack / Frontend / AI"
+    )
     assert role_focus["role_match_status"] == "strong"
 
 
@@ -410,8 +448,8 @@ def test_target_record_uses_yc_is_hiring_and_live_unknown_defaults() -> None:
     assert target["verified_roles"] == []
     assert target["firecrawl_pages_used"] == 0
     assert target["target_role_lane"] in {
-        "Backend-heavy SWE / Founding Engineer",
-        "Unclear backend/SWE fit",
+        "Software / Full Stack / Frontend / AI Engineering",
+        "Unclear software engineering fit",
     }
     assert "application_angle" in target
 

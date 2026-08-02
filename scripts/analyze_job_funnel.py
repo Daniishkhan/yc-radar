@@ -3,10 +3,10 @@
 
 The command deliberately separates remote work arrangement from applicant geography.  The strict
 actionable CSV only contains matching role clusters whose public evidence explicitly names
-Pakistan or an unrestricted global scope.  A second CSV broadens the role lane to full-stack and
-software-engineering titles while keeping unclear country or regional eligibility in a separate
-ranked verification queue.  Those labels are evidence summaries, not work-authorization or visa
-conclusions.
+Pakistan or an unrestricted global scope. The broader queues cover software, full-stack,
+frontend, backend, platform/data, and production AI engineering while keeping unclear country or
+regional eligibility in a separate ranked verification queue. Those labels are evidence summaries,
+not work-authorization or visa conclusions.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from yc_radar.core.config import get_settings
 from yc_radar.services.candidate_fit import (
     REMOTE_ELIGIBILITY_ORDER,
     classify_remote_eligibility,
+    classify_role_family,
     classify_role_text,
 )
 from yc_radar.services.database import (
@@ -44,7 +45,7 @@ from yc_radar.services.database import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ACTIONABLE_REMOTE_STATUSES = frozenset({"pakistan_explicit", "global_explicit"})
 REMOTE_LEAD_STATUSES = frozenset(
     {
@@ -67,10 +68,18 @@ GEOGRAPHIC_ELIGIBILITY_BY_REMOTE_STATUS = {
     "regional_unconfirmed": "regional_unconfirmed",
 }
 LEAD_TIER_ORDER = {"confirmed": 0, "verify_country": 1, "verify_region": 2}
-ROLE_SCOPE_ORDER = {"primary_target": 0, "expanded_fullstack_software": 1}
+ROLE_SCOPE_ORDER = {
+    "primary_target": 0,
+    "expanded_engineering": 1,
+    "expanded_fullstack_software": 2,
+}
 ROLE_STATUS_ORDER = {"strong": 0, "possible": 1, "weak": 2, "exclude": 3}
 APPLICATION_ROLE_POINTS = {"strong": 30, "possible": 22, "weak": 12}
-APPLICATION_SCOPE_POINTS = {"primary_target": 10, "expanded_fullstack_software": 4}
+APPLICATION_SCOPE_POINTS = {
+    "primary_target": 10,
+    "expanded_engineering": 4,
+    "expanded_fullstack_software": 4,
+}
 APPLICATION_ELIGIBILITY_POINTS = {
     "pakistan_explicit": 35,
     "global_explicit": 35,
@@ -101,12 +110,24 @@ LEAD_REVIEW_NOTES = {
 EXPANDED_TITLE_PATTERN = re.compile(
     r"(?:\bfull ?stack\b.*\b(?:engineer|developer)\b|"
     r"\b(?:engineer|developer)\b.*\bfull ?stack\b|"
+    r"\bfront[ -]?end\b.*\b(?:engineer|developer)\b|"
+    r"\b(?:engineer|developer)\b.*\bfront[ -]?end\b|"
+    r"\b(?:react|ui|web)\s+(?:engineer|developer)\b|"
+    r"\b(?:ai|artificial intelligence|applied ai|generative ai|genai|llm|"
+    r"machine learning|ml|mlops)\b.{0,40}\b(?:engineer|developer)\b|"
+    r"\b(?:engineer|developer)\b.{0,40}\b(?:ai|artificial intelligence|"
+    r"applied ai|generative ai|genai|llm|machine learning|ml|mlops)\b|"
     r"\bsoftware (?:(?:development|systems?|security|devops|platform|cloud|"
     r"infrastructure) )?(?:engineer|developer)\b|\bsde\b)",
     flags=re.IGNORECASE,
 )
 APPLICATION_TITLE_ALIGNMENT_PATTERN = re.compile(
     r"(?:\bback ?end\b|\bfull ?stack\b|\bsoftware\b|\bsite reliability\b|"
+    r"\bfront[ -]?end\b|\bfrontend\b|\b(?:react|ui|web)\s+(?:developer|engineer)\b|"
+    r"\b(?:ai|artificial intelligence|applied ai|generative ai|genai|llm|"
+    r"machine learning|ml|mlops)\b.{0,40}\b(?:developer|engineer)\b|"
+    r"\b(?:developer|engineer)\b.{0,40}\b(?:ai|artificial intelligence|"
+    r"applied ai|generative ai|genai|llm|machine learning|ml|mlops)\b|"
     r"\bdevops\b|\bsre\b|\bsde\b|\bswe\b|\bapi\b.{0,40}\b(?:developer|engineer)\b|"
     r"\b(?:developer|engineer)\b.{0,40}\bapi\b|"
     r"\b(?:platform|infrastructure|product|data|cloud|founding)\b.{0,40}"
@@ -120,7 +141,8 @@ APPLICATION_ADJACENT_TITLE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 APPLICATION_ADJACENT_OVERRIDE_PATTERN = re.compile(
-    r"\b(?:software|back ?end|full ?stack)\b|"
+    r"\b(?:software|back ?end|full ?stack|front[ -]?end|frontend|ai|"
+    r"artificial intelligence|machine learning|ml|llm|mlops)\b|"
     r"\b(?:platform|infrastructure)\b.{0,24}\bengineer\b",
     flags=re.IGNORECASE,
 )
@@ -254,6 +276,7 @@ ACTIONABLE_CSV_FIELDS = (
     "normalized_title",
     "representative_title",
     "role_match_status",
+    "role_family",
     "best_remote_eligibility",
     "posting_variant_count",
     "missing_location_variant_count",
@@ -283,6 +306,7 @@ REMOTE_LEADS_CSV_FIELDS = (
     "normalized_title",
     "representative_title",
     "role_match_status",
+    "role_family",
     "best_remote_eligibility",
     "posting_variant_count",
     "missing_location_variant_count",
@@ -313,6 +337,7 @@ APPLICATION_QUEUE_CSV_FIELDS = (
     "company_slug",
     "title",
     "role_match_status",
+    "role_family",
     "role_scope",
     "title_alignment",
     "geographic_eligibility",
@@ -356,7 +381,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Measure the canonical job funnel and export ranked apply-now and verification "
-            "queues for remote backend/full-stack/software roles without modifying Postgres."
+            "queues for remote software/full-stack/frontend/backend/AI roles without modifying "
+            "Postgres."
         )
     )
     parser.add_argument(
@@ -478,12 +504,12 @@ def classification_context(row: Mapping[str, Any]) -> str:
 
 
 def is_expanded_remote_lead_title(title: str) -> bool:
-    """Return whether a weak role has an explicit software/full-stack title."""
+    """Return whether a weak role has an explicit target engineering title."""
     return EXPANDED_TITLE_PATTERN.search(normalize_title(title)) is not None
 
 
 def is_application_title_aligned(title: str) -> bool:
-    """Keep the final apply queue in the explicit backend/software/full-stack lane."""
+    """Keep the final apply queue in the explicit target engineering lanes."""
     normalized = normalize_title(title)
     if APPLICATION_ADJACENT_TITLE_PATTERN.search(
         normalized
@@ -546,6 +572,7 @@ def _variant_from_classifications(
         "company_slug": str(row.get("company_slug") or ""),
         "normalized_title": normalize_title(title),
         "title": title,
+        "role_family": classify_role_family(title),
         "role_match_status": role.status,
         "role_match_reasons": list(role.reasons),
         "remote_eligibility": remote.status,
@@ -625,6 +652,7 @@ def _cluster_variants(
         role_distribution = Counter(str(item["role_match_status"]) for item in variants)
         remote_distribution = Counter(str(item["remote_eligibility"]) for item in variants)
         provider_distribution = Counter(str(item["provider"]) for item in variants)
+        role_family_distribution = Counter(str(item["role_family"]) for item in variants)
         locations = sorted({str(item["location"]) for item in variants if item.get("location")})
         cluster = {
             "company_id": int(representative["company_id"]),
@@ -633,6 +661,7 @@ def _cluster_variants(
             "normalized_title": str(representative["normalized_title"]),
             "representative_title": str(representative["title"]),
             "role_match_status": str(representative["role_match_status"]),
+            "role_family": str(representative["role_family"]),
             "best_remote_eligibility": str(representative["remote_eligibility"]),
             "posting_variant_count": len(variants),
             "required_active_clearance_variant_count": sum(
@@ -647,6 +676,7 @@ def _cluster_variants(
                 remote_distribution, REMOTE_ELIGIBILITY_ORDER
             ),
             "provider_distribution": ordered_counts(provider_distribution),
+            "role_family_distribution": ordered_counts(role_family_distribution),
             "best_variant": {
                 key: value
                 for key, value in representative.items()
@@ -766,7 +796,7 @@ def _analyze_role_rows(
             continue
         lead_variant = {
             **variant,
-            "role_scope": ("primary_target" if primary_target else "expanded_fullstack_software"),
+            "role_scope": ("primary_target" if primary_target else "expanded_engineering"),
         }
         lead_remote_statuses[remote_status] += 1
         lead_grouped.setdefault(key, []).append(lead_variant)
@@ -862,6 +892,7 @@ def actionable_csv_row(cluster: Mapping[str, Any]) -> dict[str, Any]:
         "normalized_title": cluster["normalized_title"],
         "representative_title": cluster["representative_title"],
         "role_match_status": cluster["role_match_status"],
+        "role_family": cluster["role_family"],
         "best_remote_eligibility": cluster["best_remote_eligibility"],
         "posting_variant_count": cluster["posting_variant_count"],
         "missing_location_variant_count": cluster["missing_location_variant_count"],
@@ -917,6 +948,7 @@ def remote_lead_csv_row(cluster: Mapping[str, Any]) -> dict[str, Any]:
         "normalized_title": cluster["normalized_title"],
         "representative_title": cluster["representative_title"],
         "role_match_status": cluster["role_match_status"],
+        "role_family": cluster["role_family"],
         "best_remote_eligibility": remote_status,
         "posting_variant_count": cluster["posting_variant_count"],
         "missing_location_variant_count": cluster["missing_location_variant_count"],
@@ -1015,8 +1047,8 @@ def application_queue_row(cluster: Mapping[str, Any], *, as_of: datetime) -> dic
         recommendation = "verify_role_fit_then_apply"
         geography_check = LEAD_REVIEW_NOTES[str(cluster["lead_tier"])]
         manual_check = (
-            "Confirm that this adjacent engineering title is sufficiently software/backend "
-            f"aligned. {geography_check}"
+            "Confirm that this adjacent engineering title fits one of the target software "
+            f"engineering lanes. {geography_check}"
         )
     elif remote_status in ACTIONABLE_REMOTE_STATUSES:
         recommendation = "apply_now"
@@ -1053,10 +1085,9 @@ def application_queue_row(cluster: Mapping[str, Any], *, as_of: datetime) -> dic
         "company_slug": cluster["company_slug"],
         "title": cluster["representative_title"],
         "role_match_status": role_status,
+        "role_family": cluster["role_family"],
         "role_scope": role_scope,
-        "title_alignment": (
-            "primary_backend_software" if title_aligned else "supporting_engineering"
-        ),
+        "title_alignment": "target_engineering" if title_aligned else "supporting_engineering",
         "geographic_eligibility": cluster["geographic_eligibility"],
         "remote_eligibility": remote_status,
         "posting_age_days": age_days,
@@ -1117,7 +1148,20 @@ def build_application_queues(
         ),
         "title_alignment_distribution": ordered_counts(
             Counter(str(row["title_alignment"]) for row in all_rows),
-            ("primary_backend_software", "supporting_engineering"),
+            ("target_engineering", "supporting_engineering"),
+        ),
+        "role_family_distribution": ordered_counts(
+            Counter(str(row["role_family"]) for row in all_rows),
+            (
+                "backend",
+                "full_stack",
+                "frontend",
+                "software_engineering",
+                "ai_engineering",
+                "data_engineering",
+                "platform_infrastructure",
+                "supporting_engineering",
+            ),
         ),
         "priority_band_distribution": ordered_counts(
             Counter(str(row["priority_band"]) for row in all_rows),
@@ -1564,7 +1608,11 @@ def build_report(
         "as_of": as_of.isoformat(),
         "scope": {
             "jobs": "Canonical active provider jobs in Postgres",
-            "role_lane": "Senior backend / senior software engineering",
+            "role_lane": (
+                "Software, full-stack, frontend, backend, platform/data, and production AI "
+                "engineering; junior, QA, leadership, non-engineering, and research-only roles "
+                "remain excluded."
+            ),
             "remote_eligibility": (
                 "Deterministic role-specific public posting evidence; only pakistan_explicit and "
                 "global_explicit are exported as actionable."
@@ -1588,9 +1636,8 @@ def build_report(
         "remote_leads_analysis": {
             **remote_leads_summary,
             "role_scope": (
-                "Primary strong/possible roles plus weak roles whose titles explicitly name "
-                "full-stack or software engineer/developer work, including common SDE and "
-                "software-systems variants."
+                "Primary strong/possible roles plus explicit weak engineering titles across "
+                "software, full-stack, frontend, backend, and production AI/ML families."
             ),
             "eligibility_scope": (
                 "Confirmed means explicit Pakistan/worldwide evidence. verify_country and "

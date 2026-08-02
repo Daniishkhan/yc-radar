@@ -50,7 +50,7 @@ def extract_pdf_text(path: Path) -> tuple[str, int]:
 def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any]:
     return {
         "name": "Danish Khan",
-        "headline": "Senior Backend / Senior Software Engineer | AI and Data Systems",
+        "headline": "Senior Software / Full Stack / Backend / Frontend / AI Engineer",
         "contact": {
             "email": "danishafzalkhan@gmail.com",
             "phone": "+92 3369009019",
@@ -71,6 +71,10 @@ def build_profile(resume_path: Path, raw_text: str, pages: int) -> dict[str, Any
             "Infrastructure Engineer",
             "Backend-heavy Founding Engineer",
             "Backend-heavy Full Stack Engineer",
+            "Senior Full Stack Engineer",
+            "Senior Frontend Engineer",
+            "AI Engineer",
+            "Applied AI Engineer",
         ],
         "supporting_strengths": [
             "AI engineering",

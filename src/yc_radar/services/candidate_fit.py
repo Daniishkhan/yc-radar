@@ -11,7 +11,7 @@ from yc_radar.domain.models import Company
 
 
 DEFAULT_CANDIDATE_PROFILE: dict[str, Any] = {
-    "headline": "Senior Backend / Senior Software Engineer | AI and Data Systems",
+    "headline": "Senior Software / Full Stack / Backend / Frontend / AI Engineer",
     "summary": (
         "Senior backend/software engineer with experience building backend systems, "
         "data pipelines, LLM-powered products, and full-stack software."
@@ -23,6 +23,10 @@ DEFAULT_CANDIDATE_PROFILE: dict[str, Any] = {
         "Infrastructure Engineer",
         "Backend-heavy Founding Engineer",
         "Backend-heavy Full Stack Engineer",
+        "Senior Full Stack Engineer",
+        "Senior Frontend Engineer",
+        "AI Engineer",
+        "Applied AI Engineer",
     ],
     "supporting_strengths": [
         "AI engineering",
@@ -100,6 +104,9 @@ FRONTEND_TERMS = (
     "ui engineer",
     "web engineer",
     "react engineer",
+    "react developer",
+    "ui developer",
+    "web developer",
     "design engineer",
 )
 FRONTEND_ONLY_TITLE_TERMS = (
@@ -108,7 +115,16 @@ FRONTEND_ONLY_TITLE_TERMS = (
     "front-end",
     "ui engineer",
     "react engineer",
+    "react developer",
+    "ui developer",
+    "web developer",
     "design engineer",
+)
+AI_ENGINEERING_TITLE_PATTERNS = (
+    r"\b(?:ai|artificial intelligence|applied ai|generative ai|genai|llm|"
+    r"machine learning|ml|mlops)\b.{0,40}\b(?:developer|engineer)\b",
+    r"\b(?:developer|engineer)\b.{0,40}\b(?:ai|artificial intelligence|"
+    r"applied ai|generative ai|genai|llm|machine learning|ml|mlops)\b",
 )
 EXCLUDED_ROLE_TERMS = (
     "designer",
@@ -272,6 +288,46 @@ NON_OPENING_CONTEXT_PATTERNS = (
 class RoleClassification:
     status: str
     reasons: list[str]
+
+
+ROLE_FAMILY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("full_stack", (r"\bfull ?stack\b",)),
+    (
+        "frontend",
+        (
+            r"\bfront[ -]?end\b",
+            r"\bfrontend\b",
+            r"\b(?:react|ui|web)\s+(?:developer|engineer)\b",
+        ),
+    ),
+    ("ai_engineering", AI_ENGINEERING_TITLE_PATTERNS),
+    ("backend", (r"\bback[ -]?end\b", r"\bbackend\b", r"\bapi\s+developer\b")),
+    (
+        "software_engineering",
+        (
+            r"\bsoftware\b",
+            r"\b(?:sde|swe)\b",
+        ),
+    ),
+    ("data_engineering", (r"\bdata\s+(?:developer|engineer)\b",)),
+    (
+        "platform_infrastructure",
+        (
+            r"\b(?:platform|infrastructure|cloud|devops)\b",
+            r"\bsite reliability\b",
+            r"\bsre\b",
+        ),
+    ),
+)
+
+
+def classify_role_family(title: str) -> str:
+    """Return the user-facing engineering family represented by a job title."""
+    normalized = title.casefold()
+    for family, patterns in ROLE_FAMILY_PATTERNS:
+        if _first_pattern_match(normalized, patterns):
+            return family
+    return "supporting_engineering"
 
 
 SIGNAL_GROUPS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
@@ -599,8 +655,10 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     )
     has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS)
     is_founding = _has_any_signal(title_text, FOUNDING_TERMS)
-    has_frontend_signal = _has_any_signal(combined, FRONTEND_TERMS)
     has_frontend_only_title = _has_any_signal(title_text, FRONTEND_ONLY_TITLE_TERMS)
+    has_ai_engineering_title = bool(
+        _first_pattern_match(title_text, AI_ENGINEERING_TITLE_PATTERNS)
+    )
 
     if _first_pattern_match(title_text, JUNIOR_TITLE_PATTERNS):
         return RoleClassification("exclude", ["Junior or entry-level role is outside senior lane"])
@@ -641,18 +699,14 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         return RoleClassification(
             "exclude", ["Physical IT implementation role is outside software lane"]
         )
-    if has_frontend_only_title and not is_full_stack_title:
-        return RoleClassification("exclude", ["Frontend-only title is outside backend/SWE focus"])
     if _first_pattern_match(combined, NON_OPENING_CONTEXT_PATTERNS):
         return RoleClassification("exclude", ["Listing is not a current opening"])
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
-        return RoleClassification("exclude", ["Data analyst role is outside backend/SWE focus"])
+        return RoleClassification("exclude", ["Data analyst role is outside the engineering lane"])
     if _has_any_signal(title_text, RESEARCH_ONLY_TERMS) and not has_backend_signal:
         return RoleClassification(
             "exclude", ["Research-only ML role lacks backend/platform signal"]
         )
-    if has_frontend_signal and not is_full_stack and not has_backend_signal:
-        return RoleClassification("exclude", ["Frontend-only role is outside backend/SWE focus"])
     if not _has_any_signal(title_text, ENGINEERING_TITLE_TERMS):
         return RoleClassification("exclude", ["Title is not an engineering role"])
 
@@ -670,19 +724,32 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
         )
     ):
         return RoleClassification("strong", ["Backend/platform role matches primary target lane"])
-    if has_senior_signal and has_software_signal and not has_frontend_signal:
+    if has_senior_signal and has_software_signal:
         return RoleClassification(
             "strong", ["Senior software engineering role matches target lane"]
         )
-    if is_full_stack and has_backend_signal:
+    if is_full_stack:
         return RoleClassification(
-            "possible", ["Full-stack role has backend/API/data/infra signals"]
+            "possible",
+            [
+                "Full-stack role has backend/API/data/infra signals"
+                if has_backend_signal
+                else "Full-stack engineering role matches expanded target lane"
+            ],
+        )
+    if has_frontend_only_title:
+        return RoleClassification(
+            "possible", ["Frontend engineering role matches expanded target lane"]
+        )
+    if has_ai_engineering_title:
+        return RoleClassification(
+            "possible", ["Production AI/ML engineering role matches expanded target lane"]
         )
     if is_founding and has_backend_signal:
         return RoleClassification("possible", ["Founding role has backend-heavy signals"])
     if is_founding or is_full_stack or has_software_signal:
-        return RoleClassification("weak", ["Engineering role exists, but backend depth is unclear"])
-    return RoleClassification("weak", ["No clear senior backend/SWE role signal"])
+        return RoleClassification("weak", ["Engineering role exists, but target-lane fit is unclear"])
+    return RoleClassification("weak", ["No clear target software engineering role signal"])
 
 
 def _job_context(job: dict[str, Any]) -> str:
@@ -829,26 +896,29 @@ def role_focus_record(
             reasons = ["No public matching role yet, but company signal is backend/platform-heavy"]
         else:
             status = "weak"
-            reasons = ["No public backend/SWE role found yet"]
+            reasons = ["No public target software engineering role found yet"]
 
     if status == "strong":
-        target_role_lane = "Senior Backend / Senior Software"
+        target_role_lane = "Senior Software / Backend / Full Stack / Frontend / AI"
         application_angle = (
-            "Apply directly as a senior backend/SWE candidate and lead with backend systems, "
-            "data pipelines, and AI infrastructure proof points."
+            "Apply directly as a senior engineer and lead with the proof points that match the "
+            "role family: backend systems, full-stack delivery, React, data, or production AI."
         )
     elif status == "possible":
-        target_role_lane = "Backend-heavy SWE / Founding Engineer"
+        target_role_lane = "Software / Full Stack / Frontend / AI Engineering"
         application_angle = (
-            "Approach with a backend-heavy demo or integration that proves senior engineering "
-            "judgment before asking for a role conversation."
+            "Apply when the stack and level fit, emphasizing shipped systems and end-to-end "
+            "engineering judgment rather than relying on the title alone."
         )
     elif status == "weak":
-        target_role_lane = "Unclear backend/SWE fit"
-        application_angle = "Keep as research-only until a backend/SWE role or strong backend-heavy product angle appears."
+        target_role_lane = "Unclear software engineering fit"
+        application_angle = (
+            "Keep as research-only until the posting shows a concrete software, frontend, "
+            "full-stack, backend, or production-AI engineering fit."
+        )
     else:
-        target_role_lane = "Outside backend/SWE focus"
-        application_angle = "Do not prioritize for the backend/SWE shortlist."
+        target_role_lane = "Outside target engineering focus"
+        application_angle = "Do not prioritize for the software engineering shortlist."
 
     matching_provenance_all = _cluster_matching_job_provenance(classifications)
     remote_counts: dict[str, int] = {}
@@ -1612,7 +1682,7 @@ def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
     canonical_matching_count = int(target.get("canonical_matching_job_count") or 0)
     if not canonical_matching_count:
         if active_count:
-            return -12, ["Has active jobs, but none match the backend/SWE lane"]
+            return -12, ["Has active jobs, but none match the target engineering lanes"]
         role_status = str(target.get("role_match_status") or "weak")
         if matching_titles and role_status in ROLE_STATUS_SCORE_ADJUSTMENTS:
             score = ROLE_STATUS_SCORE_ADJUSTMENTS[role_status]
@@ -1624,10 +1694,10 @@ def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
     role_status = str(target.get("canonical_role_match_status") or "weak")
     if role_status == "strong":
         score += 70
-        reasons.append("Has a current strong senior backend/SWE role")
+        reasons.append("Has a current strong senior software engineering role")
     elif role_status == "possible":
         score += 40
-        reasons.append("Has a current backend-heavy engineering possibility")
+        reasons.append("Has a current matching engineering possibility")
     elif role_status == "exclude":
         score -= 30
 
