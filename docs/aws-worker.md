@@ -37,9 +37,6 @@ aws cloudformation deploy \
 ```
 
 The stack output named `ElasticIpAddress` is the worker's stable public egress address.
-`DeploymentDocumentName` and `GitHubActionsDeployRoleArn` identify the bounded, keyless production
-deployment path. If this AWS account already has a GitHub Actions OIDC provider, pass its ARN as
-`GitHubOidcProviderArn`; otherwise the stack creates and owns one.
 
 The default is Ubuntu 24.04 amd64 on `t3.large`, which leaves memory headroom for local Postgres and
 in-memory EDA jobs. `t3.medium` remains an allowed lower-cost option for lighter workloads. The
@@ -190,9 +187,28 @@ opening public port 22.
 
 ## Deploy a new commit
 
-Push `main`, then deploy its exact full commit SHA through the stack's bounded SSM document. The
-host verifies that this is still the remote branch tip before it fast-forwards, rebuilds the app
-image, starts Postgres, and applies Alembic migrations:
+Push `main`. After migrations, pytest, and Ruff pass, the GitHub runner joins the tailnet
+ephemerally and runs one command over Tailscale SSH:
+
+```bash
+tailscale ssh ubuntu@radar-worker \
+  "sudo /usr/local/sbin/radar-deploy --revision '${GITHUB_SHA}'"
+```
+
+The host verifies that the tested SHA is still the remote `main` tip before it fast-forwards,
+rebuilds the app image, starts Postgres, and applies Alembic migrations. `radar-deploy` refuses a
+dirty machine checkout, takes a host deployment lock, and fails closed while a managed
+`radar-job@` unit is active. It never interrupts a crawl, and the persistent Postgres volume is not
+rebuilt by a code deployment.
+
+One-time CI setup stays outside CloudFormation. Tag the worker `tag:radar-worker`; create a
+Tailscale OAuth client with only `auth_keys` scope for `tag:ci`; and restrict the tailnet policy to
+allow `tag:ci` to SSH only to `tag:radar-worker` as `ubuntu`. Preserve a separate human rule for
+the operator account. Store the client ID and secret as `TS_OAUTH_CLIENT_ID` and
+`TS_OAUTH_SECRET` on GitHub's `production` environment, which must allow deployments only from
+`main`. The Actions node is ephemeral and is removed after the workflow.
+
+SSM remains the fallback when GitHub Actions or Tailscale is unavailable:
 
 ```bash
 revision=$(git rev-parse HEAD)
@@ -201,26 +217,6 @@ revision=$(git rev-parse HEAD)
   --region us-east-1 \
   deploy "${revision}"
 ```
-
-`radar-deploy` refuses a dirty machine checkout and takes a host deployment lock. It also fails
-closed when any managed `radar-job@` unit is active; a deployment never stops a long-running job.
-The persistent Postgres volume is not rebuilt by a code deployment.
-
-The checked-in `CI` workflow continues to run for every push and pull request. It deploys only when
-manually dispatched from `main`, and only after the same run passes locked dependency installation,
-migration upgrade/check, pytest, and Ruff. Configure the GitHub `production` environment to allow
-only `main` (and optionally require approval), then set environment variables `AWS_ACCOUNT_ID`,
-`AWS_REGION`, `AWS_STACK_NAME`, and `AWS_DEPLOY_ROLE_ARN`; use the
-`GitHubActionsDeployRoleArn` stack output for the last value. These are identifiers, not secrets.
-
-GitHub exchanges its environment-bound OIDC token for short-lived two-hour AWS credentials. The trusted
-subject is exactly `repo:Daniishkhan/yc-radar:environment:production`. The role can describe only
-this CloudFormation stack, invoke only its deployment document on only its worker instance, and
-read the command result. It cannot open an SSM shell or invoke `AWS-RunShellScript`. Bootstrap the
-role and document once with an administrator-run CloudFormation update. Before that update, deploy
-this revision once through the existing administrator-controlled path so the installed
-`radar-deploy` supports `--revision`; the bounded document intentionally has no legacy fallback.
-Actions cannot grant itself AWS access.
 
 ## Keyless Vertex AI from the AWS worker
 

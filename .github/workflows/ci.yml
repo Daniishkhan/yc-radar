@@ -3,7 +3,6 @@ name: CI
 on:
   push:
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -52,7 +51,7 @@ jobs:
         run: uv run ruff check src tests scripts migrations
 
   deploy-production:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 65
@@ -62,43 +61,58 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-      id-token: write
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME }}
-      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
     steps:
-      - name: Check out the tested revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Validate production configuration
+      - name: Check whether this push is still current
+        id: revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_REVISION: ${{ github.sha }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          : "${AWS_REGION:?Set AWS_REGION on the production environment}"
-          : "${AWS_STACK_NAME:?Set AWS_STACK_NAME on the production environment}"
-          : "${AWS_DEPLOY_ROLE_ARN:?Set AWS_DEPLOY_ROLE_ARN on the production environment}"
-          [[ ${AWS_ACCOUNT_ID} =~ ^[0-9]{12}$ ]] || {
-            echo "AWS_ACCOUNT_ID must be a 12-digit production environment variable" >&2
+          current_revision=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq .object.sha)
+          if [[ ${current_revision} == "${DEPLOY_REVISION}" ]]; then
+            echo "deploy=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Skipping superseded push ${DEPLOY_REVISION}; main is ${current_revision}"
+            echo "deploy=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Join the production tailnet
+        if: steps.revision.outputs.deploy == 'true'
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          ping: radar-worker
+      - name: Recheck main after joining the tailnet
+        if: steps.revision.outputs.deploy == 'true'
+        id: confirmed-revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_REVISION: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          current_revision=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq .object.sha)
+          if [[ ${current_revision} == "${DEPLOY_REVISION}" ]]; then
+            echo "deploy=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Skipping superseded push ${DEPLOY_REVISION}; main is ${current_revision}"
+            echo "deploy=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Deploy the tested revision over Tailscale SSH
+        if: steps.confirmed-revision.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ ${GITHUB_SHA} =~ ^[0-9a-f]{40}$ ]] || {
+            echo "GITHUB_SHA must be a full lowercase Git commit SHA" >&2
             exit 1
           }
-      - name: Assume the production deploy role with GitHub OIDC
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
-          role-session-name: yc-radar-${{ github.run_id }}
-          role-duration-seconds: 7200
-          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
-          mask-aws-account-id: true
-          unset-current-credentials: true
-      - name: Deploy the tested revision through SSM
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          ./infra/aws/worker-ssm.sh \
-            --region "${AWS_REGION}" \
-            --stack-name "${AWS_STACK_NAME}" \
-            deploy "${GITHUB_SHA}"
+          tailscale ssh ubuntu@radar-worker \
+            "sudo /usr/local/sbin/radar-deploy --revision '${GITHUB_SHA}'"

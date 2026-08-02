@@ -17,10 +17,6 @@ Options:
   --volume-size-gib SIZE        Retained gp3 size (default: 100)
   --repo-url URL                Public GitHub repository
   --repo-branch BRANCH          Branch to deploy (default: main)
-  --github-repository OWNER/REPO
-                                Repository trusted for production deploys
-  --github-oidc-provider-arn ARN
-                                Existing GitHub OIDC provider (optional)
   --athena-results-bucket NAME  Existing Athena output bucket
   --state-bucket NAME           New retained/versioned worker-state bucket
   --no-termination-protection   Do not enable CloudFormation termination protection
@@ -38,8 +34,6 @@ instance_type=t3.large
 volume_size=100
 repo_url=https://github.com/Daniishkhan/yc-radar.git
 repo_branch=main
-github_repository=Daniishkhan/yc-radar
-github_oidc_provider_arn=
 athena_results_bucket=
 state_bucket=
 protect_stack=true
@@ -54,8 +48,6 @@ while [[ $# -gt 0 ]]; do
     --volume-size-gib) volume_size=${2:-}; shift 2 ;;
     --repo-url) repo_url=${2:-}; shift 2 ;;
     --repo-branch) repo_branch=${2:-}; shift 2 ;;
-    --github-repository) github_repository=${2:-}; shift 2 ;;
-    --github-oidc-provider-arn) github_oidc_provider_arn=${2:-}; shift 2 ;;
     --athena-results-bucket) athena_results_bucket=${2:-}; shift 2 ;;
     --state-bucket) state_bucket=${2:-}; shift 2 ;;
     --no-termination-protection) protect_stack=false; shift ;;
@@ -100,13 +92,9 @@ parameter_overrides=(
   DataVolumeSizeGiB="${volume_size}"
   RepositoryUrl="${repo_url}"
   RepositoryBranch="${repo_branch}"
-  GitHubRepository="${github_repository}"
   AthenaResultsBucketName="${athena_results_bucket}"
   StateBucketName="${state_bucket}"
 )
-if [[ -n ${github_oidc_provider_arn} ]]; then
-  parameter_overrides+=(GitHubOidcProviderArn="${github_oidc_provider_arn}")
-fi
 
 aws "${aws_args[@]}" cloudformation deploy \
   --template-file "${TEMPLATE}" \

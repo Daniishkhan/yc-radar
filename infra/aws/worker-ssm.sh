@@ -151,45 +151,6 @@ PY
   wait_for_command "${command_id}"
 )
 
-send_deployment() (
-  local revision=$1 document_name temporary request command_id
-  if [[ ! ${revision} =~ ^[0-9a-f]{40}$ ]]; then
-    echo "Deployment revision must be a full lowercase Git commit SHA" >&2
-    exit 2
-  fi
-
-  document_name=$(aws "${aws_args[@]}" cloudformation describe-stacks \
-    --stack-name "${stack_name}" \
-    --query "Stacks[0].Outputs[?OutputKey=='DeploymentDocumentName'].OutputValue | [0]" \
-    --output text)
-  if [[ -z ${document_name} || ${document_name} == None ]]; then
-    echo "Could not resolve DeploymentDocumentName from stack ${stack_name}" >&2
-    exit 1
-  fi
-
-  temporary=$(mktemp -d /tmp/radar-ssm-deploy.XXXXXX)
-  trap 'rm -rf "${temporary}"' EXIT
-  request=${temporary}/request.json
-  python3 - "${request}" "${instance_id}" "${document_name}" "${revision}" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-Path(sys.argv[1]).write_text(json.dumps({
-    "DocumentName": sys.argv[3],
-    "InstanceIds": [sys.argv[2]],
-    "Parameters": {"Revision": [sys.argv[4]]},
-    "TimeoutSeconds": 3600,
-}))
-PY
-  command_id=$(aws "${aws_args[@]}" ssm send-command \
-    --cli-input-json "file://${request}" \
-    --query 'Command.CommandId' \
-    --output text)
-  echo "SSM deployment command: ${command_id}"
-  wait_for_command "${command_id}"
-)
-
 case "${action}" in
   shell)
     [[ $# -eq 0 ]] || usage
@@ -246,7 +207,12 @@ PY
     ;;
   deploy)
     [[ $# -eq 1 ]] || usage
-    send_deployment "$1"
+    revision=$1
+    if [[ ! ${revision} =~ ^[0-9a-f]{40}$ ]]; then
+      echo "Deployment revision must be a full lowercase Git commit SHA" >&2
+      exit 2
+    fi
+    send_command "sudo /usr/local/sbin/radar-deploy --revision '${revision}'"
     ;;
   run)
     [[ $# -ge 3 ]] || usage
