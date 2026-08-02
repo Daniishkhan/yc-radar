@@ -90,7 +90,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: yc-radar-${{ github.run_id }}
-          role-duration-seconds: 3600
+          role-duration-seconds: 7200
           allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
           mask-aws-account-id: true
           unset-current-credentials: true

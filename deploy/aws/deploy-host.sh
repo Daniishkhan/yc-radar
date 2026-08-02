@@ -63,8 +63,8 @@ if [[ -n ${active_jobs} ]]; then
 fi
 
 if ${fetch}; then
-  if [[ -n $(git -C "${APP_DIR}" status --porcelain --untracked-files=no) ]]; then
-    echo "Tracked changes exist in ${APP_DIR}; refusing to overwrite them" >&2
+  if [[ -n $(git -C "${APP_DIR}" status --porcelain --untracked-files=all) ]]; then
+    echo "Tracked or untracked changes exist in ${APP_DIR}; refusing to overwrite them" >&2
     exit 1
   fi
   git -C "${APP_DIR}" fetch --prune origin \
@@ -82,6 +82,10 @@ fi
 revision=$(git -C "${APP_DIR}" rev-parse --verify HEAD)
 if [[ -n ${expected_revision} && ${revision} != "${expected_revision}" ]]; then
   echo "Refusing to deploy untested revision ${revision}; expected ${expected_revision}" >&2
+  exit 1
+fi
+if [[ -n $(git -C "${APP_DIR}" status --porcelain --untracked-files=all) ]]; then
+  echo "The deployment checkout is not clean; refusing to build uncommitted content" >&2
   exit 1
 fi
 

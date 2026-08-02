@@ -213,7 +213,7 @@ only `main` (and optionally require approval), then set environment variables `A
 `AWS_REGION`, `AWS_STACK_NAME`, and `AWS_DEPLOY_ROLE_ARN`; use the
 `GitHubActionsDeployRoleArn` stack output for the last value. These are identifiers, not secrets.
 
-GitHub exchanges its environment-bound OIDC token for one-hour AWS credentials. The trusted
+GitHub exchanges its environment-bound OIDC token for short-lived two-hour AWS credentials. The trusted
 subject is exactly `repo:Daniishkhan/yc-radar:environment:production`. The role can describe only
 this CloudFormation stack, invoke only its deployment document on only its worker instance, and
 read the command result. It cannot open an SSM shell or invoke `AWS-RunShellScript`. Bootstrap the

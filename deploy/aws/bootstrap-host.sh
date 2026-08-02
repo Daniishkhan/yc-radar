@@ -161,8 +161,8 @@ PY
 checkout_repository() {
   install -d -m 0755 "${RADAR_ROOT}"
   if [[ -d ${APP_DIR}/.git ]]; then
-    if [[ -n $(git -C "${APP_DIR}" status --porcelain --untracked-files=no) ]]; then
-      echo "Tracked changes exist in ${APP_DIR}; refusing to overwrite a machine deployment" >&2
+    if [[ -n $(git -C "${APP_DIR}" status --porcelain --untracked-files=all) ]]; then
+      echo "Tracked or untracked changes exist in ${APP_DIR}; refusing to overwrite a machine deployment" >&2
       exit 1
     fi
     git -C "${APP_DIR}" fetch --prune origin "${RADAR_REPO_BRANCH}"

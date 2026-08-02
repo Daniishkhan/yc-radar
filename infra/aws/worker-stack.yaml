@@ -289,7 +289,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       Description: Run only the bounded YC Radar deployment document on the production worker.
-      MaxSessionDuration: 3600
+      MaxSessionDuration: 7200
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
