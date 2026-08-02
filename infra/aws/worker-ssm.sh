@@ -18,7 +18,7 @@ Actions:
   exit-node
   gcp-wif PROJECT_ID CONFIG_FILE
   gcp-wif-status
-  deploy
+  deploy REVISION
   run NAME -- COMMAND [ARG ...]
   pipeline NAME [PIPELINE ARG ...]
   sync NAME [SYNC ARG ...]
@@ -91,28 +91,8 @@ print(base64.b64encode(json.dumps(sys.argv[1:]).encode()).decode())
 PY
 }
 
-send_command() (
-  local remote_command=$1 temporary request command_id status output error_output
-  temporary=$(mktemp -d /tmp/radar-ssm.XXXXXX)
-  trap 'rm -rf "${temporary}"' EXIT
-  request=${temporary}/request.json
-  python3 - "${request}" "${instance_id}" "${remote_command}" <<'PY'
-import json
-from pathlib import Path
-import sys
-
-Path(sys.argv[1]).write_text(json.dumps({
-    "DocumentName": "AWS-RunShellScript",
-    "InstanceIds": [sys.argv[2]],
-    "Parameters": {"commands": [sys.argv[3]]},
-    "TimeoutSeconds": 3600,
-}))
-PY
-  command_id=$(aws "${aws_args[@]}" ssm send-command \
-    --cli-input-json "file://${request}" \
-    --query 'Command.CommandId' \
-    --output text)
-  echo "SSM command: ${command_id}"
+wait_for_command() (
+  local command_id=$1 status output error_output
   if ${detach}; then
     return
   fi
@@ -144,6 +124,70 @@ PY
     echo "SSM command ended with status ${status:-unknown}" >&2
     return 1
   fi
+)
+
+send_command() (
+  local remote_command=$1 temporary request command_id
+  temporary=$(mktemp -d /tmp/radar-ssm.XXXXXX)
+  trap 'rm -rf "${temporary}"' EXIT
+  request=${temporary}/request.json
+  python3 - "${request}" "${instance_id}" "${remote_command}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text(json.dumps({
+    "DocumentName": "AWS-RunShellScript",
+    "InstanceIds": [sys.argv[2]],
+    "Parameters": {"commands": [sys.argv[3]]},
+    "TimeoutSeconds": 3600,
+}))
+PY
+  command_id=$(aws "${aws_args[@]}" ssm send-command \
+    --cli-input-json "file://${request}" \
+    --query 'Command.CommandId' \
+    --output text)
+  echo "SSM command: ${command_id}"
+  wait_for_command "${command_id}"
+)
+
+send_deployment() (
+  local revision=$1 document_name temporary request command_id
+  if [[ ! ${revision} =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Deployment revision must be a full lowercase Git commit SHA" >&2
+    exit 2
+  fi
+
+  document_name=$(aws "${aws_args[@]}" cloudformation describe-stacks \
+    --stack-name "${stack_name}" \
+    --query "Stacks[0].Outputs[?OutputKey=='DeploymentDocumentName'].OutputValue | [0]" \
+    --output text)
+  if [[ -z ${document_name} || ${document_name} == None ]]; then
+    echo "Could not resolve DeploymentDocumentName from stack ${stack_name}" >&2
+    exit 1
+  fi
+
+  temporary=$(mktemp -d /tmp/radar-ssm-deploy.XXXXXX)
+  trap 'rm -rf "${temporary}"' EXIT
+  request=${temporary}/request.json
+  python3 - "${request}" "${instance_id}" "${document_name}" "${revision}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_text(json.dumps({
+    "DocumentName": sys.argv[3],
+    "InstanceIds": [sys.argv[2]],
+    "Parameters": {"Revision": [sys.argv[4]]},
+    "TimeoutSeconds": 3600,
+}))
+PY
+  command_id=$(aws "${aws_args[@]}" ssm send-command \
+    --cli-input-json "file://${request}" \
+    --query 'Command.CommandId' \
+    --output text)
+  echo "SSM deployment command: ${command_id}"
+  wait_for_command "${command_id}"
 )
 
 case "${action}" in
@@ -201,8 +245,8 @@ PY
     send_command "${remote_command}"
     ;;
   deploy)
-    [[ $# -eq 0 ]] || usage
-    send_command 'sudo /usr/local/sbin/radar-deploy'
+    [[ $# -eq 1 ]] || usage
+    send_deployment "$1"
     ;;
   run)
     [[ $# -ge 3 ]] || usage

@@ -19,12 +19,12 @@ Parameters:
     Description: Canonical Ubuntu 24.04 amd64 AMI parameter.
   InstanceType:
     Type: String
-    Default: t3.medium
+    Default: t3.large
     AllowedValues:
       - t3.small
       - t3.medium
       - t3.large
-    Description: Worker size. The default is appropriate for network-heavy jobs and local Postgres.
+    Description: Worker size. The default leaves headroom for local Postgres and in-memory EDA jobs.
   DataVolumeSizeGiB:
     Type: Number
     Default: 100
@@ -39,8 +39,19 @@ Parameters:
   RepositoryBranch:
     Type: String
     Default: main
-    AllowedPattern: "^[A-Za-z0-9._/-]+$"
+    AllowedPattern: "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
     Description: Branch deployed to the worker.
+  GitHubRepository:
+    Type: String
+    Default: Daniishkhan/yc-radar
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    Description: Exact GitHub owner/repository allowed to deploy from the production environment.
+  GitHubOidcProviderArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$"
+    Description: >-
+      Existing GitHub Actions OIDC provider ARN. Leave empty for this stack to create and own it.
   AthenaWorkGroup:
     Type: String
     Default: radar-commoncrawl
@@ -58,7 +69,23 @@ Parameters:
     AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
     Description: Globally unique name for the retained, versioned worker-state bucket.
 
+Conditions:
+  CreateGitHubOidcProvider: !Equals [!Ref GitHubOidcProviderArn, ""]
+
 Resources:
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateGitHubOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: yc-radar
+        - Key: Purpose
+          Value: github-actions-deployment
+
   WorkerStateBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -235,6 +262,73 @@ Resources:
       Roles:
         - !Ref WorkerRole
 
+  DeploymentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "2.2"
+        description: Deploy one tested YC Radar Git revision without interrupting managed jobs.
+        parameters:
+          Revision:
+            type: String
+            description: Full Git commit SHA that passed CI.
+            allowedPattern: "^[0-9a-f]{40}$"
+        mainSteps:
+          - action: aws:runShellScript
+            name: deployTestedRevision
+            inputs:
+              timeoutSeconds: "3600"
+              runCommand:
+                - 'sudo /usr/local/sbin/radar-deploy --revision "{{ Revision }}"'
+
+  GitHubActionsDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Run only the bounded YC Radar deployment document on the production worker.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateGitHubOidcProvider
+                - !Ref GitHubActionsOidcProvider
+                - !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:environment:production
+      Policies:
+        - PolicyName: deploy-through-ssm
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ResolveWorkerOutputs
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*
+              - Sid: RunBoundedDeployment
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${DeploymentDocument}
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${WorkerInstance}
+              - Sid: ReadDeploymentResult
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: yc-radar
+        - Key: Purpose
+          Value: github-actions-deployment
+
   WorkerDataVolume:
     Type: AWS::EC2::Volume
     DeletionPolicy: Retain
@@ -365,5 +459,14 @@ Outputs:
   WorkerRoleArn:
     Description: IAM role ARN used to restrict Google Cloud Workload Identity Federation.
     Value: !GetAtt WorkerRole.Arn
+  DeploymentDocumentName:
+    Description: Bounded SSM document accepted by the GitHub Actions deployment role.
+    Value: !Ref DeploymentDocument
+  GitHubActionsDeployRoleArn:
+    Description: Set this as AWS_DEPLOY_ROLE_ARN on the GitHub production environment.
+    Value: !GetAtt GitHubActionsDeployRole.Arn
+  GitHubActionsOidcSubject:
+    Description: Exact GitHub OIDC subject trusted to assume the deployment role.
+    Value: !Sub repo:${GitHubRepository}:environment:production
   SsmStartSessionCommand:
     Value: !Sub aws ssm start-session --target ${WorkerInstance} --region ${AWS::Region}

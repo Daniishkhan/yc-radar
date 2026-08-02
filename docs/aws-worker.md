@@ -37,13 +37,17 @@ aws cloudformation deploy \
 ```
 
 The stack output named `ElasticIpAddress` is the worker's stable public egress address.
+`DeploymentDocumentName` and `GitHubActionsDeployRoleArn` identify the bounded, keyless production
+deployment path. If this AWS account already has a GitHub Actions OIDC provider, pass its ARN as
+`GitHubOidcProviderArn`; otherwise the stack creates and owns one.
 
-The default is Ubuntu 24.04 amd64 on `t3.medium`, a 20 GiB encrypted disposable root disk, and a
-100 GiB encrypted retained data disk. The bootstrap installs Docker, the Compose plugin, AWS CLI,
-SSM Agent, Tailscale from its official Ubuntu repository, the systemd units, and the repository.
-It starts `tailscaled` without enrolling the device and generates the Postgres password locally on
-the retained disk; it never copies workstation AWS credentials, Google service-account keys, or
-private profile/resume files.
+The default is Ubuntu 24.04 amd64 on `t3.large`, which leaves memory headroom for local Postgres and
+in-memory EDA jobs. `t3.medium` remains an allowed lower-cost option for lighter workloads. The
+instance uses a 20 GiB encrypted disposable root disk and a 100 GiB encrypted retained data disk.
+The bootstrap installs Docker, the Compose plugin, AWS CLI, SSM Agent, Tailscale from its official
+Ubuntu repository, the systemd units, and the repository. It starts `tailscaled` without enrolling
+the device and generates the Postgres password locally on the retained disk; it never copies
+workstation AWS credentials, Google service-account keys, or private profile/resume files.
 
 Get the instance ID and wait for SSM. This path is needed for initial Tailscale enrollment and
 remains available for recovery:
@@ -186,15 +190,37 @@ opening public port 22.
 
 ## Deploy a new commit
 
-Push `main`, then ask the host to fast-forward, rebuild the app image, start Postgres, and apply
-Alembic migrations:
+Push `main`, then deploy its exact full commit SHA through the stack's bounded SSM document. The
+host verifies that this is still the remote branch tip before it fast-forwards, rebuilds the app
+image, starts Postgres, and applies Alembic migrations:
 
 ```bash
-sudo radar-deploy
+revision=$(git rev-parse HEAD)
+./infra/aws/worker-ssm.sh \
+  --profile radar-athena \
+  --region us-east-1 \
+  deploy "${revision}"
 ```
 
-`radar-deploy` refuses a dirty machine checkout and takes a host deployment lock. The persistent
-Postgres volume is not rebuilt by a code deployment.
+`radar-deploy` refuses a dirty machine checkout and takes a host deployment lock. It also fails
+closed when any managed `radar-job@` unit is active; a deployment never stops a long-running job.
+The persistent Postgres volume is not rebuilt by a code deployment.
+
+The checked-in `CI` workflow continues to run for every push and pull request. It deploys only when
+manually dispatched from `main`, and only after the same run passes locked dependency installation,
+migration upgrade/check, pytest, and Ruff. Configure the GitHub `production` environment to allow
+only `main` (and optionally require approval), then set environment variables `AWS_ACCOUNT_ID`,
+`AWS_REGION`, `AWS_STACK_NAME`, and `AWS_DEPLOY_ROLE_ARN`; use the
+`GitHubActionsDeployRoleArn` stack output for the last value. These are identifiers, not secrets.
+
+GitHub exchanges its environment-bound OIDC token for one-hour AWS credentials. The trusted
+subject is exactly `repo:Daniishkhan/yc-radar:environment:production`. The role can describe only
+this CloudFormation stack, invoke only its deployment document on only its worker instance, and
+read the command result. It cannot open an SSM shell or invoke `AWS-RunShellScript`. Bootstrap the
+role and document once with an administrator-run CloudFormation update. Before that update, deploy
+this revision once through the existing administrator-controlled path so the installed
+`radar-deploy` supports `--revision`; the bounded document intentionally has no legacy fallback.
+Actions cannot grant itself AWS access.
 
 ## Keyless Vertex AI from the AWS worker
 

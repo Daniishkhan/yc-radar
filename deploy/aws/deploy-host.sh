@@ -8,11 +8,27 @@ readonly RUNTIME_ENV=${RADAR_ROOT}/config/runtime.env
 readonly DEPLOY_STATE=${RADAR_ROOT}/state/deployment.json
 
 fetch=true
-case "${1:-}" in
-  "") ;;
-  --no-fetch) fetch=false ;;
-  *) echo "Usage: radar-deploy [--no-fetch]" >&2; exit 2 ;;
-esac
+expected_revision=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-fetch)
+      fetch=false
+      shift
+      ;;
+    --revision)
+      expected_revision=${2:-}
+      shift 2
+      ;;
+    *)
+      echo "Usage: radar-deploy [--no-fetch] [--revision COMMIT_SHA]" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -n ${expected_revision} && ! ${expected_revision} =~ ^[0-9a-f]{40}$ ]]; then
+  echo "--revision must be a full lowercase Git commit SHA" >&2
+  exit 2
+fi
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "radar-deploy must run as root" >&2
@@ -51,9 +67,22 @@ if ${fetch}; then
     echo "Tracked changes exist in ${APP_DIR}; refusing to overwrite them" >&2
     exit 1
   fi
-  git -C "${APP_DIR}" fetch --prune origin "${RADAR_REPO_BRANCH}"
+  git -C "${APP_DIR}" fetch --prune origin \
+    "+refs/heads/${RADAR_REPO_BRANCH}:refs/remotes/origin/${RADAR_REPO_BRANCH}"
+  remote_revision=$(git -C "${APP_DIR}" rev-parse --verify \
+    "refs/remotes/origin/${RADAR_REPO_BRANCH}^{commit}")
+  if [[ -n ${expected_revision} && ${remote_revision} != "${expected_revision}" ]]; then
+    echo "Refusing to deploy: origin/${RADAR_REPO_BRANCH} is ${remote_revision}, not tested revision ${expected_revision}" >&2
+    exit 1
+  fi
   git -C "${APP_DIR}" checkout "${RADAR_REPO_BRANCH}"
   git -C "${APP_DIR}" merge --ff-only "origin/${RADAR_REPO_BRANCH}"
+fi
+
+revision=$(git -C "${APP_DIR}" rev-parse --verify HEAD)
+if [[ -n ${expected_revision} && ${revision} != "${expected_revision}" ]]; then
+  echo "Refusing to deploy untested revision ${revision}; expected ${expected_revision}" >&2
+  exit 1
 fi
 
 install -m 0755 "${APP_DIR}/deploy/aws/deploy-host.sh" /usr/local/sbin/radar-deploy
@@ -79,7 +108,6 @@ compose=(docker compose --project-directory "${APP_DIR}" --env-file "${RUNTIME_E
 "${compose[@]}" up -d postgres
 "${compose[@]}" run --rm app alembic upgrade head
 
-revision=$(git -C "${APP_DIR}" rev-parse HEAD)
 python3 - "${DEPLOY_STATE}" "${revision}" <<'PY'
 from datetime import UTC, datetime
 import json

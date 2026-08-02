@@ -13,10 +13,14 @@ Options:
   --profile PROFILE             AWS CLI profile (optional)
   --region REGION               AWS region (default: configured region or us-east-1)
   --stack-name NAME             CloudFormation stack (default: radar-worker)
-  --instance-type TYPE          EC2 type (default: t3.medium)
+  --instance-type TYPE          EC2 type (default: t3.large)
   --volume-size-gib SIZE        Retained gp3 size (default: 100)
   --repo-url URL                Public GitHub repository
   --repo-branch BRANCH          Branch to deploy (default: main)
+  --github-repository OWNER/REPO
+                                Repository trusted for production deploys
+  --github-oidc-provider-arn ARN
+                                Existing GitHub OIDC provider (optional)
   --athena-results-bucket NAME  Existing Athena output bucket
   --state-bucket NAME           New retained/versioned worker-state bucket
   --no-termination-protection   Do not enable CloudFormation termination protection
@@ -30,10 +34,12 @@ subnet_id=
 profile=
 region=
 stack_name=radar-worker
-instance_type=t3.medium
+instance_type=t3.large
 volume_size=100
 repo_url=https://github.com/Daniishkhan/yc-radar.git
 repo_branch=main
+github_repository=Daniishkhan/yc-radar
+github_oidc_provider_arn=
 athena_results_bucket=
 state_bucket=
 protect_stack=true
@@ -48,6 +54,8 @@ while [[ $# -gt 0 ]]; do
     --volume-size-gib) volume_size=${2:-}; shift 2 ;;
     --repo-url) repo_url=${2:-}; shift 2 ;;
     --repo-branch) repo_branch=${2:-}; shift 2 ;;
+    --github-repository) github_repository=${2:-}; shift 2 ;;
+    --github-oidc-provider-arn) github_oidc_provider_arn=${2:-}; shift 2 ;;
     --athena-results-bucket) athena_results_bucket=${2:-}; shift 2 ;;
     --state-bucket) state_bucket=${2:-}; shift 2 ;;
     --no-termination-protection) protect_stack=false; shift ;;
@@ -84,21 +92,28 @@ account_id=$(aws "${aws_args[@]}" sts get-caller-identity --query Account --outp
 athena_results_bucket=${athena_results_bucket:-radar-athena-results-${account_id}-${region}}
 state_bucket=${state_bucket:-radar-worker-state-${account_id}-${region}}
 
+parameter_overrides=(
+  VpcId="${vpc_id}"
+  SubnetId="${subnet_id}"
+  AvailabilityZone="${availability_zone}"
+  InstanceType="${instance_type}"
+  DataVolumeSizeGiB="${volume_size}"
+  RepositoryUrl="${repo_url}"
+  RepositoryBranch="${repo_branch}"
+  GitHubRepository="${github_repository}"
+  AthenaResultsBucketName="${athena_results_bucket}"
+  StateBucketName="${state_bucket}"
+)
+if [[ -n ${github_oidc_provider_arn} ]]; then
+  parameter_overrides+=(GitHubOidcProviderArn="${github_oidc_provider_arn}")
+fi
+
 aws "${aws_args[@]}" cloudformation deploy \
   --template-file "${TEMPLATE}" \
   --stack-name "${stack_name}" \
   --capabilities CAPABILITY_IAM \
   --no-fail-on-empty-changeset \
-  --parameter-overrides \
-    VpcId="${vpc_id}" \
-    SubnetId="${subnet_id}" \
-    AvailabilityZone="${availability_zone}" \
-    InstanceType="${instance_type}" \
-    DataVolumeSizeGiB="${volume_size}" \
-    RepositoryUrl="${repo_url}" \
-    RepositoryBranch="${repo_branch}" \
-    AthenaResultsBucketName="${athena_results_bucket}" \
-    StateBucketName="${state_bucket}"
+  --parameter-overrides "${parameter_overrides[@]}"
 
 if ${protect_stack}; then
   aws "${aws_args[@]}" cloudformation update-termination-protection \

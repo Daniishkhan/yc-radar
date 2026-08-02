@@ -2,7 +2,7 @@
 
 This stack creates one private operational worker, not a served application:
 
-- Ubuntu 24.04 on `t3.medium` by default.
+- Ubuntu 24.04 on `t3.large` by default, with `t3.medium` still available for lighter workloads.
 - no inbound security-group rules (including no public port 22), EC2 SSH key, load balancer, or
   public service;
 - Tailscale SSH as the primary human access path after one-time enrollment, with no-inbound SSM
@@ -19,6 +19,8 @@ This stack creates one private operational worker, not a served application:
 - a private, encrypted, versioned S3 bucket retained for job/deployment state summaries.
 - optional keyless Vertex AI access through an exact-role Google Workload Identity Federation
   provider, with its non-secret ADC config mounted read-only from retained storage.
+- a GitHub OIDC deployment role that can invoke only the stack's bounded SSM deployment document
+  on this worker; no SSH key or long-lived AWS access key is used by Actions.
 
 The EC2 root volume is disposable. The EBS volume and S3 bucket are the recovery boundary. The
 Elastic IP is not retained: deleting the stack releases it automatically. CloudFormation
@@ -42,7 +44,10 @@ static Elastic IP but accepts no inbound connections.
   health
 ```
 
-The deployment output reports the stable public egress address as `ElasticIpAddress`.
+The deployment output reports the stable public egress address as `ElasticIpAddress`, the bounded
+SSM document as `DeploymentDocumentName`, and the keyless Actions role as
+`GitHubActionsDeployRoleArn`. If the AWS account already has the GitHub Actions OIDC provider, pass
+its ARN with `--github-oidc-provider-arn`; otherwise this stack creates and owns the provider.
 
 Bootstrap installs Docker Compose, the AWS CLI, and Tailscale from its official Ubuntu repository,
 mounts the retained volume, generates a random local Postgres password in
@@ -150,12 +155,37 @@ re-authentication can be repaired without public SSH.
 
 ## Deploy a pushed revision
 
-Deployment uses `git merge --ff-only` and refuses to overwrite tracked VM changes. It also refuses
-to migrate/rebuild while a managed job is active.
+Deployment uses `git merge --ff-only`, requires the full tested commit SHA, and refuses to
+overwrite tracked VM changes. It also refuses to migrate/rebuild while a managed job is active;
+deployments never stop or restart those long-running units automatically.
 
 ```bash
-./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 deploy
+revision=$(git rev-parse HEAD)
+./infra/aws/worker-ssm.sh --profile radar-athena --region us-east-1 deploy "${revision}"
 ```
+
+### Manual production deployment from GitHub Actions
+
+Push and pull requests run the migration, test, and lint job only. Production deployment is an
+explicit `workflow_dispatch` of the `CI` workflow on `main`; the deploy job cannot run until that
+same workflow run's test job succeeds. Configure a GitHub environment named `production`, restrict
+it to `main`, and add a required reviewer if desired. Set these environment variables (they are
+resource identifiers, not secrets):
+
+- `AWS_ACCOUNT_ID`: the 12-digit deployment account;
+- `AWS_REGION`: the stack region, currently `us-east-1`;
+- `AWS_STACK_NAME`: currently `radar-worker`;
+- `AWS_DEPLOY_ROLE_ARN`: the stack's `GitHubActionsDeployRoleArn` output.
+
+The role trust is bound to the exact `Daniishkhan/yc-radar:environment:production` OIDC subject.
+Its policy can only describe this stack, invoke this stack's deployment document on this one EC2
+instance, and read that command's result. The document accepts only a 40-character commit SHA.
+The host then verifies that SHA is still the tip of configured `main`; a newer push or an active
+managed job makes the deployment fail closed. For the one-time migration, first deploy this
+revision with the existing administrator-controlled path so `/usr/local/sbin/radar-deploy`
+understands `--revision`, then update CloudFormation to create the role and document. The bounded
+document deliberately does not fall back to an unattested deploy when the old helper is installed.
+Actions cannot bootstrap its own AWS access.
 
 ## Install keyless Vertex AI credentials
 
