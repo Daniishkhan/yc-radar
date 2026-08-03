@@ -11,9 +11,6 @@ def test_settings_derive_data_paths_from_data_dir() -> None:
     )
     assert settings.companies_csv_path == Path("workspace-data/snapshots/yc_companies.csv")
     assert settings.yc_job_postings_csv_path == Path("workspace-data/snapshots/yc_job_postings.csv")
-    assert settings.career_url_discovery_cache_path == Path(
-        "workspace-data/local/cache/career_url_discovery.json"
-    )
     assert settings.candidate_profile_path == Path(
         "workspace-data/local/profile/candidate_profile.json"
     )

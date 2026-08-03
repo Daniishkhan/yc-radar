@@ -10,8 +10,7 @@ from yc_radar.domain.job_sources import SourceSnapshot
 from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.database import (
     engine_from_url,
-    job_posting_versions_table,
-    job_postings_table,
+    jobs_table,
 )
 from yc_radar.services.job_repository import JobRepository
 from yc_radar.services.job_source_registry import JobSourceRegistry
@@ -21,6 +20,7 @@ from yc_radar.services.job_sync_service import JobSyncService
 def _greenhouse_payload() -> dict[str, object]:
     return {
         "id": 4012345,
+        "requisition_id": "REQ-4012345",
         "title": "Senior Backend Engineer",
         "absolute_url": "https://job-boards.greenhouse.io/acme/jobs/4012345",
         "content": "<p>Build distributed API systems.</p>",
@@ -47,6 +47,7 @@ def _greenhouse_payload() -> dict[str, object]:
 def _ashby_payload() -> dict[str, object]:
     return {
         "id": "8e0d126f-ef56-4af0-a4f7-b008f3792e66",
+        "jobCode": "ENG-42",
         "title": "Senior Backend Engineer",
         "location": "Karachi",
         "address": {
@@ -95,6 +96,7 @@ def test_greenhouse_structured_evidence_is_semantic_ordered_and_content_hashed()
 
     assert job.structured_evidence == reordered.structured_evidence
     assert job.content_hash == reordered.content_hash
+    assert job.structured_evidence["requisition_id"] == "REQ-4012345"
     assert job.structured_evidence["countries"] == ["India", "Pakistan"]
     assert {
         (office.get("name"), office.get("location"))
@@ -138,6 +140,7 @@ def test_ashby_remote_workplace_and_address_evidence_is_content_hashed() -> None
     payload = _ashby_payload()
     job = normalize_ashby_job(payload)
 
+    assert job.structured_evidence["requisition_id"] == "ENG-42"
     assert job.structured_evidence["workplace"] == {"type": "remote", "is_remote": True}
     assert job.structured_evidence["primary_location"] == {
         "label": "Karachi",
@@ -167,7 +170,7 @@ def test_ashby_remote_workplace_and_address_evidence_is_content_hashed() -> None
     assert different_country.content_hash != job.content_hash
 
 
-def test_sync_persists_evidence_in_current_version_and_active_reads(
+def test_sync_persists_evidence_in_current_job_and_active_reads(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
@@ -190,18 +193,16 @@ def test_sync_persists_evidence_in_current_version_and_active_reads(
     )
 
     result = JobSyncService(engine, clock=lambda: datetime(2026, 8, 1, tzinfo=UTC)).sync_snapshot(
-        career_source_id=source.career_source_id,
+        company_source_id=source.company_source_id,
         run_key="evidence-v1",
         snapshot=snapshot,
     )
     assert result.status == "completed"
 
     with engine.connect() as connection:
-        current = connection.execute(select(job_postings_table)).mappings().one()
-        version = connection.execute(select(job_posting_versions_table)).mappings().one()
-    active = JobRepository(engine).active_job_rows()
+        current = connection.execute(select(jobs_table)).mappings().one()
+    active = JobRepository(engine).list_jobs()
 
     assert current["structured_evidence"] == job.structured_evidence
-    assert version["structured_evidence"] == job.structured_evidence
     assert active[0]["structured_evidence"] == job.structured_evidence
-    assert version["raw_payload"] == _greenhouse_payload()
+    assert current["raw_payload"] == _greenhouse_payload()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load checked-in CSV snapshots into the Postgres database."""
+"""Load checked-in YC snapshots into the unified company/source/job store."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from yc_radar.core.config import get_settings
-from yc_radar.services.database import engine_from_url, upsert_yc_companies, upsert_yc_job_postings
+from yc_radar.services.company_registry import sync_yc_job_snapshots
+from yc_radar.services.database import engine_from_url, upsert_yc_companies
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,7 +30,13 @@ def main() -> None:
 
     engine = engine_from_url()
     upsert_yc_companies(engine, companies)
-    upsert_yc_job_postings(engine, jobs)
+    sync_yc_job_snapshots(
+        engine,
+        jobs,
+        complete_company_slugs={
+            str(company.get("slug") or "") for company in companies if company.get("slug")
+        },
+    )
 
     print(f"Loaded {len(companies)} companies from {companies_path}")
     print(f"Loaded {len(jobs)} YC job postings from {jobs_path}")

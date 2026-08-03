@@ -188,10 +188,6 @@ create_runtime_environment() {
       "POSTGRES_PASSWORD=${postgres_password}" \
       'OPENAI_API_KEY=' \
       'FIRECRAWL_API_KEY=' \
-      'GOOGLE_CLOUD_PROJECT=' \
-      'GOOGLE_CLOUD_LOCATION=global' \
-      'YC_RADAR_VERTEX_MODEL=gemini-3.5-flash-lite' \
-      'GOOGLE_APPLICATION_CREDENTIALS=/etc/radar/gcp-wif.json' \
       > "${CONFIG_DIR}/runtime.env"
   fi
 
@@ -210,14 +206,10 @@ install_worker_services() {
   install -m 0755 "${APP_DIR}/deploy/aws/run-job.sh" /usr/local/sbin/radar-run-job
   install -m 0755 "${APP_DIR}/deploy/aws/jobctl.sh" /usr/local/sbin/radar-jobctl
   install -m 0755 \
-    "${APP_DIR}/deploy/aws/configure-gcp-wif.sh" \
-    /usr/local/sbin/radar-configure-gcp-wif
-  install -m 0755 \
     "${APP_DIR}/deploy/aws/configure-tailscale-exit-node.sh" \
     /usr/local/sbin/radar-configure-tailscale-exit-node
   install -m 0644 "${APP_DIR}/deploy/systemd/radar-deploy.service" /etc/systemd/system/radar-deploy.service
   install -m 0644 "${APP_DIR}/deploy/systemd/radar-job@.service" /etc/systemd/system/radar-job@.service
-  /usr/local/sbin/radar-configure-gcp-wif
   /usr/local/sbin/radar-configure-tailscale-exit-node
   systemctl daemon-reload
   systemctl enable radar-deploy.service

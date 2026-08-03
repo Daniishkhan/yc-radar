@@ -1,521 +1,417 @@
-from datetime import UTC, datetime
+from __future__ import annotations
 
 import pytest
 from alembic import command
-from sqlalchemy import func, inspect, select, text
-from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
-from yc_radar.services.company_registry import CompanyRegistry
-from yc_radar.services.database import (
-    companies_table,
-    company_sources_table,
-    engine_from_url,
-    job_posting_versions_table,
-    job_postings_table,
-    upsert_yc_companies,
-    yc_company_profiles_table,
-)
-from yc_radar.services.job_repository import JobRepository
-from yc_radar.services.job_source_registry import JobSourceRegistry
-from yc_radar.services.job_sync_service import JobSyncService
-from yc_radar.services.migrations import alembic_config, rebuild_database, verify_existing_baseline
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
+
+from yc_radar.services.database import engine_from_url
+from yc_radar.services.migrations import alembic_config, rebuild_database
 
 
-def test_alembic_head_contains_legacy_and_source_neutral_schema(postgres_database_url: str) -> None:
+CORE_TABLES = {"companies", "company_sources", "jobs", "sync_runs"}
+INGEST_TABLES = {"runs", "raw_observations", "url_work_items", "job_candidates"}
+INGEST_COLUMNS = {
+    "runs": {
+        "id",
+        "run_key",
+        "source",
+        "status",
+        "parser_version",
+        "normalizer_version",
+        "input_uri",
+        "input_sha256",
+        "cursor",
+        "stats",
+        "started_at",
+        "completed_at",
+    },
+    "raw_observations": {
+        "id",
+        "run_id",
+        "url_work_item_id",
+        "observation_key",
+        "observed_url",
+        "payload",
+        "observed_at",
+    },
+    "url_work_items": {
+        "id",
+        "run_id",
+        "normalized_url",
+        "host",
+        "stage",
+        "state",
+        "priority",
+        "attempt_count",
+        "max_attempts",
+        "available_at",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "artifact_uri",
+        "http_status",
+        "content_type",
+        "content_hash",
+        "result",
+        "last_error",
+        "parser_version",
+        "normalizer_version",
+        "created_at",
+        "updated_at",
+    },
+    "job_candidates": {
+        "id",
+        "run_id",
+        "raw_observation_id",
+        "work_item_id",
+        "candidate_key",
+        "company_source_id",
+        "provider",
+        "external_source_id",
+        "external_job_id",
+        "snapshot_complete",
+        "title",
+        "posting_url",
+        "apply_url",
+        "description_text",
+        "location",
+        "department",
+        "employment_type",
+        "content_hash",
+        "source_published_at",
+        "source_updated_at",
+        "field_provenance",
+        "quality_flags",
+        "payload",
+        "status",
+        "parser_version",
+        "normalizer_version",
+        "error",
+        "promoted_job_id",
+        "created_at",
+        "updated_at",
+    },
+}
+
+
+def test_fresh_database_contains_core_and_logged_ingest_staging(
+    postgres_database_url: str,
+) -> None:
     engine = engine_from_url(postgres_database_url)
     inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
+    with engine.connect() as connection:
+        schema = str(connection.dialect.default_schema_name)
+        persistence = dict(
+            connection.execute(
+                text(
+                    "SELECT class.relname, class.relpersistence "
+                    "FROM pg_class AS class "
+                    "JOIN pg_namespace AS namespace ON namespace.oid = class.relnamespace "
+                    "WHERE namespace.nspname = 'ingest' AND class.relkind = 'r'"
+                )
+            ).all()
+        )
 
+    assert set(inspector.get_table_names(schema=schema)) == CORE_TABLES | {"alembic_version"}
+    assert set(inspector.get_table_names(schema="ingest")) == INGEST_TABLES
+    assert inspector.get_view_names(schema=schema) == []
+    assert persistence == {table_name: "p" for table_name in INGEST_TABLES}
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "0002_ingest_staging"
+        )
+
+
+def test_core_schema_derives_job_company_through_company_source(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    inspector = inspect(engine)
+    with engine.connect() as connection:
+        schema = str(connection.dialect.default_schema_name)
+
+    company_columns = {
+        column["name"] for column in inspector.get_columns("companies", schema=schema)
+    }
+    source_columns = {
+        column["name"] for column in inspector.get_columns("company_sources", schema=schema)
+    }
+    job_columns = {column["name"] for column in inspector.get_columns("jobs", schema=schema)}
+
+    assert {"name", "slug", "website", "primary_domain", "identity_state"} <= company_columns
+    assert not {"yc_url", "batch", "stage", "team_size", "is_hiring"} & company_columns
     assert {
-        "companies",
-        "yc_job_postings",
-        "company_sources",
-        "yc_company_profiles",
-        "career_sources",
-        "source_sync_runs",
-        "job_postings",
-        "job_posting_versions",
-        "job_posting_observations",
-    }.issubset(tables)
-    assert "company_primary_career_pages" in inspector.get_view_names()
-    discovery_columns = {
-        column["name"] for column in inspector.get_columns("career_page_discovery_events")
-    }
-    career_page_columns = {
-        column["name"] for column in inspector.get_columns("company_career_pages")
-    }
-    assert "yc_is_hiring" not in discovery_columns
-    assert "yc_job_count" not in discovery_columns
-    assert "yc_is_hiring" not in career_page_columns
-    assert "yc_job_count" not in career_page_columns
-    assert {index["name"] for index in inspector.get_indexes("job_postings")} >= {
-        "ix_job_postings_company_active",
-        "ix_job_postings_content_hash",
-    }
-    with engine.connect() as connection:
-        revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-    assert revision == "0005_job_structured_evidence"
+        "company_id",
+        "provider",
+        "source_kind",
+        "external_id",
+        "sync_mode",
+        "metadata",
+    } <= source_columns
+    assert {
+        "company_source_id",
+        "external_job_id",
+        "structured_evidence",
+        "raw_payload",
+        "last_seen_run_id",
+    } <= job_columns
+    assert "company_id" not in job_columns
 
 
-def test_baseline_verifier_rejects_an_unversioned_neutral_schema(
+def test_core_foreign_keys_and_uniqueness_are_explicit(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
-
-    diagnostics = verify_existing_baseline(engine)
-
-    assert "schema contains yc_company_profiles and is not the known unversioned 0001 baseline" in diagnostics
-    assert "unexpected table: company_sources" in diagnostics
-    assert "unexpected table: job_postings" in diagnostics
-
-
-def test_baseline_verifier_rejects_unversioned_0002_schema(
-    postgres_database_url: str,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0002_source_neutral_jobs")
-    finally:
-        config.attributes["connection"].close()
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
-
-    diagnostics = verify_existing_baseline(engine)
-
-    assert "unexpected table: company_sources" in diagnostics
-    assert "unexpected table: career_sources" in diagnostics
-    assert "unexpected table: job_postings" in diagnostics
-
-
-def test_baseline_verifier_rejects_unknown_tables_and_views(
-    postgres_database_url: str,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0001_baseline")
-    finally:
-        config.attributes["connection"].close()
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
-        connection.execute(text("CREATE TABLE career_surfaces (id integer primary key)"))
-        connection.execute(text("CREATE VIEW extra_legacy_view AS SELECT 1 AS value"))
-
-    diagnostics = verify_existing_baseline(engine)
-
-    assert "unexpected table: career_surfaces" in diagnostics
-    assert "unexpected view: extra_legacy_view" in diagnostics
-
-
-def test_baseline_verifier_accepts_only_exact_unversioned_0001_baseline(
-    postgres_database_url: str,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0001_baseline")
-    finally:
-        config.attributes["connection"].close()
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
-
-    assert verify_existing_baseline(engine) == []
-
-
-def test_baseline_verifier_rejects_structural_drift(postgres_database_url: str) -> None:
-    engine = engine_from_url(postgres_database_url)
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0001_baseline")
-    finally:
-        config.attributes["connection"].close()
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
-        connection.execute(text("ALTER TABLE companies ALTER COLUMN name TYPE TEXT"))
-        connection.execute(text("ALTER TABLE companies ALTER COLUMN name DROP NOT NULL"))
-        connection.execute(text("DROP INDEX ix_companies_slug"))
-        connection.execute(text("CREATE INDEX ix_companies_slug ON companies (name)"))
-        connection.execute(
-            text("ALTER TABLE source_documents DROP CONSTRAINT source_documents_discovered_url_id_fkey")
-        )
-        connection.execute(text("DROP INDEX ix_source_documents_company_id"))
-        connection.execute(
-            text("CREATE INDEX ix_source_documents_company_id ON source_documents (company_slug)")
-        )
-        connection.execute(
-            text(
-                "CREATE OR REPLACE VIEW company_primary_career_pages AS "
-                "SELECT company_id, company_slug, company_name, website, yc_is_hiring, "
-                "yc_job_count, career_page_url, page_type, discovery_source, confidence, "
-                "http_status, evidence, checked_at FROM company_career_pages "
-                "WHERE is_primary = false"
-            )
-        )
-
-    diagnostics = verify_existing_baseline(engine)
-
-    assert "column type mismatch: companies.name expected varchar, found text" in diagnostics
-    assert "column nullability mismatch: companies.name expected False, found True" in diagnostics
-    assert "index columns mismatch: companies.ix_companies_slug" in diagnostics
-    assert "index uniqueness mismatch: companies.ix_companies_slug" in diagnostics
-    assert "foreign key mismatch: source_documents" in diagnostics
-    assert "index columns mismatch: source_documents.ix_source_documents_company_id" in diagnostics
-    assert "view definition mismatch: company_primary_career_pages" in diagnostics
-
-
-def test_company_profile_round_trip_preserves_canonical_jobs(postgres_database_url: str) -> None:
-    engine = engine_from_url(postgres_database_url)
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "SELECT setval(pg_get_serial_sequence('companies', 'id'), 900, false)"
-            )
-        )
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": 900,
-                "name": "Migration Example",
-                "slug": "migration-example",
-                "website": "https://migration.example",
-                "batch": "S24",
-                "regions": ["Remote"],
-                "industries": [],
-                "tags": [],
-            }
-        ],
-    )
-    with engine.connect() as connection:
-        local_company_id = int(
-            connection.scalar(
-                select(yc_company_profiles_table.c.company_id).where(
-                    yc_company_profiles_table.c.yc_company_id == 900
-                )
-            )
-        )
-    source, allowed, _ = JobRepository(engine).register_career_source(
-        company_id=local_company_id,
-        provider="greenhouse",
-        source_kind="ats_board",
-        external_source_id="migration-example",
-        source_url="https://boards.greenhouse.io/migration-example",
-        discovered_from_url="https://migration.example",
-        now=now,
-    )
-    assert allowed is True
-    JobSyncService(engine, clock=lambda: now).sync_snapshot(
-        career_source_id=int(source["id"]),
-        run_key="migration-round-trip",
-        snapshot=SourceSnapshot(
-            provider="greenhouse",
-            external_source_id="migration-example",
-            adapter_version="test",
-            is_complete=True,
-            http_status=200,
-            jobs=[
-                NormalizedJob(
-                    external_job_id="1",
-                    title="Senior Backend Engineer",
-                    content_hash="migration-hash",
-                    raw_payload={"id": "1"},
-                )
-            ],
-        ),
-    )
-
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0002_source_neutral_jobs")
-    finally:
-        config.attributes["connection"].close()
-    with engine.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(job_postings_table)) == 1
-        assert connection.scalar(text("SELECT yc_url FROM companies")) == (
-            "https://www.ycombinator.com/companies/migration-example"
-        )
-
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.upgrade(config, "head")
-    finally:
-        config.attributes["connection"].close()
-    with engine.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(job_postings_table)) == 1
-        assert connection.scalar(
-            select(func.count()).select_from(company_sources_table).where(
-                company_sources_table.c.provider == "greenhouse"
-            )
-        ) == 0
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
-    assert profile["yc_company_id"] == 900
-    assert profile["batch"] == "S24"
-    with engine.connect() as connection:
-        current_evidence = connection.scalar(select(job_postings_table.c.structured_evidence))
-        version_evidence = connection.scalar(
-            select(job_posting_versions_table.c.structured_evidence)
-        )
-    assert current_evidence == version_evidence
-    assert current_evidence["schema_version"] == 1
-    assert current_evidence["provider"] == "greenhouse"
-
-
-def test_company_schema_downgrade_refuses_independent_yc_local_ids(
-    postgres_database_url: str,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": 900,
-                "name": "Independent ID Example",
-                "slug": "independent-id-example",
-                "website": "https://independent-id.example",
-                "regions": [],
-                "industries": [],
-                "tags": [],
-            }
-        ],
-    )
-    with engine.connect() as connection:
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
-    assert profile["company_id"] != profile["yc_company_id"]
-
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        with pytest.raises(RuntimeError, match="external IDs differ from local company IDs"):
-            command.downgrade(config, "0002_source_neutral_jobs")
-    finally:
-        config.attributes["connection"].close()
-
-    with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0005_job_structured_evidence"
-        )
-
-
-def test_company_schema_downgrade_refuses_non_yc_companies(postgres_database_url: str) -> None:
-    engine = engine_from_url(postgres_database_url)
-    company = CompanyRegistry(engine).register_company(
-        name="Non YC Employer",
-        website="https://non-yc.example",
-    )
-    JobSourceRegistry(engine).register_url(
-        company_id=company.company_id,
-        source_url="https://boards.greenhouse.io/non-yc-employer",
-    )
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        with pytest.raises(RuntimeError, match="non-YC companies exist"):
-            command.downgrade(config, "0002_source_neutral_jobs")
-    finally:
-        config.attributes["connection"].close()
-
     inspector = inspect(engine)
-    assert "yc_company_profiles" in inspector.get_table_names()
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0005_job_structured_evidence"
-        )
+        schema = str(connection.dialect.default_schema_name)
 
-
-def test_company_migration_normalizes_url_hostnames_like_runtime(
-    postgres_database_url: str,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0002_source_neutral_jobs")
-    finally:
-        config.attributes["connection"].close()
-
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                """
-                INSERT INTO companies (
-                    id, name, slug, yc_url, website, is_hiring, regions, industries, tags,
-                    raw_json, created_at, updated_at
-                ) VALUES
-                    (1, 'Flight Control', 'flight-control',
-                     'https://www.ycombinator.com/companies/flight-control',
-                     'https://www.flightcontrol.dev?ref=bookface',
-                     false, '[]', '[]', '[]', '{}', now(), now()),
-                    (2, 'Port Example', 'port-example',
-                     'https://www.ycombinator.com/companies/port-example',
-                     'https://user:pass@www.port.example:8443/careers',
-                     false, '[]', '[]', '[]', '{}', now(), now()),
-                    (3, 'Malformed Website', 'malformed-website',
-                     'https://www.ycombinator.com/companies/malformed-website',
-                     'https://first.example, https://second.example',
-                     false, '[]', '[]', '[]', '{}', now(), now())
-                """
-            )
-        )
-
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.upgrade(config, "head")
-    finally:
-        config.attributes["connection"].close()
-
-    with engine.connect() as connection:
-        domains = dict(
-            connection.execute(text("SELECT slug, primary_domain FROM companies")).tuples().all()
-        )
-    assert domains == {
-        "flight-control": "flightcontrol.dev",
-        "port-example": "port.example",
-        "malformed-website": None,
+    source_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("company_sources", schema=schema)
+    }
+    job_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("jobs", schema=schema)
+    }
+    job_foreign_keys = {
+        tuple(foreign_key["constrained_columns"]): tuple(foreign_key["referred_columns"])
+        for foreign_key in inspector.get_foreign_keys("jobs", schema=schema)
+    }
+    job_indexes = {
+        index["name"] for index in inspector.get_indexes("jobs", schema=schema)
     }
 
+    assert ("provider", "external_id") in source_uniques
+    assert ("company_source_id", "external_job_id") in job_uniques
+    assert ("company_id",) not in job_foreign_keys
+    assert job_foreign_keys[("company_source_id",)] == ("id",)
+    assert job_foreign_keys[("last_seen_run_id",)] == ("id",)
+    assert "ix_jobs_status" in job_indexes
+    assert "ix_jobs_company_status" not in job_indexes
 
-def test_company_and_job_source_registries_do_not_share_provider_ownership(
+
+def test_ingest_staging_contract_is_explicit_and_bounded(
+    postgres_database_url: str,
+) -> None:
+    inspector = inspect(engine_from_url(postgres_database_url))
+
+    for table_name, expected_columns in INGEST_COLUMNS.items():
+        actual_columns = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema="ingest")
+        }
+        assert actual_columns == expected_columns
+
+    run_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("runs", schema="ingest")
+    }
+    raw_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("raw_observations", schema="ingest")
+    }
+    url_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("url_work_items", schema="ingest")
+    }
+    candidate_uniques = {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints("job_candidates", schema="ingest")
+    }
+    assert ("source", "run_key") in run_uniques
+    assert ("run_id", "observation_key") in raw_uniques
+    assert ("normalized_url", "parser_version", "normalizer_version") in url_uniques
+    assert ("run_id", "candidate_key") in candidate_uniques
+
+    url_indexes = {
+        index["name"] for index in inspector.get_indexes("url_work_items", schema="ingest")
+    }
+    candidate_indexes = {
+        index["name"] for index in inspector.get_indexes("job_candidates", schema="ingest")
+    }
+    assert {"ix_ingest_url_work_items_queue", "ix_ingest_url_work_items_lease"} <= url_indexes
+    assert "ix_ingest_job_candidates_ready" in candidate_indexes
+
+    check_names = {
+        table_name: {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints(table_name, schema="ingest")
+        }
+        for table_name in INGEST_TABLES
+    }
+    assert {"ck_ingest_runs_cursor", "ck_ingest_runs_stats"} <= check_names["runs"]
+    assert "ck_ingest_raw_observations_payload" in check_names["raw_observations"]
+    assert {
+        "ck_ingest_url_work_items_stage",
+        "ck_ingest_url_work_items_state",
+        "ck_ingest_url_work_items_lease",
+        "ck_ingest_url_work_items_result",
+        "ck_ingest_url_work_items_last_error",
+    } <= check_names["url_work_items"]
+    assert {
+        "ck_ingest_job_candidates_status",
+        "ck_ingest_job_candidates_lineage",
+        "ck_ingest_job_candidates_ready_fields",
+        "ck_ingest_job_candidates_promoted_source",
+        "ck_ingest_job_candidates_field_provenance",
+        "ck_ingest_job_candidates_quality_flags",
+        "ck_ingest_job_candidates_payload",
+        "ck_ingest_job_candidates_error",
+    } <= check_names["job_candidates"]
+
+    candidate_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("job_candidates", schema="ingest")
+    }
+    candidate_foreign_keys = {
+        tuple(foreign_key["constrained_columns"]): foreign_key
+        for foreign_key in inspector.get_foreign_keys("job_candidates", schema="ingest")
+    }
+    assert candidate_columns["raw_observation_id"]["nullable"] is False
+    assert candidate_foreign_keys[("raw_observation_id",)]["options"].get("ondelete") is None
+
+
+def test_ingest_upgrade_refuses_inconsistent_job_company_ownership(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.downgrade(config, "0002_source_neutral_jobs")
-    finally:
-        config.attributes["connection"].close()
+    config = alembic_config(postgres_database_url)
+    with engine.connect() as connection:
+        config.attributes["connection"] = connection
+        command.downgrade(config, "0001_core")
 
     with engine.begin() as connection:
         connection.execute(
             text(
                 """
                 INSERT INTO companies (
-                    id, name, slug, yc_url, website, is_hiring, regions, industries, tags,
-                    raw_json, created_at, updated_at
+                    id, name, normalized_name, slug, identity_state, metadata,
+                    created_at, updated_at
                 ) VALUES
-                    (1, 'Company One', 'company-one',
-                     'https://www.ycombinator.com/companies/company-one',
-                     'https://one.example', false, '[]', '[]', '[]', '{}', now(), now()),
-                    (2, 'Company Two', 'company-two',
-                     'https://www.ycombinator.com/companies/company-two',
-                     'https://two.example', false, '[]', '[]', '[]', '{}', now(), now())
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
+                    (1, 'Source Owner', 'source owner', 'source-owner', 'verified', '{}',
+                     now(), now()),
+                    (2, 'Drifted Owner', 'drifted owner', 'drifted-owner', 'verified', '{}',
+                     now(), now());
                 INSERT INTO company_sources (
-                    company_id, provider, external_company_id, source_url, raw_json,
-                    first_seen_at, last_seen_at, created_at, updated_at
+                    id, company_id, provider, source_kind, external_id, sync_mode, status,
+                    metadata, created_at, updated_at
                 ) VALUES (
-                    1, 'greenhouse', 'shared-token',
-                    'https://boards.greenhouse.io/shared-token', '{}',
-                    now(), now(), now(), now()
-                )
+                    1, 1, 'greenhouse', 'ats_board', 'drifted-board',
+                    'complete_snapshot', 'active', '{}', now(), now()
+                );
+                INSERT INTO jobs (
+                    company_id, company_source_id, external_job_id, title,
+                    structured_evidence, raw_payload, status, consecutive_complete_misses,
+                    content_hash, first_seen_at, last_seen_at, last_changed_at,
+                    created_at, updated_at
+                ) VALUES (
+                    2, 1, 'job-1', 'Backend Engineer', '{}', '{}', 'active', 0,
+                    'hash', now(), now(), now(), now(), now()
+                );
                 """
+            )
+        )
+
+    config = alembic_config(postgres_database_url)
+    with pytest.raises(IntegrityError, match="refusing to remove redundant job ownership"):
+        with engine.connect() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+
+    assert "company_id" in {column["name"] for column in inspect(engine).get_columns("jobs")}
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0001_core"
+
+
+def test_raw_observation_cannot_be_deleted_while_candidate_references_it(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    with engine.begin() as connection:
+        run_id = int(
+            connection.scalar(
+                text(
+                    "INSERT INTO ingest.runs "
+                    "(run_key, source, status, parser_version, normalizer_version, started_at) "
+                    "VALUES ('lineage', 'test', 'running', 'p1', 'n1', now()) RETURNING id"
+                )
+            )
+        )
+        raw_id = int(
+            connection.scalar(
+                text(
+                    "INSERT INTO ingest.raw_observations "
+                    "(run_id, observation_key, payload, observed_at) "
+                    "VALUES (:run_id, 'row-1', '{}', now()) RETURNING id"
+                ),
+                {"run_id": run_id},
             )
         )
         connection.execute(
             text(
-                """
-                INSERT INTO career_sources (
-                    company_id, provider, source_kind, external_source_id, source_url,
-                    status, raw_json, created_at, updated_at
-                ) VALUES (
-                    2, 'greenhouse', 'ats_board', 'shared-token',
-                    'https://boards.greenhouse.io/shared-token',
-                    'active', '{}', now(), now()
-                )
-                """
+                "INSERT INTO ingest.job_candidates "
+                "(run_id, raw_observation_id, candidate_key, snapshot_complete, status, "
+                " parser_version, normalizer_version, created_at, updated_at) "
+                "VALUES (:run_id, :raw_id, 'candidate-1', false, 'normalized', "
+                " 'p1', 'n1', now(), now())"
+            ),
+            {"run_id": run_id, "raw_id": raw_id},
+        )
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM ingest.raw_observations WHERE id = :raw_id"),
+                {"raw_id": raw_id},
             )
-        )
-
-    config = alembic_config()
-    config.attributes["connection"] = engine.connect()
-    try:
-        command.upgrade(config, "head")
-    finally:
-        config.attributes["connection"].close()
 
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0005_job_structured_evidence"
-        )
-        assert connection.scalar(text("SELECT count(*) FROM companies")) == 2
-        assert connection.scalar(text("SELECT count(*) FROM career_sources")) == 1
-        assert connection.scalar(text("SELECT count(*) FROM company_sources")) == 0
-    assert "yc_company_profiles" in inspect(engine).get_table_names()
+        assert connection.scalar(text("SELECT count(*) FROM ingest.job_candidates")) == 1
 
-
-def test_rebuild_database_replaces_an_unversioned_legacy_schema(postgres_database_url: str) -> None:
-    engine = engine_from_url(postgres_database_url)
+    # Deleting the owning run still removes the whole lineage in one statement;
+    # NO ACTION blocks only attempts to orphan a surviving candidate.
     with engine.begin() as connection:
-        for table_name in (
-            "job_posting_observations",
-            "job_postings",
-            "job_posting_versions",
-            "source_sync_runs",
-            "career_sources",
-            "company_sources",
-        ):
-            connection.execute(text(f"DROP TABLE {table_name} CASCADE"))
-        connection.execute(text("DROP TABLE alembic_version"))
-
-    rebuild_database(engine)
-
-    inspector = inspect(engine)
-    assert {"companies", "company_sources", "yc_company_profiles", "job_postings", "job_posting_observations"}.issubset(
-        inspector.get_table_names()
-    )
+        connection.execute(text("DELETE FROM ingest.runs WHERE id = :run_id"), {"run_id": run_id})
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0005_job_structured_evidence"
-        )
+        assert connection.scalar(text("SELECT count(*) FROM ingest.raw_observations")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM ingest.job_candidates")) == 0
 
 
-def test_destructive_rebuild_handles_non_yc_and_independent_ids(
+def test_rebuild_drops_ingest_state_and_reapplies_head(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": 900,
-                "name": "YC Independent ID",
-                "slug": "yc-independent-id",
-                "website": "https://yc-independent.example",
-                "regions": [],
-                "industries": [],
-                "tags": [],
-            }
-        ],
-    )
-    company = CompanyRegistry(engine).register_company(
-        name="Non YC Employer",
-        website="https://non-yc-rebuild.example",
-    )
-    JobSourceRegistry(engine).register_url(
-        company_id=company.company_id,
-        source_url="https://boards.greenhouse.io/non-yc-rebuild",
-    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ingest.runs "
+                "(run_key, source, status, parser_version, normalizer_version, started_at) "
+                "VALUES ('one', 'test', 'running', 'p1', 'n1', now())"
+            )
+        )
 
     rebuild_database(engine)
+    rebuild_database(engine)
 
+    inspector = inspect(engine)
+    assert set(inspector.get_table_names(schema="ingest")) == INGEST_TABLES
     with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM ingest.runs")) == 0
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "0005_job_structured_evidence"
+            "0002_ingest_staging"
         )
-        assert connection.scalar(select(func.count()).select_from(companies_table)) == 0
-        assert connection.scalar(select(func.count()).select_from(yc_company_profiles_table)) == 0
+
+
+def test_alembic_check_ignores_unowned_tables_and_schemas(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE public.unowned_probe (id bigint PRIMARY KEY)"))
+        connection.execute(text("CREATE SCHEMA unowned"))
+        connection.execute(text("CREATE TABLE unowned.probe (id bigint PRIMARY KEY)"))
+        config = alembic_config(postgres_database_url)
+        config.attributes["connection"] = connection
+        command.check(config)

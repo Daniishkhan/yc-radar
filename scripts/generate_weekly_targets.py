@@ -22,8 +22,7 @@ from yc_radar.services.candidate_fit import (
     target_record,
 )
 from yc_radar.services.company_repository import CompanyRepository
-from yc_radar.services.database import engine_from_url, fetch_yc_job_rows
-from yc_radar.services.job_repository import JobRepository
+from yc_radar.services.database import engine_from_url
 from yc_radar.services.hiring_verifier import (
     FirecrawlPageScraper,
     HiringVerification,
@@ -32,6 +31,7 @@ from yc_radar.services.hiring_verifier import (
     verification_cache_key,
     verify_company_hiring,
 )
+from yc_radar.services.job_repository import JobRepository
 
 CSV_FIELDS = [
     "rank",
@@ -61,21 +61,29 @@ CSV_FIELDS = [
     "candidate_strength_matches",
     "target_role_lane",
     "matching_job_titles",
-    "canonical_active_job_count",
-    "canonical_raw_active_job_count",
-    "canonical_duplicate_posting_count",
-    "canonical_matching_job_count",
-    "canonical_raw_matching_job_count",
-    "canonical_duplicate_matching_job_count",
-    "canonical_role_match_status",
-    "canonical_matching_jobs",
+    "active_job_count",
+    "raw_active_job_count",
+    "duplicate_posting_count",
+    "matching_job_count",
+    "raw_matching_job_count",
+    "duplicate_matching_job_count",
+    "job_role_match_status",
+    "matching_jobs",
+    "managed_active_job_count",
+    "managed_raw_active_job_count",
+    "managed_duplicate_posting_count",
+    "managed_matching_job_count",
+    "managed_raw_matching_job_count",
+    "managed_duplicate_matching_job_count",
+    "managed_role_match_status",
+    "managed_matching_jobs",
+    "managed_best_remote_eligibility",
     "matching_job_provenance",
     "best_remote_eligibility",
     "pakistan_explicit_matching_job_count",
     "global_explicit_matching_job_count",
     "regional_unconfirmed_matching_job_count",
     "remote_unclear_matching_job_count",
-    # Compatibility aliases for older downstream CSV consumers.
     "globally_remote_matching_job_count",
     "pakistan_compatible_matching_job_count",
     "remote_matching_job_count",
@@ -139,19 +147,13 @@ def main() -> None:
 
     profile = load_candidate_profile(args.profile_path)
     companies = CompanyRepository().list()
-    jobs_by_slug = load_yc_jobs_by_slug(settings.database_url)
-    canonical_jobs_by_slug = load_canonical_jobs_by_slug(settings.database_url)
-    ranked = rank_companies(companies, profile, max_team_size=args.max_team_size)
-    candidate_targets = [
-        target_record(
-            score,
-            rank=index,
-            yc_jobs=jobs_by_slug.get(score.company.slug, []),
-            canonical_jobs=canonical_jobs_by_slug.get(score.company.slug, []),
-        )
-        for index, score in enumerate(ranked, start=1)
-    ]
-    candidate_targets.sort(key=lambda target: int(target["fit_score"]), reverse=True)
+    jobs_by_slug = load_jobs_by_slug(settings.database_url)
+    candidate_targets = build_ranked_candidate_targets(
+        companies,
+        profile,
+        jobs_by_slug,
+        max_team_size=args.max_team_size,
+    )
     targets = candidate_targets[: args.candidate_pool]
     candidate_pool_size = len(targets)
     for index, target in enumerate(targets, start=1):
@@ -180,7 +182,7 @@ def main() -> None:
     else:
         save_hiring_cache(verification_cache_path, cache)
 
-    refresh_role_focus(targets, companies_by_slug, jobs_by_slug, canonical_jobs_by_slug)
+    refresh_role_focus(targets, companies_by_slug, jobs_by_slug)
     targets = rerank_verified_targets(targets)[: args.limit]
     use_llm = args.use_llm if args.use_llm is not None else bool(settings.openai_api_key)
     if use_llm and settings.openai_api_key:
@@ -211,7 +213,7 @@ def main() -> None:
 
     print(
         f"Loaded {len(companies)} companies and "
-        f"{sum(map(len, canonical_jobs_by_slug.values()))} active canonical jobs."
+        f"{sum(map(len, jobs_by_slug.values()))} active inventory jobs."
     )
     print(f"Ranked candidate pool: {candidate_pool_size} companies.")
     print(f"Wrote {len(targets)} weekly targets: {json_path}")
@@ -225,27 +227,45 @@ def main() -> None:
         print(f"Cached hiring verifications reused: {cached_verifications}")
 
 
-def load_yc_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
+def load_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
     engine = engine_from_url(database_url)
     jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
-    for job in fetch_yc_job_rows(engine):
-        jobs_by_slug.setdefault(job["company_slug"], []).append(job)
-    return jobs_by_slug
-
-
-def load_canonical_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
-    engine = engine_from_url(database_url)
-    jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
-    for job in JobRepository(engine).active_job_rows():
+    for job in JobRepository(engine).list_jobs():
         jobs_by_slug.setdefault(str(job["company_slug"]), []).append(job)
+    engine.dispose()
     return jobs_by_slug
+
+
+def build_ranked_candidate_targets(
+    companies: list[Company],
+    profile: dict[str, Any],
+    jobs_by_slug: dict[str, list[dict[str, Any]]],
+    *,
+    max_team_size: int | None,
+) -> list[dict[str, Any]]:
+    """Score every company before opportunity ranking, including website-less identities."""
+    ranked = rank_companies(
+        companies,
+        profile,
+        max_team_size=max_team_size,
+        require_website=False,
+    )
+    targets = [
+        target_record(
+            score,
+            rank=index,
+            jobs=jobs_by_slug.get(score.company.slug, []),
+        )
+        for index, score in enumerate(ranked, start=1)
+    ]
+    targets.sort(key=lambda target: int(target["fit_score"]), reverse=True)
+    return targets
 
 
 def refresh_role_focus(
     targets: list[dict[str, Any]],
     companies_by_slug: dict[str, Company],
     jobs_by_slug: dict[str, list[dict[str, Any]]],
-    canonical_jobs_by_slug: dict[str, list[dict[str, Any]]],
 ) -> None:
     for target in targets:
         company = companies_by_slug.get(target["slug"])
@@ -254,8 +274,7 @@ def refresh_role_focus(
         target.update(
             role_focus_record(
                 company,
-                yc_jobs=jobs_by_slug.get(company.slug, []),
-                canonical_jobs=canonical_jobs_by_slug.get(company.slug, []),
+                jobs=jobs_by_slug.get(company.slug, []),
                 verified_roles=target.get("verified_roles") or [],
             )
         )

@@ -14,24 +14,6 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def process_outcome(return_code: int | None) -> dict[str, Any]:
-    """Preserve subprocess signals instead of flattening them to a generic failure."""
-    if return_code is None:
-        return {"raw_return_code": None, "shell_exit_code": None, "signal": None}
-    if return_code < 0:
-        signal_number = -return_code
-        try:
-            signal_name = __import__("signal").Signals(signal_number).name
-        except ValueError:
-            signal_name = f"SIG{signal_number}"
-        return {
-            "raw_return_code": return_code,
-            "shell_exit_code": 128 + signal_number,
-            "signal": {"number": signal_number, "name": signal_name},
-        }
-    return {"raw_return_code": return_code, "shell_exit_code": return_code, "signal": None}
-
-
 def read_status(path: Path | None) -> dict[str, Any] | None:
     """Read a prior atomic checkpoint; malformed artifacts are not fatal."""
     if path is None:

@@ -13,7 +13,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra ai
 
 COPY alembic.ini ./
 COPY migrations ./migrations
@@ -27,4 +27,4 @@ RUN mkdir -p /app/data/local \
 
 USER yc-radar
 
-CMD ["python", "-m", "yc_radar.cli", "--help"]
+CMD ["python", "scripts/sync_job_sources.py", "--help"]

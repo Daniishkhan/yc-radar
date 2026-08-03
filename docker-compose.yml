@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg17-trixie
+    image: postgres:17-trixie
     container_name: yc-radar-postgres
     restart: unless-stopped
     environment:
@@ -11,7 +11,6 @@ services:
       - "5433:5432"
     volumes:
       - yc_radar_postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U yc_radar -d yc_radar"]
       interval: 5s

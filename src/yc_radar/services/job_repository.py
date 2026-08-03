@@ -1,121 +1,146 @@
 from __future__ import annotations
 
-from datetime import datetime
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, and_, insert, select, update
+from sqlalchemy import Select, and_, case, insert, literal, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Engine
 
 from yc_radar.services.database import (
-    career_sources_table,
     companies_table,
-    job_posting_observations_table,
-    job_posting_versions_table,
-    job_postings_table,
-    source_sync_runs_table,
+    company_sources_table,
+    jobs_table,
+    sync_runs_table,
 )
 
 
 class JobRepository:
-    """SQLAlchemy persistence boundary for source-neutral jobs and their audit records."""
+    """Persistence boundary for company sources, their current jobs, and sync runs."""
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def register_career_source(
+    def register_source(
         self,
         *,
         company_id: int,
         provider: str,
         source_kind: str,
-        external_source_id: str,
-        source_url: str,
-        discovered_from_url: str | None,
+        external_id: str,
+        source_url: str | None,
+        sync_mode: str,
         now: datetime,
-        raw_json: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool, bool]:
-        """Register one provider board without coupling it to a company-directory source."""
+        """Register one provider identity without moving it between companies.
+
+        The booleans are ``allowed`` and ``created``. A provider identity already attached to
+        another company is returned unchanged with ``allowed=False`` so callers can fail closed.
+        """
+        normalized_provider = provider.strip().lower()
+        normalized_external_id = external_id.strip()
+        if not normalized_provider or not normalized_external_id:
+            raise ValueError("provider and external_id are required")
+        if sync_mode not in {"none", "complete_snapshot", "observation"}:
+            raise ValueError(f"unsupported sync mode: {sync_mode}")
+
         with self.engine.begin() as connection:
-            existing = self.get_career_source_by_external(connection, provider, external_source_id)
-            if existing and int(existing["company_id"]) != company_id:
+            existing = self.get_source_by_external(
+                connection,
+                provider=normalized_provider,
+                external_id=normalized_external_id,
+            )
+            if existing is not None and int(existing["company_id"]) != company_id:
                 return existing, False, False
-            if existing:
+            if existing is not None:
+                merged_metadata = dict(existing.get("metadata") or {})
+                merged_metadata.update(metadata or {})
                 connection.execute(
-                    update(career_sources_table)
-                    .where(career_sources_table.c.id == existing["id"])
+                    update(company_sources_table)
+                    .where(company_sources_table.c.id == existing["id"])
                     .values(
+                        source_kind=source_kind,
                         source_url=source_url,
-                        discovered_from_url=discovered_from_url,
-                        raw_json=raw_json or existing.get("raw_json") or {},
+                        sync_mode=sync_mode,
+                        metadata=merged_metadata,
                         updated_at=now,
                     )
                 )
-                return self.get_career_source(connection, int(existing["id"])), True, False
+                return self.get_source(connection, int(existing["id"])), True, False
+
             source_id = connection.execute(
-                insert(career_sources_table)
+                insert(company_sources_table)
                 .values(
                     company_id=company_id,
-                    provider=provider,
+                    provider=normalized_provider,
                     source_kind=source_kind,
-                    external_source_id=external_source_id,
+                    external_id=normalized_external_id,
                     source_url=source_url,
-                    discovered_from_url=discovered_from_url,
+                    sync_mode=sync_mode,
                     status="active",
-                    raw_json=raw_json or {},
+                    metadata=metadata or {},
                     created_at=now,
                     updated_at=now,
                 )
-                .returning(career_sources_table.c.id)
+                .returning(company_sources_table.c.id)
             ).scalar_one()
-            return self.get_career_source(connection, int(source_id)), True, True
+            return self.get_source(connection, int(source_id)), True, True
 
-    def get_career_source(self, connection: Connection, source_id: int) -> dict[str, Any]:
-        row = connection.execute(
-            select(career_sources_table).where(career_sources_table.c.id == source_id)
-        ).mappings().one()
+    def get_source(self, connection: Connection, source_id: int) -> dict[str, Any]:
+        row = (
+            connection.execute(
+                select(company_sources_table).where(company_sources_table.c.id == source_id)
+            )
+            .mappings()
+            .one()
+        )
         return dict(row)
 
-    def get_career_source_by_external(
+    def get_source_by_external(
         self,
         connection: Connection,
+        *,
         provider: str,
-        external_source_id: str,
+        external_id: str,
     ) -> dict[str, Any] | None:
-        row = connection.execute(
-            select(career_sources_table).where(
-                and_(
-                    career_sources_table.c.provider == provider,
-                    career_sources_table.c.external_source_id == external_source_id,
+        row = (
+            connection.execute(
+                select(company_sources_table).where(
+                    and_(
+                        company_sources_table.c.provider == provider,
+                        company_sources_table.c.external_id == external_id,
+                    )
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
-    def active_career_sources(
+    def active_sources(
         self,
         *,
         provider: str | None = None,
         company_id: int | None = None,
         source_ids: Iterable[int] | None = None,
-        min_source_id: int | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        statement: Select[Any] = select(career_sources_table).where(
-            career_sources_table.c.status == "active"
+        statement: Select[Any] = select(company_sources_table).where(
+            company_sources_table.c.status == "active",
+            company_sources_table.c.sync_mode == "complete_snapshot",
         )
         if provider:
-            statement = statement.where(career_sources_table.c.provider == provider)
+            statement = statement.where(company_sources_table.c.provider == provider)
         if company_id is not None:
-            statement = statement.where(career_sources_table.c.company_id == company_id)
+            statement = statement.where(company_sources_table.c.company_id == company_id)
         if source_ids is not None:
             selected_ids = tuple(source_ids)
             if not selected_ids:
                 return []
-            statement = statement.where(career_sources_table.c.id.in_(selected_ids))
-        if min_source_id is not None:
-            statement = statement.where(career_sources_table.c.id >= min_source_id)
-        statement = statement.order_by(career_sources_table.c.id)
+            statement = statement.where(company_sources_table.c.id.in_(selected_ids))
+        statement = statement.order_by(company_sources_table.c.id)
         if limit is not None:
             statement = statement.limit(limit)
         with self.engine.connect() as connection:
@@ -124,30 +149,34 @@ class JobRepository:
     def get_run(
         self,
         connection: Connection,
-        career_source_id: int,
+        company_source_id: int,
         run_key: str,
     ) -> dict[str, Any] | None:
-        row = connection.execute(
-            select(source_sync_runs_table).where(
-                and_(
-                    source_sync_runs_table.c.career_source_id == career_source_id,
-                    source_sync_runs_table.c.run_key == run_key,
+        row = (
+            connection.execute(
+                select(sync_runs_table).where(
+                    sync_runs_table.c.company_source_id == company_source_id,
+                    sync_runs_table.c.run_key == run_key,
                 )
             )
-        ).mappings().first()
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def create_run(self, connection: Connection, values: dict[str, Any]) -> int:
         return int(
             connection.execute(
-                insert(source_sync_runs_table).values(values).returning(source_sync_runs_table.c.id)
+                insert(sync_runs_table).values(values).returning(sync_runs_table.c.id)
             ).scalar_one()
         )
 
     def get_run_by_id(self, connection: Connection, run_id: int) -> dict[str, Any] | None:
-        row = connection.execute(
-            select(source_sync_runs_table).where(source_sync_runs_table.c.id == run_id)
-        ).mappings().first()
+        row = (
+            connection.execute(select(sync_runs_table).where(sync_runs_table.c.id == run_id))
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def finalize_run(
@@ -157,95 +186,147 @@ class JobRepository:
         values: dict[str, Any],
     ) -> None:
         connection.execute(
-            update(source_sync_runs_table)
-            .where(source_sync_runs_table.c.id == run_id)
-            .values(values)
+            update(sync_runs_table).where(sync_runs_table.c.id == run_id).values(values)
         )
 
-    def update_career_source_sync_state(
-        self,
-        connection: Connection,
-        source_id: int,
-        *,
-        status: str,
-        now: datetime,
-    ) -> None:
-        values: dict[str, Any] = {"last_sync_status": status, "updated_at": now}
-        if status == "completed":
-            values["last_synced_at"] = now
+    def touch_source(self, connection: Connection, source_id: int, *, now: datetime) -> None:
         connection.execute(
-            update(career_sources_table)
-            .where(career_sources_table.c.id == source_id)
-            .values(values)
+            update(company_sources_table)
+            .where(company_sources_table.c.id == source_id)
+            .values(updated_at=now)
         )
 
     def source_jobs_for_update(
         self,
         connection: Connection,
-        career_source_id: int,
+        company_source_id: int,
     ) -> dict[str, dict[str, Any]]:
         rows = connection.execute(
-            select(job_postings_table)
-            .where(job_postings_table.c.career_source_id == career_source_id)
+            select(jobs_table)
+            .where(jobs_table.c.company_source_id == company_source_id)
             .with_for_update()
         ).mappings()
         return {str(row["external_job_id"]): dict(row) for row in rows}
 
     def insert_job(self, connection: Connection, values: dict[str, Any]) -> int:
         return int(
-            connection.execute(insert(job_postings_table).values(values).returning(job_postings_table.c.id)).scalar_one()
-        )
-
-    def update_job(self, connection: Connection, job_id: int, values: dict[str, Any]) -> None:
-        connection.execute(update(job_postings_table).where(job_postings_table.c.id == job_id).values(values))
-
-    def insert_version(self, connection: Connection, values: dict[str, Any]) -> int:
-        return int(
             connection.execute(
-                insert(job_posting_versions_table)
-                .values(values)
-                .returning(job_posting_versions_table.c.id)
+                insert(jobs_table).values(values).returning(jobs_table.c.id)
             ).scalar_one()
         )
 
-    def insert_observation(self, connection: Connection, values: dict[str, Any]) -> None:
-        connection.execute(insert(job_posting_observations_table).values(values))
+    def update_job(self, connection: Connection, job_id: int, values: dict[str, Any]) -> None:
+        connection.execute(update(jobs_table).where(jobs_table.c.id == job_id).values(values))
 
-    def active_job_rows(
+    def list_jobs(
         self,
         *,
         include_closed: bool = False,
         changed_since: datetime | None = None,
         provider: str | None = None,
         company_slug: str | None = None,
+        source_kind: str | None = None,
+        origin_kind: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Return the sole, source-neutral inventory used by ranking and exports."""
+        latest_status = (
+            select(sync_runs_table.c.status)
+            .where(sync_runs_table.c.company_source_id == company_sources_table.c.id)
+            .order_by(sync_runs_table.c.started_at.desc(), sync_runs_table.c.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        latest_completed_at = (
+            select(sync_runs_table.c.completed_at)
+            .where(sync_runs_table.c.company_source_id == company_sources_table.c.id)
+            .order_by(sync_runs_table.c.started_at.desc(), sync_runs_table.c.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        origin_expression = case(
+            (company_sources_table.c.provider == "yc", "yc"),
+            (company_sources_table.c.source_kind == "ats_board", "ats"),
+            else_=company_sources_table.c.source_kind,
+        )
+        lifecycle_managed = company_sources_table.c.sync_mode == "complete_snapshot"
         statement = (
             select(
-                job_postings_table,
-                companies_table.c.slug.label("company_slug"),
+                (
+                    literal("source:")
+                    + company_sources_table.c.provider
+                    + literal(":")
+                    + company_sources_table.c.external_id
+                    + literal(":")
+                    + jobs_table.c.external_job_id
+                ).label("job_key"),
+                jobs_table.c.id.label("id"),
+                company_sources_table.c.source_kind.label("source_kind"),
+                origin_expression.label("origin_kind"),
+                jobs_table.c.id.label("source_record_id"),
+                companies_table.c.id.label("company_id"),
                 companies_table.c.name.label("company_name"),
-                career_sources_table.c.source_kind.label("career_source_kind"),
-                career_sources_table.c.source_url.label("career_source_url"),
-                job_posting_versions_table.c.description_text,
-                job_posting_versions_table.c.description_html,
+                companies_table.c.slug.label("company_slug"),
+                company_sources_table.c.provider.label("provider"),
+                jobs_table.c.external_job_id,
+                company_sources_table.c.id.label("company_source_id"),
+                company_sources_table.c.external_id.label("source_external_id"),
+                company_sources_table.c.source_url.label("source_url"),
+                (company_sources_table.c.status == "active").label("source_enabled"),
+                latest_status.label("source_sync_status"),
+                latest_completed_at.label("source_last_synced_at"),
+                jobs_table.c.title,
+                jobs_table.c.posting_url,
+                jobs_table.c.apply_url,
+                jobs_table.c.location,
+                jobs_table.c.department,
+                jobs_table.c.employment_type,
+                jobs_table.c.description_text,
+                jobs_table.c.structured_evidence,
+                jobs_table.c.content_hash,
+                literal(None).label("visa"),
+                literal(None).label("salary_range"),
+                literal(None).label("equity_range"),
+                literal([], type_=JSONB).label("skills"),
+                jobs_table.c.status,
+                (jobs_table.c.status == "active").label("is_active"),
+                lifecycle_managed.label("lifecycle_managed"),
+                case(
+                    (lifecycle_managed, "complete_snapshot"),
+                    else_="observation",
+                ).label("status_confidence"),
+                jobs_table.c.consecutive_complete_misses,
+                jobs_table.c.source_published_at,
+                jobs_table.c.source_updated_at,
+                jobs_table.c.last_seen_at.label("observed_at"),
+                jobs_table.c.first_seen_at,
+                jobs_table.c.last_seen_at,
+                jobs_table.c.last_changed_at,
+                jobs_table.c.closed_at,
             )
-            .join(companies_table, companies_table.c.id == job_postings_table.c.company_id)
-            .join(career_sources_table, career_sources_table.c.id == job_postings_table.c.career_source_id)
-            .outerjoin(
-                job_posting_versions_table,
-                job_posting_versions_table.c.id == job_postings_table.c.current_version_id,
+            .join(
+                company_sources_table,
+                company_sources_table.c.id == jobs_table.c.company_source_id,
             )
-            .order_by(job_postings_table.c.last_changed_at.desc(), job_postings_table.c.id)
+            .join(
+                companies_table,
+                companies_table.c.id == company_sources_table.c.company_id,
+            )
+            .where(company_sources_table.c.status == "active")
+            .order_by(jobs_table.c.last_changed_at.desc(), jobs_table.c.id)
         )
         if not include_closed:
-            statement = statement.where(job_postings_table.c.status == "active")
+            statement = statement.where(jobs_table.c.status == "active")
         if changed_since is not None:
-            statement = statement.where(job_postings_table.c.last_changed_at >= changed_since)
+            statement = statement.where(jobs_table.c.last_changed_at >= changed_since)
         if provider:
-            statement = statement.where(job_postings_table.c.provider == provider)
+            statement = statement.where(company_sources_table.c.provider == provider)
         if company_slug:
-            statement = statement.where(companies_table.c.slug == company_slug.lower())
+            statement = statement.where(companies_table.c.slug == company_slug.strip().lower())
+        if source_kind:
+            statement = statement.where(company_sources_table.c.source_kind == source_kind)
+        if origin_kind:
+            statement = statement.where(origin_expression == origin_kind)
         if limit is not None:
             statement = statement.limit(limit)
         with self.engine.connect() as connection:

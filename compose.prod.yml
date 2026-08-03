@@ -2,7 +2,7 @@ name: yc-radar
 
 services:
   postgres:
-    image: pgvector/pgvector:0.8.2-pg17-trixie
+    image: postgres:17-trixie
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-yc_radar}
@@ -22,20 +22,14 @@ services:
       context: .
     init: true
     environment:
-      APP_ENV: production
       DATA_DIR: /app/data
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-yc_radar}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-yc_radar}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini-2026-03-17}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
-      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
-      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-global}
-      YC_RADAR_VERTEX_MODEL: ${YC_RADAR_VERTEX_MODEL:-gemini-3.5-flash-lite}
-      GOOGLE_APPLICATION_CREDENTIALS: /etc/radar/gcp-wif.json
     volumes:
       - ./data/snapshots:/app/data/snapshots
       - ./data/local:/app/data/local
-      - /srv/radar/config/gcp:/etc/radar:ro
     depends_on:
       postgres:
         condition: service_healthy

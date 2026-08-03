@@ -39,7 +39,7 @@ class SourceSnapshot(BaseModel):
 
 
 class SyncResult(BaseModel):
-    career_source_id: int
+    company_source_id: int
     run_id: int
     run_key: str
     status: str

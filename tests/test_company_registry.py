@@ -5,18 +5,14 @@ from sqlalchemy import func, select
 
 from yc_radar.services.company_registry import CompanyIdentityConflict, CompanyRegistry
 from yc_radar.services.database import (
-    career_sources_table,
     companies_table,
     company_sources_table,
     engine_from_url,
-    fetch_companies_for_discovery,
     upsert_yc_companies,
-    yc_company_profiles_table,
 )
-from yc_radar.services.job_source_registry import JobSourceRegistry
 
 
-def test_company_can_exist_without_yc_or_job_source(postgres_database_url: str) -> None:
+def test_company_can_exist_without_a_provider_source(postgres_database_url: str) -> None:
     engine = engine_from_url(postgres_database_url)
     result = CompanyRegistry(engine).register_company(
         name="Independent Employer",
@@ -25,43 +21,52 @@ def test_company_can_exist_without_yc_or_job_source(postgres_database_url: str) 
 
     with engine.connect() as connection:
         company = connection.execute(select(companies_table)).mappings().one()
-        assert connection.scalar(select(func.count()).select_from(company_sources_table)) == 0
-        assert connection.scalar(select(func.count()).select_from(career_sources_table)) == 0
-        assert connection.scalar(select(func.count()).select_from(yc_company_profiles_table)) == 0
+        source_count = connection.scalar(select(func.count()).select_from(company_sources_table))
+
     assert result.company_created is True
     assert company["id"] == result.company_id
     assert company["primary_domain"] == "independent.example"
-    discovery_companies = fetch_companies_for_discovery(engine)
-    assert [row["id"] for row in discovery_companies] == [result.company_id]
-    assert discovery_companies[0]["yc_company_id"] is None
+    assert company["identity_state"] == "verified"
+    assert source_count == 0
 
 
-def test_company_and_job_source_registries_are_independent(
+def test_directory_and_job_sources_share_one_company_source_registry(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    company_registry = CompanyRegistry(engine)
-    company = company_registry.register_company(
+    registry = CompanyRegistry(engine)
+    company = registry.register_company(
         name="Registry Example",
         website="https://registry.example",
     )
-    company_registry.register_source_identity(
+    registry.register_source_identity(
         company_id=company.company_id,
         provider="curated_list",
-        external_company_id="registry-example",
+        external_id="registry-example",
+        source_kind="directory",
         source_url="https://directory.example/registry-example",
+        metadata={"list": "global-remote"},
     )
-    source = JobSourceRegistry(engine).register_url(
+    registry.register_source_identity(
         company_id=company.company_id,
+        provider="ashby",
+        external_id="registry-example",
+        source_kind="ats",
         source_url="https://jobs.ashbyhq.com/registry-example",
+        sync_mode="complete_snapshot",
     )
 
     with engine.connect() as connection:
-        company_sources = list(connection.execute(select(company_sources_table)).mappings())
-        career_sources = list(connection.execute(select(career_sources_table)).mappings())
-    assert [row["provider"] for row in company_sources] == ["curated_list"]
-    assert [row["provider"] for row in career_sources] == ["ashby"]
-    assert source.external_source_id == "registry-example"
+        sources = list(
+            connection.execute(
+                select(company_sources_table).order_by(company_sources_table.c.provider)
+            ).mappings()
+        )
+
+    assert [row["provider"] for row in sources] == ["ashby", "curated_list"]
+    assert [row["source_kind"] for row in sources] == ["ats", "directory"]
+    assert [row["sync_mode"] for row in sources] == ["complete_snapshot", "none"]
+    assert {row["company_id"] for row in sources} == {company.company_id}
 
 
 def test_company_registration_is_idempotent_on_exact_verified_identity(
@@ -123,7 +128,37 @@ def test_company_registration_allows_shared_root_for_its_exact_brand(
     assert result.company_created is True
 
 
-def test_yc_ingestion_keeps_profile_data_out_of_neutral_company(
+def test_provisional_registration_never_merges_on_name_alone(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    registry = CompanyRegistry(engine)
+
+    first = registry.register_provisional_company(
+        name="Unresolved Employer",
+        requested_slug="unresolved-employer",
+    )
+    second = registry.register_provisional_company(
+        name="Unresolved Employer",
+        requested_slug="unresolved-employer",
+    )
+
+    with engine.connect() as connection:
+        companies = list(
+            connection.execute(select(companies_table).order_by(companies_table.c.id)).mappings()
+        )
+
+    assert first.company_id != second.company_id
+    assert first.matched_by == "provisional_company"
+    assert [row["slug"] for row in companies] == [
+        "unresolved-employer",
+        "unresolved-employer-2",
+    ]
+    assert {row["identity_state"] for row in companies} == {"provisional"}
+    assert all(row["website"] is None and row["primary_domain"] is None for row in companies)
+
+
+def test_yc_profile_data_lives_on_the_company_source(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
@@ -146,13 +181,18 @@ def test_yc_ingestion_keeps_profile_data_out_of_neutral_company(
 
     with engine.connect() as connection:
         company = connection.execute(select(companies_table)).mappings().one()
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
         source = connection.execute(select(company_sources_table)).mappings().one()
+
     assert company["normalized_name"] == "yc example"
     assert company["primary_domain"] == "example.com"
-    assert profile["company_id"] == company["id"]
-    assert profile["yc_company_id"] == 42
+    assert source["company_id"] == company["id"]
     assert source["provider"] == "yc"
+    assert source["external_id"] == "42"
+    assert source["source_kind"] == "directory"
+    assert source["sync_mode"] == "complete_snapshot"
+    assert source["metadata"]["batch"] == "S24"
+    assert source["metadata"]["is_hiring"] is True
+    assert source["metadata"]["regions"] == ["Remote"]
 
 
 def test_yc_external_id_cannot_overwrite_standalone_company(
@@ -188,10 +228,13 @@ def test_yc_external_id_cannot_overwrite_standalone_company(
             .mappings()
             .one()
         )
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
+        yc_source = connection.execute(
+            select(company_sources_table).where(company_sources_table.c.provider == "yc")
+        ).mappings().one()
+
     assert standalone_row["name"] == "Independent Employer"
-    assert profile["yc_company_id"] == 1
-    assert profile["company_id"] != standalone.company_id
+    assert yc_source["external_id"] == "1"
+    assert yc_source["company_id"] != standalone.company_id
 
 
 def test_yc_ingestion_reuses_exact_standalone_identity(
@@ -218,8 +261,11 @@ def test_yc_ingestion_reuses_exact_standalone_identity(
     )
 
     with engine.connect() as connection:
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
-    assert profile["company_id"] == existing.company_id
+        source = connection.execute(
+            select(company_sources_table).where(company_sources_table.c.provider == "yc")
+        ).mappings().one()
+
+    assert source["company_id"] == existing.company_id
 
 
 def test_company_source_identity_cannot_move_between_companies(
@@ -233,7 +279,7 @@ def test_company_source_identity_cannot_move_between_companies(
     registry.register_source_identity(
         company_id=first.company_id,
         provider="directory",
-        external_company_id="shared-id",
+        external_id="shared-id",
         now=now,
     )
 
@@ -241,9 +287,37 @@ def test_company_source_identity_cannot_move_between_companies(
         registry.register_source_identity(
             company_id=second.company_id,
             provider="directory",
-            external_company_id="shared-id",
+            external_id="shared-id",
             now=now,
         )
+
+
+def test_source_identity_refreshes_metadata_without_moving_ownership(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    registry = CompanyRegistry(engine)
+    company = registry.register_company(name="Refresh", website="https://refresh.example")
+    created = registry.register_source_identity(
+        company_id=company.company_id,
+        provider="directory",
+        external_id="refresh",
+        metadata={"version": 1},
+    )
+    refreshed = registry.register_source_identity(
+        company_id=company.company_id,
+        provider="directory",
+        external_id="refresh",
+        metadata={"version": 2},
+    )
+
+    with engine.connect() as connection:
+        source = connection.execute(select(company_sources_table)).mappings().one()
+
+    assert created is True
+    assert refreshed is False
+    assert source["company_id"] == company.company_id
+    assert source["metadata"] == {"version": 2}
 
 
 def test_registration_requires_valid_website(postgres_database_url: str) -> None:
@@ -256,3 +330,10 @@ def test_registration_requires_valid_website(postgres_database_url: str) -> None
             name="Multiple",
             website="https://one.example, https://two.example",
         )
+
+
+def test_provisional_registration_requires_a_name(postgres_database_url: str) -> None:
+    registry = CompanyRegistry(engine_from_url(postgres_database_url))
+
+    with pytest.raises(ValueError, match="company name"):
+        registry.register_provisional_company(name="   ")

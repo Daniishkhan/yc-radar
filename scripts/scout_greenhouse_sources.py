@@ -22,7 +22,7 @@ from sqlalchemy import select
 
 from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.commoncrawl_greenhouse import CRAWL_RE, deduplicate_candidate_rows
-from yc_radar.services.database import career_sources_table, companies_table, engine_from_url
+from yc_radar.services.database import company_sources_table, companies_table, engine_from_url
 from yc_radar.services.greenhouse_scout import (
     GreenhouseBoardEvidence,
     GreenhouseBoardScout,
@@ -57,7 +57,7 @@ OUTPUT_FIELDS = [
     "resolution_status",
     "company_id",
     "website_candidate",
-    "career_source_id",
+    "company_source_id",
     "registration_status",
     "cache_source",
     "attempt_count",
@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Sequentially verify Greenhouse board tokens from an Athena CSV and optionally "
-            "register only unambiguous source/company identities."
+            "register sources without silently merging ambiguous company identities."
         )
     )
     parser.add_argument("--input", type=Path, required=True, help="Athena candidate CSV.")
@@ -114,8 +114,8 @@ def parse_args() -> argparse.Namespace:
         "--apply",
         action="store_true",
         help=(
-            "Register exact existing-company matches and new companies backed by a verified "
-            "custom job domain. Ambiguous evidence is always left unresolved."
+            "Register exact matches, verified-domain companies, and isolated provisional "
+            "companies for otherwise unresolved verified boards."
         ),
     )
     return parser.parse_args()
@@ -286,14 +286,9 @@ def can_resume_row(
         return False
     if not apply or verification != "verified":
         return True
-    resolution = row.get("resolution_status")
     registration = row.get("registration_status")
-    if resolution not in {"existing_exact_name", "new_company_domain_candidate"}:
-        return True
-    # The checkpoint manifest binds this row to an immutable input/scope. Do not
-    # re-probe a failed homepage on every service restart inside that same run. A
-    # deliberately short-lived negative disk cache covers rows lost since the last
-    # checkpoint, while a later run can try the website again after the TTL expires.
+    # The checkpoint manifest binds the row to this input and scope. Resume only a
+    # completed registration outcome; apply a prior dry-run row on this invocation.
     return registration not in {"not_requested", ""}
 
 
@@ -335,12 +330,12 @@ def load_registry_state(engine) -> tuple[list[dict[str, Any]], dict[str, int]]:
     with engine.connect() as connection:
         companies = [dict(row) for row in connection.execute(select(companies_table)).mappings()]
         sources = {
-            str(row.external_source_id): int(row.company_id)
+            str(row.external_id): int(row.company_id)
             for row in connection.execute(
                 select(
-                    career_sources_table.c.external_source_id,
-                    career_sources_table.c.company_id,
-                ).where(career_sources_table.c.provider == "greenhouse")
+                    company_sources_table.c.external_id,
+                    company_sources_table.c.company_id,
+                ).where(company_sources_table.c.provider == "greenhouse")
             )
         }
     return companies, sources
@@ -364,18 +359,41 @@ def apply_registration(
     try:
         if resolution.status == "new_company_domain_candidate" and website:
             verified_website = homepage_verifier(website)
-            if verified_website is None:
-                row["registration_status"] = "homepage_unverified"
-                return
-            company = CompanyRegistry(engine).register_company(
-                name=evidence.company_name or "",
-                website=verified_website,
+            company = (
+                CompanyRegistry(engine).register_company(
+                    name=evidence.company_name or "",
+                    website=verified_website,
+                )
+                if verified_website is not None
+                else CompanyRegistry(engine).register_provisional_company(
+                    name=evidence.company_name or "",
+                    requested_slug=evidence.board_token,
+                )
             )
             company_id = company.company_id
             website = verified_website
-            registration_status = "company_created" if company.company_created else "company_reused"
+            registration_status = (
+                "company_created"
+                if verified_website is not None and company.company_created
+                else "company_reused"
+                if verified_website is not None
+                else "company_provisional"
+            )
         elif resolution.status == "existing_exact_name":
             registration_status = "company_reused"
+        elif evidence.company_name and resolution.status in {
+            "unresolved_no_domain",
+            "ambiguous_name",
+            "ambiguous_domain",
+            "identity_conflict",
+        }:
+            company = CompanyRegistry(engine).register_provisional_company(
+                name=evidence.company_name,
+                requested_slug=evidence.board_token,
+            )
+            company_id = company.company_id
+            website = None
+            registration_status = "company_provisional"
         else:
             return
 
@@ -395,7 +413,7 @@ def apply_registration(
         )
         row["company_id"] = company_id
         row["website_candidate"] = website
-        row["career_source_id"] = result.career_source_id
+        row["company_source_id"] = result.company_source_id
         row["registration_status"] = (
             f"{registration_status}_source_created" if result.created else "source_existing"
         )
@@ -434,7 +452,7 @@ def result_row(candidate: dict[str, str], evidence, resolution) -> dict[str, Any
         "resolution_status": resolution.status,
         "company_id": resolution.company_id or "",
         "website_candidate": resolution.website_candidate or "",
-        "career_source_id": "",
+        "company_source_id": "",
         "registration_status": "not_requested",
         "cache_source": evidence.cache_source,
         "attempt_count": evidence.attempt_count,

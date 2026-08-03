@@ -102,8 +102,11 @@ def test_output_json_and_csv_include_yc_and_verified_hiring_fields(tmp_path) -> 
     assert "Senior Backend Engineer" in csv_text
     assert "target_role_lane" in csv_text
     assert "role_match_status" in csv_text
-    assert "canonical_raw_active_job_count" in csv_text
-    assert "canonical_duplicate_posting_count" in csv_text
+    assert "raw_active_job_count" in csv_text
+    assert "duplicate_posting_count" in csv_text
+    assert "managed_raw_active_job_count" in csv_text
+    assert "managed_best_remote_eligibility" in csv_text
+    assert "canonical_raw_active_job_count" not in csv_text
     assert "pakistan_explicit_matching_job_count" in csv_text
     assert "global_explicit_matching_job_count" in csv_text
     assert "regional_unconfirmed_matching_job_count" in csv_text

@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: pgvector/pgvector:0.8.2-pg17-trixie
+        image: postgres:17-trixie
         env:
           POSTGRES_DB: yc_radar
           POSTGRES_USER: yc_radar

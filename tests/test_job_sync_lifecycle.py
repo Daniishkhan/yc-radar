@@ -1,29 +1,24 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import importlib.util
-import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, insert, select, update
 
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
-from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.database import (
+    companies_table,
+    company_sources_table,
     engine_from_url,
-    career_sources_table,
-    job_posting_observations_table,
-    job_posting_versions_table,
-    job_postings_table,
-    source_sync_runs_table,
-    upsert_yc_companies,
+    jobs_table,
+    sync_runs_table,
 )
 from yc_radar.services.job_repository import JobRepository
-from yc_radar.services.job_source_registry import (
-    JobSourceProviderRegistry,
-    JobSourceRegistry,
-)
+from yc_radar.services.job_source_registry import JobSourceProviderRegistry
 from yc_radar.services.job_sync_service import JobSyncService, RunKeyReuseError
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "sync_job_sources.py"
@@ -31,27 +26,77 @@ SPEC = importlib.util.spec_from_file_location("sync_job_sources", SCRIPT_PATH)
 assert SPEC and SPEC.loader
 sync_job_sources = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync_job_sources)
-sync_sources = sync_job_sources.sync_sources
+
+
+def add_company(engine, *, name: str, slug: str, now: datetime) -> int:
+    with engine.begin() as connection:
+        return int(
+            connection.execute(
+                insert(companies_table)
+                .values(
+                    name=name,
+                    normalized_name=name.lower(),
+                    slug=slug,
+                    website=f"https://{slug}.example",
+                    primary_domain=f"{slug}.example",
+                    identity_state="verified",
+                    metadata={},
+                    created_at=now,
+                    updated_at=now,
+                )
+                .returning(companies_table.c.id)
+            ).scalar_one()
+        )
+
+
+def add_source(
+    repository: JobRepository,
+    *,
+    company_id: int,
+    provider: str = "greenhouse",
+    external_id: str = "acme",
+    sync_mode: str = "complete_snapshot",
+    now: datetime,
+) -> dict:
+    source, allowed, created = repository.register_source(
+        company_id=company_id,
+        provider=provider,
+        source_kind="ats_board",
+        external_id=external_id,
+        source_url=(
+            f"https://job-boards.greenhouse.io/{external_id}"
+            if provider == "greenhouse"
+            else f"https://jobs.ashbyhq.com/{external_id}"
+        ),
+        sync_mode=sync_mode,
+        now=now,
+    )
+    assert allowed is True
+    assert created is True
+    return source
 
 
 def normalized_job(job_id: str, *, description: str = "Build API systems") -> NormalizedJob:
     return NormalizedJob(
         external_job_id=job_id,
         title="Senior Backend Engineer",
-        posting_url=f"https://boards.greenhouse.io/acme/jobs/{job_id}",
+        posting_url=f"https://job-boards.greenhouse.io/acme/jobs/{job_id}",
+        apply_url=f"https://job-boards.greenhouse.io/acme/jobs/{job_id}#apply",
         location="Remote",
         department="Engineering",
+        employment_type="Full-time",
         description_html=f"<p>{description}</p>",
         description_text=description,
         content_hash=f"hash:{job_id}:{description}",
+        structured_evidence={"locations": ["Remote"]},
         raw_payload={"id": job_id, "content": description},
     )
 
 
-def snapshot(*jobs: NormalizedJob) -> SourceSnapshot:
+def snapshot(*jobs: NormalizedJob, external_id: str = "acme") -> SourceSnapshot:
     return SourceSnapshot(
         provider="greenhouse",
-        external_source_id="acme",
+        external_source_id=external_id,
         adapter_version="test",
         is_complete=True,
         jobs=list(jobs),
@@ -60,295 +105,54 @@ def snapshot(*jobs: NormalizedJob) -> SourceSnapshot:
     )
 
 
-def test_complete_snapshot_lifecycle_is_safe_and_idempotent(postgres_database_url: str) -> None:
+def test_complete_snapshots_own_one_current_job_lifecycle(
+    postgres_database_url: str,
+) -> None:
     engine = engine_from_url(postgres_database_url)
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": 1,
-                "name": "Acme",
-                "slug": "acme",
-                "website": "https://acme.example",
-                "regions": [],
-                "industries": [],
-                "tags": [],
-            }
-        ],
-    )
     now = datetime(2026, 5, 1, tzinfo=UTC)
+    company_id = add_company(engine, name="Acme", slug="acme", now=now)
     repository = JobRepository(engine)
-    source, allowed, created = repository.register_career_source(
-        company_id=1,
-        provider="greenhouse",
-        source_kind="ats_board",
-        external_source_id="acme",
-        source_url="https://boards.greenhouse.io/acme",
-        discovered_from_url="https://boards.greenhouse.io/acme",
-        now=now,
-    )
-    assert allowed is True
-    assert created is True
+    source = add_source(repository, company_id=company_id, now=now)
     service = JobSyncService(engine, clock=lambda: now)
     job_one = normalized_job("1")
     job_two = normalized_job("2")
 
     first = service.sync_snapshot(
-        career_source_id=source["id"], run_key="one", snapshot=snapshot(job_one, job_two)
+        company_source_id=source["id"],
+        run_key="one",
+        snapshot=snapshot(job_one, job_two),
     )
     assert (first.jobs_added, first.jobs_updated, first.jobs_unchanged) == (2, 0, 0)
 
     now += timedelta(minutes=1)
     second = service.sync_snapshot(
-        career_source_id=source["id"], run_key="two", snapshot=snapshot(job_one, job_two)
+        company_source_id=source["id"],
+        run_key="two",
+        snapshot=snapshot(job_one, job_two),
     )
     assert (second.jobs_added, second.jobs_updated, second.jobs_unchanged) == (0, 0, 2)
 
     now += timedelta(minutes=1)
     changed_one = normalized_job("1", description="Build distributed API systems")
-    third = service.sync_snapshot(
-        career_source_id=source["id"], run_key="three", snapshot=snapshot(changed_one, job_two)
+    changed = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="changed",
+        snapshot=snapshot(changed_one, job_two),
     )
-    assert (third.jobs_updated, third.jobs_unchanged) == (1, 1)
+    assert (changed.jobs_updated, changed.jobs_unchanged) == (1, 1)
 
     now += timedelta(minutes=1)
-    fourth = service.sync_snapshot(
-        career_source_id=source["id"], run_key="four", snapshot=snapshot(changed_one)
+    first_miss = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="first-miss",
+        snapshot=snapshot(changed_one),
     )
-    assert fourth.jobs_missed == 1
-
-    with engine.connect() as connection:
-        second_job = connection.execute(
-            select(job_postings_table).where(job_postings_table.c.external_job_id == "2")
-        ).mappings().one()
-    assert second_job["status"] == "active"
-    assert second_job["consecutive_complete_misses"] == 1
-    with engine.connect() as connection:
-        last_successful_sync = connection.scalar(
-            select(career_sources_table.c.last_synced_at).where(
-                career_sources_table.c.id == source["id"]
-            )
-        )
-    assert last_successful_sync == now
+    assert (first_miss.jobs_missed, first_miss.jobs_closed) == (1, 0)
 
     now += timedelta(minutes=1)
     failed = service.sync_snapshot(
-        career_source_id=source["id"],
+        company_source_id=source["id"],
         run_key="failed",
-        snapshot=SourceSnapshot(
-            provider="greenhouse",
-            external_source_id="acme",
-            adapter_version="test",
-            is_complete=False,
-            http_status=500,
-            errors=[{"kind": "http_status", "message": "500"}],
-        ),
-    )
-    assert failed.status == "failed"
-    with engine.connect() as connection:
-        after_failed = connection.execute(
-            select(job_postings_table).where(job_postings_table.c.id == second_job["id"])
-        ).mappings().one()
-    assert after_failed["status"] == "active"
-    assert after_failed["consecutive_complete_misses"] == 1
-    with engine.connect() as connection:
-        assert connection.scalar(
-            select(career_sources_table.c.last_synced_at).where(
-                career_sources_table.c.id == source["id"]
-            )
-        ) == last_successful_sync
-
-    partial = service.sync_snapshot(
-        career_source_id=source["id"],
-        run_key="partial",
-        snapshot=SourceSnapshot(
-            provider="greenhouse",
-            external_source_id="acme",
-            adapter_version="test",
-            is_complete=True,
-            http_status=200,
-            errors=[{"kind": "invalid_job", "message": "missing title"}],
-        ),
-    )
-    assert partial.status == "partial"
-    with engine.connect() as connection:
-        after_partial = connection.execute(
-            select(job_postings_table).where(job_postings_table.c.id == second_job["id"])
-        ).mappings().one()
-    assert after_partial["status"] == "active"
-    assert after_partial["consecutive_complete_misses"] == 1
-    with engine.connect() as connection:
-        assert connection.scalar(
-            select(career_sources_table.c.last_synced_at).where(
-                career_sources_table.c.id == source["id"]
-            )
-        ) == last_successful_sync
-
-    now += timedelta(minutes=1)
-    sixth = service.sync_snapshot(
-        career_source_id=source["id"], run_key="six", snapshot=snapshot(changed_one)
-    )
-    assert (sixth.jobs_missed, sixth.jobs_closed) == (1, 1)
-    with engine.connect() as connection:
-        closed_job = connection.execute(
-            select(job_postings_table).where(job_postings_table.c.id == second_job["id"])
-        ).mappings().one()
-    assert closed_job["status"] == "closed"
-    assert closed_job["consecutive_complete_misses"] == 2
-    assert closed_job["closed_at"] == now
-
-    now += timedelta(minutes=1)
-    seventh = service.sync_snapshot(
-        career_source_id=source["id"], run_key="seven", snapshot=snapshot(changed_one, job_two)
-    )
-    assert seventh.jobs_reactivated == 1
-    with engine.connect() as connection:
-        reactivated = connection.execute(
-            select(job_postings_table).where(job_postings_table.c.id == second_job["id"])
-        ).mappings().one()
-        version_count = connection.scalar(select(func.count()).select_from(job_posting_versions_table))
-        observation_count = connection.scalar(
-            select(func.count()).select_from(job_posting_observations_table)
-        )
-    assert reactivated["id"] == second_job["id"]
-    assert reactivated["status"] == "active"
-    assert reactivated["closed_at"] is None
-    assert reactivated["consecutive_complete_misses"] == 0
-    assert version_count == 3
-    assert observation_count == 12
-
-    replay = service.sync_snapshot(
-        career_source_id=source["id"], run_key="seven", snapshot=snapshot(changed_one, job_two)
-    )
-    assert replay.idempotent_replay is True
-    with engine.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(source_sync_runs_table)) == 8
-        assert connection.scalar(select(func.count()).select_from(job_posting_versions_table)) == 3
-        assert connection.scalar(select(func.count()).select_from(job_posting_observations_table)) == 12
-
-
-def test_running_run_is_committed_before_snapshot_application(postgres_database_url: str) -> None:
-    engine = engine_from_url(postgres_database_url)
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": 1,
-                "name": "Acme",
-                "slug": "acme",
-                "website": "https://acme.example",
-                "regions": [],
-                "industries": [],
-                "tags": [],
-            }
-        ],
-    )
-    now = datetime(2026, 5, 1, tzinfo=UTC)
-    source, _, _ = JobRepository(engine).register_career_source(
-        company_id=1,
-        provider="greenhouse",
-        source_kind="ats_board",
-        external_source_id="acme",
-        source_url="https://boards.greenhouse.io/acme",
-        discovered_from_url="https://boards.greenhouse.io/acme",
-        now=now,
-    )
-    service = JobSyncService(engine, clock=lambda: now)
-
-    started = service.start_run(
-        career_source_id=source["id"],
-        run_key="durable-before-fetch",
-        provider="greenhouse",
-        adapter_version="test",
-    )
-
-    with engine.connect() as connection:
-        run = connection.execute(
-            select(source_sync_runs_table).where(source_sync_runs_table.c.id == started.run_id)
-        ).mappings().one()
-    assert run["status"] == "running"
-    assert run["completed_at"] is None
-
-    result = service.apply_snapshot(started=started, snapshot=snapshot(normalized_job("1")))
-
-    assert result.status == "completed"
-    with engine.connect() as connection:
-        assert connection.scalar(
-            select(source_sync_runs_table.c.status).where(source_sync_runs_table.c.id == started.run_id)
-        ) == "completed"
-
-
-def test_resumed_batch_marks_an_orphaned_running_attempt_failed(
-    postgres_database_url: str,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    company = CompanyRegistry(engine).register_company(
-        name="Interrupted Company", website="https://interrupted.example"
-    )
-    source = JobSourceRegistry(engine).register_url(
-        company_id=company.company_id,
-        source_url="https://job-boards.greenhouse.io/interrupted-company",
-    )
-    service = JobSyncService(engine)
-    service.start_run(
-        career_source_id=source.career_source_id,
-        run_key="interrupted-batch:attempt-1",
-        provider="greenhouse",
-        adapter_version="test",
-    )
-
-    result = service.interrupt_running_run(
-        career_source_id=source.career_source_id,
-        run_key="interrupted-batch:attempt-1",
-    )
-
-    assert result is not None
-    assert result.status == "failed"
-    with engine.connect() as connection:
-        row = connection.execute(
-            select(source_sync_runs_table).where(
-                source_sync_runs_table.c.run_key == "interrupted-batch:attempt-1"
-            )
-        ).mappings().one()
-    assert row["errors"] == [
-        {
-            "kind": "interrupted",
-            "message": "worker restarted before the source attempt completed",
-        }
-    ]
-
-
-def test_failed_run_key_requires_a_new_attempt_key(postgres_database_url: str, capsys) -> None:
-    engine = engine_from_url(postgres_database_url)
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": 1,
-                "name": "Acme",
-                "slug": "acme",
-                "website": "https://acme.example",
-                "regions": [],
-                "industries": [],
-                "tags": [],
-            }
-        ],
-    )
-    now = datetime(2026, 5, 1, tzinfo=UTC)
-    source, _, _ = JobRepository(engine).register_career_source(
-        company_id=1,
-        provider="greenhouse",
-        source_kind="ats_board",
-        external_source_id="acme",
-        source_url="https://boards.greenhouse.io/acme",
-        discovered_from_url="https://boards.greenhouse.io/acme",
-        now=now,
-    )
-    service = JobSyncService(engine, clock=lambda: now)
-    failed_run_key = f"retry-key:{source['id']}"
-    failed = service.sync_snapshot(
-        career_source_id=source["id"],
-        run_key=failed_run_key,
         snapshot=SourceSnapshot(
             provider="greenhouse",
             external_source_id="acme",
@@ -358,131 +162,335 @@ def test_failed_run_key_requires_a_new_attempt_key(postgres_database_url: str, c
             errors=[{"kind": "http_status", "message": "503"}],
         ),
     )
-
     assert failed.status == "failed"
-    with pytest.raises(RunKeyReuseError, match="Use a new run key"):
-        service.sync_snapshot(
-            career_source_id=source["id"],
-            run_key=failed_run_key,
-            snapshot=snapshot(normalized_job("1")),
-        )
+
     with engine.connect() as connection:
-        assert connection.scalar(select(func.count()).select_from(job_postings_table)) == 0
-
-    class NeverFetchAdapter:
-        provider = "greenhouse"
-        adapter_version = "test"
-        calls = 0
-
-        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-            del external_source_id
-            self.calls += 1
-            raise AssertionError("failed run key should be preflighted before fetching")
-
-    adapter = NeverFetchAdapter()
-    results = asyncio.run(
-        sync_sources(
-            engine,
-            argparse.Namespace(provider="greenhouse", company_id=None, limit=None, run_key="retry-key"),
-            adapter=adapter,
+        still_active = (
+            connection.execute(select(jobs_table).where(jobs_table.c.external_job_id == "2"))
+            .mappings()
+            .one()
         )
+    assert still_active["status"] == "active"
+    assert still_active["consecutive_complete_misses"] == 1
+
+    now += timedelta(minutes=1)
+    second_miss = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="second-miss",
+        snapshot=snapshot(changed_one),
     )
+    assert (second_miss.jobs_missed, second_miss.jobs_closed) == (1, 1)
 
-    assert adapter.calls == 0
-    assert results[0].status == "failed"
-    assert "skipping fetch. Use a new --run-key" in capsys.readouterr().out
-
-
-def test_sync_cli_paces_source_fetches_sequentially(postgres_database_url: str) -> None:
-    engine = engine_from_url(postgres_database_url)
-    upsert_yc_companies(
-        engine,
-        [
-            {
-                "id": company_id,
-                "name": f"Company {company_id}",
-                "slug": f"company-{company_id}",
-                "website": f"https://company-{company_id}.example",
-                "regions": [],
-                "industries": [],
-                "tags": [],
-            }
-            for company_id in (1, 2)
-        ],
+    now += timedelta(minutes=1)
+    reappeared = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="reappeared",
+        snapshot=snapshot(changed_one, job_two),
     )
-    repository = JobRepository(engine)
-    now = datetime(2026, 5, 1, tzinfo=UTC)
-    for company_id, token in ((1, "one"), (2, "two")):
-        _, allowed, _ = repository.register_career_source(
-            company_id=company_id,
-            provider="greenhouse",
-            source_kind="ats_board",
-            external_source_id=token,
-            source_url=f"https://boards.greenhouse.io/{token}",
-            discovered_from_url=f"https://boards.greenhouse.io/{token}",
-            now=now,
+    assert reappeared.jobs_reactivated == 1
+
+    with engine.connect() as connection:
+        current = (
+            connection.execute(select(jobs_table).where(jobs_table.c.external_job_id == "2"))
+            .mappings()
+            .one()
         )
-        assert allowed is True
+        assert connection.scalar(select(func.count()).select_from(jobs_table)) == 2
+        assert connection.scalar(select(func.count()).select_from(sync_runs_table)) == 7
+    assert current["status"] == "active"
+    assert current["consecutive_complete_misses"] == 0
+    assert current["closed_at"] is None
 
-    class RecordingAdapter:
-        provider = "greenhouse"
-        adapter_version = "test"
-
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
-        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-            self.calls.append(external_source_id)
-            return SourceSnapshot(
-                provider=self.provider,
-                external_source_id=external_source_id,
-                adapter_version=self.adapter_version,
-                is_complete=True,
-                jobs=[],
-                http_status=200,
-            )
-
-    sleeps: list[float] = []
-
-    async def sleeper(delay: float) -> None:
-        sleeps.append(delay)
-
-    adapter = RecordingAdapter()
-    results = asyncio.run(
-        sync_sources(
-            engine,
-            argparse.Namespace(
-                provider="greenhouse",
-                company_id=None,
-                limit=2,
-                run_key="paced",
-                delay_seconds=2.5,
-            ),
-            adapter=adapter,
-            sleeper=sleeper,
-        )
-    )
-
-    assert adapter.calls == ["one", "two"]
-    assert sleeps == [2.5]
-    assert [result.status for result in results] == ["completed", "completed"]
+    inventory = repository.list_jobs()
+    assert len(inventory) == 2
+    assert inventory[0]["company_id"] == company_id
+    assert inventory[0]["company_source_id"] == source["id"]
+    assert inventory[0]["provider"] == "greenhouse"
+    assert inventory[0]["source_kind"] == "ats_board"
+    assert inventory[0]["source_url"] == "https://job-boards.greenhouse.io/acme"
+    assert inventory[0]["lifecycle_managed"] is True
+    assert inventory[0]["source_sync_status"] == "completed"
 
 
-def test_sync_cli_dispatches_every_registered_provider_without_yc_seed(
+def test_incomplete_or_invalid_snapshot_never_mutates_jobs(
     postgres_database_url: str,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    companies = CompanyRegistry(engine)
-    one = companies.register_company(name="One", website="https://one.example")
-    two = companies.register_company(name="Two", website="https://two.example")
-    sources = JobSourceRegistry(engine)
-    sources.register_url(
-        company_id=one.company_id,
-        source_url="https://job-boards.greenhouse.io/one",
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    company_id = add_company(engine, name="Acme", slug="acme", now=now)
+    source = add_source(JobRepository(engine), company_id=company_id, now=now)
+    service = JobSyncService(engine, clock=lambda: now)
+
+    incomplete = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="incomplete",
+        snapshot=SourceSnapshot(
+            provider="greenhouse",
+            external_source_id="acme",
+            adapter_version="test",
+            is_complete=False,
+            jobs=[normalized_job("1")],
+            http_status=200,
+        ),
     )
-    sources.register_url(
-        company_id=two.company_id,
-        source_url="https://jobs.ashbyhq.com/two",
+    assert incomplete.status == "partial"
+
+    duplicate = normalized_job("2")
+    invalid = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="duplicate",
+        snapshot=snapshot(duplicate, duplicate),
+    )
+    assert invalid.status == "partial"
+    assert invalid.errors_count == 1
+
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(jobs_table)) == 0
+        rows = list(
+            connection.execute(select(sync_runs_table).order_by(sync_runs_table.c.id)).mappings()
+        )
+    assert [row["status"] for row in rows] == ["partial", "partial"]
+    assert [row["is_complete"] for row in rows] == [False, False]
+
+
+def test_observation_sync_upserts_seen_jobs_without_applying_absence_lifecycle(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    company_id = add_company(engine, name="Observed Co", slug="observed", now=now)
+    repository = JobRepository(engine)
+    source = add_source(
+        repository,
+        company_id=company_id,
+        external_id="observed",
+        sync_mode="observation",
+        now=now,
+    )
+    service = JobSyncService(engine, clock=lambda: now)
+    job_one = normalized_job("1")
+    job_two = normalized_job("2")
+
+    first = service.sync_observations(
+        company_source_id=source["id"],
+        run_key="observation-one",
+        jobs=[job_one, job_two],
+        adapter_version="parser-v1",
+    )
+    assert first.status == "completed"
+    assert first.is_complete_scan is False
+    assert (first.jobs_added, first.jobs_missed, first.jobs_closed) == (2, 0, 0)
+
+    now += timedelta(minutes=1)
+    with engine.begin() as connection:
+        connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.external_job_id == "1")
+            .values(
+                status="closed",
+                consecutive_complete_misses=2,
+                closed_at=now,
+            )
+        )
+        connection.execute(
+            update(jobs_table)
+            .where(jobs_table.c.external_job_id == "2")
+            .values(consecutive_complete_misses=1)
+        )
+
+    now += timedelta(minutes=1)
+    changed_one = normalized_job("1", description="Build changed API systems")
+    second = service.sync_observations(
+        company_source_id=source["id"],
+        run_key="observation-two",
+        jobs=[changed_one, normalized_job("3")],
+        adapter_version="parser-v2",
+    )
+    assert second.is_complete_scan is False
+    assert (
+        second.jobs_added,
+        second.jobs_updated,
+        second.jobs_reactivated,
+        second.jobs_missed,
+        second.jobs_closed,
+    ) == (1, 1, 1, 0, 0)
+
+    now += timedelta(minutes=1)
+    replay = service.sync_observations(
+        company_source_id=source["id"],
+        run_key="observation-two",
+        jobs=[normalized_job("never-inserted")],
+        adapter_version="ignored-on-replay",
+    )
+
+    with engine.connect() as connection:
+        rows = {
+            row["external_job_id"]: row
+            for row in connection.execute(select(jobs_table)).mappings()
+        }
+        runs = list(
+            connection.execute(select(sync_runs_table).order_by(sync_runs_table.c.id)).mappings()
+        )
+    assert replay.idempotent_replay is True
+    assert replay.run_id == second.run_id
+    assert set(rows) == {"1", "2", "3"}
+    assert rows["1"]["status"] == "active"
+    assert rows["1"]["consecutive_complete_misses"] == 0
+    assert rows["1"]["closed_at"] is None
+    assert rows["2"]["status"] == "active"
+    assert rows["2"]["consecutive_complete_misses"] == 1
+    assert len(runs) == 2
+    assert runs[1]["status"] == "completed"
+    assert runs[1]["is_complete"] is False
+    assert runs[1]["details"] == {
+        "provider": "greenhouse",
+        "external_id": "observed",
+        "adapter_version": "parser-v2",
+        "sync_mode": "observation",
+        "errors": [],
+    }
+    assert runs[1]["stats"]["jobs_missed"] == 0
+    assert runs[1]["stats"]["jobs_closed"] == 0
+    inventory = repository.list_jobs()
+    assert all(job["lifecycle_managed"] is False for job in inventory)
+    assert all(job["status_confidence"] == "observation" for job in inventory)
+
+
+def test_observation_sync_rejects_non_observation_sources(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    company_id = add_company(engine, name="Acme", slug="acme", now=now)
+    source = add_source(JobRepository(engine), company_id=company_id, now=now)
+
+    with pytest.raises(ValueError, match="does not support observation sync"):
+        JobSyncService(engine, clock=lambda: now).sync_observations(
+            company_source_id=source["id"],
+            run_key="wrong-mode",
+            jobs=[normalized_job("1")],
+        )
+
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(sync_runs_table)) == 0
+        assert connection.scalar(select(func.count()).select_from(jobs_table)) == 0
+
+
+@pytest.mark.parametrize("field_name", ["external_job_id", "title", "content_hash"])
+def test_observation_sync_rejects_blank_canonical_job_fields_without_writes(
+    postgres_database_url: str,
+    field_name: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    company_id = add_company(engine, name="Observed Co", slug="observed", now=now)
+    source = add_source(
+        JobRepository(engine),
+        company_id=company_id,
+        external_id="observed",
+        sync_mode="observation",
+        now=now,
+    )
+    invalid_job = normalized_job("1").model_copy(update={field_name: " \t "})
+
+    with pytest.raises(ValueError, match=rf"blank {field_name}$"):
+        JobSyncService(engine, clock=lambda: now).sync_observations(
+            company_source_id=source["id"],
+            run_key=f"blank-{field_name}",
+            jobs=[invalid_job],
+        )
+
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(sync_runs_table)) == 0
+        assert connection.scalar(select(func.count()).select_from(jobs_table)) == 0
+
+
+def test_run_keys_are_durable_and_completed_runs_replay(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    company_id = add_company(engine, name="Acme", slug="acme", now=now)
+    source = add_source(JobRepository(engine), company_id=company_id, now=now)
+    service = JobSyncService(engine, clock=lambda: now)
+
+    started = service.start_run(
+        company_source_id=source["id"],
+        run_key="durable",
+        provider="greenhouse",
+        adapter_version="test",
+    )
+    with engine.connect() as connection:
+        assert (
+            connection.scalar(
+                select(sync_runs_table.c.status).where(sync_runs_table.c.id == started.run_id)
+            )
+            == "running"
+        )
+
+    completed = service.apply_snapshot(started=started, snapshot=snapshot(normalized_job("1")))
+    replay = service.sync_snapshot(
+        company_source_id=source["id"],
+        run_key="durable",
+        snapshot=snapshot(normalized_job("1")),
+    )
+    assert completed.status == "completed"
+    assert replay.idempotent_replay is True
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(sync_runs_table)) == 1
+
+    failed_started = service.start_run(
+        company_source_id=source["id"],
+        run_key="interrupted",
+        provider="greenhouse",
+        adapter_version="test",
+    )
+    assert not isinstance(failed_started, type(completed))
+    interrupted = service.interrupt_running_run(
+        company_source_id=source["id"],
+        run_key="interrupted",
+    )
+    assert interrupted is not None
+    assert interrupted.status == "failed"
+    with pytest.raises(RunKeyReuseError, match="Use a new run key"):
+        service.start_run(
+            company_source_id=source["id"],
+            run_key="interrupted",
+            provider="greenhouse",
+            adapter_version="test",
+        )
+
+
+def test_sync_script_dispatches_all_providers_sequentially(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    repository = JobRepository(engine)
+    first_company = add_company(engine, name="One", slug="one", now=now)
+    second_company = add_company(engine, name="Two", slug="two", now=now)
+    add_source(
+        repository,
+        company_id=first_company,
+        provider="greenhouse",
+        external_id="one",
+        now=now,
+    )
+    add_source(
+        repository,
+        company_id=second_company,
+        provider="ashby",
+        external_id="two",
+        now=now,
+    )
+    repository.register_source(
+        company_id=first_company,
+        provider="yc",
+        source_kind="directory",
+        external_id="123",
+        source_url="https://www.ycombinator.com/companies/one",
+        sync_mode="complete_snapshot",
+        now=now,
     )
 
     class RecordingAdapter:
@@ -507,385 +515,61 @@ def test_sync_cli_dispatches_every_registered_provider_without_yc_seed(
                 external_source_id=external_source_id,
                 adapter_version=self.adapter_version,
                 is_complete=True,
-                jobs=[],
                 http_status=200,
             )
 
     greenhouse = RecordingAdapter("greenhouse")
     ashby = RecordingAdapter("ashby")
-    providers = JobSourceProviderRegistry([greenhouse, ashby])
+    sleeps: list[float] = []
+
+    async def sleeper(delay: float) -> None:
+        sleeps.append(delay)
+
     results = asyncio.run(
-        sync_sources(
+        sync_job_sources.sync_sources(
             engine,
             argparse.Namespace(
                 provider=None,
                 company_id=None,
+                source_ids=None,
                 limit=None,
-                run_key="all-providers",
-                delay_seconds=0,
+                run_key="all",
+                delay_seconds=2.5,
             ),
-            providers=providers,
+            providers=JobSourceProviderRegistry([greenhouse, ashby]),
+            sleeper=sleeper,
         )
     )
 
     assert greenhouse.calls == ["one"]
     assert ashby.calls == ["two"]
+    assert sleeps == [2.5]
     assert [result.status for result in results] == ["completed", "completed"]
 
 
-def test_checkpointed_sync_resumes_at_the_first_unfinished_source(
+def test_disabled_and_non_job_sources_are_not_selected(
     postgres_database_url: str,
-    tmp_path: Path,
 ) -> None:
     engine = engine_from_url(postgres_database_url)
-    companies = CompanyRegistry(engine)
-    registry = JobSourceRegistry(engine)
-    for number in range(1, 4):
-        company = companies.register_company(
-            name=f"Company {number}", website=f"https://company-{number}.example"
-        )
-        registry.register_url(
-            company_id=company.company_id,
-            source_url=f"https://job-boards.greenhouse.io/board-{number}",
-        )
-
-    class RecordingAdapter:
-        provider = "greenhouse"
-        adapter_version = "test"
-
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
-        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-            self.calls.append(external_source_id)
-            return SourceSnapshot(
-                provider=self.provider,
-                external_source_id=external_source_id,
-                adapter_version=self.adapter_version,
-                is_complete=True,
-                jobs=[],
-                http_status=200,
-            )
-
-    checkpoint = tmp_path / "sync-checkpoint.json"
-    args = argparse.Namespace(
-        provider="greenhouse",
-        company_id=None,
-        source_ids=None,
-        min_source_id=None,
-        limit=2,
-        run_key="resume-batch",
-        delay_seconds=0,
-        checkpoint_file=checkpoint,
-        max_attempts=4,
-        status_file=None,
-    )
-    adapter = RecordingAdapter()
-
-    first = asyncio.run(sync_sources(engine, args, adapter=adapter))
-    second = asyncio.run(sync_sources(engine, args, adapter=adapter))
-
-    assert len(first) == 2
-    assert len(second) == 1
-    assert adapter.calls == ["board-1", "board-2", "board-3"]
-    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert {entry["state"] for entry in payload["sources"].values()} == {"completed"}
-
-
-def test_checkpointed_sync_retries_a_failed_source_with_a_new_attempt_key(
-    postgres_database_url: str,
-    tmp_path: Path,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    company = CompanyRegistry(engine).register_company(
-        name="Retry Company", website="https://retry-company.example"
-    )
-    source = JobSourceRegistry(engine).register_url(
-        company_id=company.company_id,
-        source_url="https://job-boards.greenhouse.io/retry-company",
-    )
-
-    class RetryAdapter:
-        provider = "greenhouse"
-        adapter_version = "test"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-            self.calls += 1
-            return SourceSnapshot(
-                provider=self.provider,
-                external_source_id=external_source_id,
-                adapter_version=self.adapter_version,
-                is_complete=self.calls > 1,
-                jobs=[],
-                http_status=200 if self.calls > 1 else 503,
-                errors=[] if self.calls > 1 else [{"kind": "http_status", "message": "503"}],
-            )
-
-    args = argparse.Namespace(
-        provider="greenhouse",
-        company_id=None,
-        source_ids=[source.career_source_id],
-        min_source_id=None,
-        limit=None,
-        run_key="retry-batch",
-        delay_seconds=0,
-        checkpoint_file=tmp_path / "retry-checkpoint.json",
-        max_attempts=4,
-        status_file=None,
-    )
-    adapter = RetryAdapter()
-
-    first = asyncio.run(sync_sources(engine, args, adapter=adapter))
-    second = asyncio.run(sync_sources(engine, args, adapter=adapter))
-
-    assert first[0].status == "failed"
-    assert second[0].status == "completed"
-    with engine.connect() as connection:
-        keys = list(
-            connection.scalars(
-                select(source_sync_runs_table.c.run_key)
-                .where(source_sync_runs_table.c.career_source_id == source.career_source_id)
-                .order_by(source_sync_runs_table.c.id)
-            )
-        )
-    assert keys == [
-        f"retry-batch:{source.career_source_id}:attempt-1",
-        f"retry-batch:{source.career_source_id}:attempt-2",
-    ]
-
-
-def test_checkpointed_sync_treats_missing_public_board_as_terminal(
-    postgres_database_url: str,
-    tmp_path: Path,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    company = CompanyRegistry(engine).register_company(
-        name="Gone Board", website="https://gone-board.example"
-    )
-    source = JobSourceRegistry(engine).register_url(
-        company_id=company.company_id,
-        source_url="https://job-boards.greenhouse.io/gone-board",
-    )
-
-    class MissingAdapter:
-        provider = "greenhouse"
-        adapter_version = "test"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def fetch_snapshot(self, external_source_id: str) -> SourceSnapshot:
-            self.calls += 1
-            return SourceSnapshot(
-                provider=self.provider,
-                external_source_id=external_source_id,
-                adapter_version=self.adapter_version,
-                is_complete=False,
-                http_status=404,
-                errors=[{"kind": "http_status", "message": "404"}],
-            )
-
-    checkpoint = tmp_path / "missing-checkpoint.json"
-    args = argparse.Namespace(
-        provider="greenhouse",
-        company_id=None,
-        source_ids=[source.career_source_id],
-        min_source_id=None,
-        limit=None,
-        run_key="missing-batch",
-        delay_seconds=0,
-        checkpoint_file=checkpoint,
-        max_attempts=4,
-        status_file=None,
-    )
-    adapter = MissingAdapter()
-
-    first = asyncio.run(sync_sources(engine, args, adapter=adapter))
-    second = asyncio.run(sync_sources(engine, args, adapter=adapter))
-
-    assert first[0].status == "failed"
-    assert second == []
-    assert adapter.calls == 1
-    payload = json.loads(checkpoint.read_text(encoding="utf-8"))
-    entry = payload["sources"][str(source.career_source_id)]
-    assert entry["state"] == "terminal_failed"
-    assert entry["retryable"] is False
-    assert entry["diagnostics"] == {
-        "error_kinds": ["http_status"],
-        "http_status": 404,
-        "reason": "permanent_http_status",
-    }
-    assert sync_job_sources.summarize_sync_checkpoint(payload, max_attempts=4) == {
-        "selected": 1,
-        "processed": 1,
-        "succeeded": 0,
-        "failed": 1,
-        "terminal_failures": 1,
-        "exhausted_failures": 0,
-        "retryable": 0,
-    }
-
-
-def test_exhausted_checkpoint_failure_is_terminal_for_the_batch() -> None:
-    checkpoint = {
-        "sources": {
-            "1": {"state": "completed", "attempts": 1},
-            "2": {"state": "failed", "attempts": 4},
-            "3": {"state": "failed", "attempts": 2},
-        }
-    }
-
-    summary = sync_job_sources.summarize_sync_checkpoint(checkpoint, max_attempts=4)
-
-    assert summary == {
-        "selected": 3,
-        "processed": 3,
-        "succeeded": 1,
-        "failed": 1,
-        "terminal_failures": 0,
-        "exhausted_failures": 1,
-        "retryable": 1,
-    }
-
-
-def test_main_exits_successfully_when_checkpoint_failures_exhausted_attempts(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    checkpoint = tmp_path / "checkpoint.json"
-    status_file = tmp_path / "status.json"
-    checkpoint.write_text(
-        json.dumps(
-            {
-                "sources": {
-                    "1": {"state": "completed", "attempts": 1},
-                    "2": {"state": "failed", "attempts": 4},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    args = argparse.Namespace(
-        command="sync",
-        provider="greenhouse",
-        status_file=status_file,
-        checkpoint_file=checkpoint,
-        max_attempts=4,
-    )
-
-    async def no_pending_sources(engine, parsed_args):
-        del engine, parsed_args
-        return []
-
-    monkeypatch.setattr(sync_job_sources, "parse_args", lambda: args)
-    monkeypatch.setattr(sync_job_sources, "engine_from_url", lambda: object())
-    monkeypatch.setattr(sync_job_sources, "create_schema", lambda engine: None)
-    monkeypatch.setattr(sync_job_sources, "sync_sources", no_pending_sources)
-
-    sync_job_sources.main()
-
-    status = json.loads(status_file.read_text(encoding="utf-8"))
-    assert status["state"] == "partial"
-    assert status["selected"] == 2
-    assert status["succeeded"] == 1
-    assert status["failed"] == 1
-    assert status["exhausted_failures"] == 1
-    assert status["retryable"] == 0
-
-
-def test_main_exits_nonzero_while_checkpoint_has_retryable_work(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    checkpoint = tmp_path / "checkpoint.json"
-    checkpoint.write_text(
-        json.dumps({"sources": {"1": {"state": "failed", "attempts": 2}}}),
-        encoding="utf-8",
-    )
-    args = argparse.Namespace(
-        command="sync",
-        provider="greenhouse",
-        status_file=tmp_path / "status.json",
-        checkpoint_file=checkpoint,
-        max_attempts=4,
-    )
-
-    async def no_results_this_attempt(engine, parsed_args):
-        del engine, parsed_args
-        return []
-
-    monkeypatch.setattr(sync_job_sources, "parse_args", lambda: args)
-    monkeypatch.setattr(sync_job_sources, "engine_from_url", lambda: object())
-    monkeypatch.setattr(sync_job_sources, "create_schema", lambda engine: None)
-    monkeypatch.setattr(sync_job_sources, "sync_sources", no_results_this_attempt)
-
-    with pytest.raises(SystemExit) as exc_info:
-        sync_job_sources.main()
-
-    assert exc_info.value.code == 1
-
-
-def test_checkpointed_sync_terminates_a_source_disabled_between_attempts(
-    postgres_database_url: str,
-    tmp_path: Path,
-) -> None:
-    engine = engine_from_url(postgres_database_url)
-    company = CompanyRegistry(engine).register_company(
-        name="Disabled Board", website="https://disabled-board.example"
-    )
-    source = JobSourceRegistry(engine).register_url(
-        company_id=company.company_id,
-        source_url="https://job-boards.greenhouse.io/disabled-board",
-    )
-    checkpoint = tmp_path / "disabled-checkpoint.json"
-    checkpoint.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "batch_key": "disabled-batch",
-                "scope": {
-                    "provider": "greenhouse",
-                    "company_id": None,
-                    "source_ids": [source.career_source_id],
-                    "min_source_id": None,
-                },
-                "source_ids": [source.career_source_id],
-                "sources": {
-                    str(source.career_source_id): {"attempts": 0, "state": "pending"}
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+    repository = JobRepository(engine)
+    company_id = add_company(engine, name="Acme", slug="acme", now=now)
+    active = add_source(repository, company_id=company_id, external_id="active", now=now)
+    disabled = add_source(repository, company_id=company_id, external_id="disabled", now=now)
     with engine.begin() as connection:
         connection.execute(
-            update(career_sources_table)
-            .where(career_sources_table.c.id == source.career_source_id)
+            update(company_sources_table)
+            .where(company_sources_table.c.id == disabled["id"])
             .values(status="disabled")
         )
-    args = argparse.Namespace(
-        provider="greenhouse",
-        company_id=None,
-        source_ids=[source.career_source_id],
-        min_source_id=None,
-        limit=None,
-        run_key="disabled-batch",
-        delay_seconds=0,
-        checkpoint_file=checkpoint,
-        max_attempts=4,
-        status_file=None,
+    repository.register_source(
+        company_id=company_id,
+        provider="yc",
+        source_kind="directory",
+        external_id="yc-acme",
+        source_url="https://www.ycombinator.com/companies/acme",
+        sync_mode="none",
+        now=now,
     )
 
-    assert asyncio.run(sync_sources(engine, args)) == []
-    entry = json.loads(checkpoint.read_text(encoding="utf-8"))["sources"][
-        str(source.career_source_id)
-    ]
-    assert entry["state"] == "terminal_failed"
-    assert entry["retryable"] is False
-    assert entry["diagnostics"] == {
-        "career_source_id": source.career_source_id,
-        "reason": "career_source_not_active",
-    }
+    assert [source["id"] for source in repository.active_sources()] == [active["id"]]

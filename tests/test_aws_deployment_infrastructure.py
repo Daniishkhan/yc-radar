@@ -46,6 +46,9 @@ def test_worker_retains_no_ingress_and_ssm_recovery() -> None:
 
     assert "SecurityGroupIngress: []" in stack
     assert "AmazonSSMManagedInstanceCore" in stack
+    assert "Google Cloud Workload Identity Federation" not in stack
+    assert "WorkerRoleName:" not in stack
+    assert "WorkerRoleArn:" not in stack
 
 
 def test_deployment_refuses_active_jobs_and_untested_revisions() -> None:

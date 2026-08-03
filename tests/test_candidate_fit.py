@@ -412,7 +412,7 @@ def test_ai_and_data_signals_boost_backend_relevance_without_becoming_primary_la
     score = score_company(backend_company, DEFAULT_CANDIDATE_PROFILE)
     role_focus = role_focus_record(
         backend_company,
-        yc_jobs=[
+        jobs=[
             {
                 "title": "Senior Backend Engineer",
                 "skills": ["Python", "LLMs", "Data pipelines"],
@@ -782,6 +782,50 @@ def test_remote_region_in_title_restricts_global_location() -> None:
     assert regional.evidence == ["title restriction: APAC Remote"]
 
 
+def test_global_remote_scope_in_title_is_role_eligibility_evidence() -> None:
+    real_posting = classify_remote_eligibility(
+        {
+            "title": "Software Engineer - Global (Remote)",
+            "location": "Remote",
+        }
+    )
+    assert real_posting.status == "global_explicit"
+    assert real_posting.evidence == ["title global scope: Global (Remote)"]
+
+    for title in (
+        "Senior Backend Engineer - Worldwide Remote",
+        "Remote / World Wide - Software Engineer",
+    ):
+        assert (
+            classify_remote_eligibility({"title": title, "location": "Remote"}).status
+            == "global_explicit"
+        )
+
+
+def test_global_remote_title_does_not_override_structured_regional_scope() -> None:
+    result = classify_remote_eligibility(
+        {
+            "title": "Software Engineer - Global (Remote)",
+            "location": "Anywhere in LATAM",
+            "structured_evidence": {
+                "schema_version": 1,
+                "provider": "ashby",
+                "workplace": {"type": "remote", "is_remote": True},
+                "primary_location": {"label": "Anywhere in LATAM"},
+                "secondary_locations": [],
+                "offices": [],
+                "countries": [],
+                "provider_metadata": [],
+                "eligibility_signals": [],
+                "application": {},
+            },
+        }
+    )
+
+    assert result.status == "restricted_remote"
+    assert result.evidence == ["restriction: anywhere in latam"]
+
+
 def test_remote_title_signal_requires_work_arrangement_syntax() -> None:
     semantic_remote = classify_remote_eligibility(
         {"title": "Remote Sensing Software Engineer"}
@@ -1059,7 +1103,7 @@ def test_structured_provider_evidence_takes_precedence_over_boilerplate() -> Non
     ).status == "onsite_explicit"
 
 
-def test_role_focus_clusters_location_variants_without_losing_provenance() -> None:
+def test_role_focus_keeps_same_title_jobs_distinct_without_identity_anchor() -> None:
     company = Company(
         name="Location Fanout Co",
         slug="location-fanout-co",
@@ -1072,6 +1116,7 @@ def test_role_focus_clusters_location_variants_without_losing_provenance() -> No
             "description_text": "Build distributed APIs.",
             "provider": "greenhouse",
             "external_job_id": "us-1",
+            "lifecycle_managed": True,
         },
         {
             "title": "Senior Backend Engineer",
@@ -1079,6 +1124,7 @@ def test_role_focus_clusters_location_variants_without_losing_provenance() -> No
             "description_text": "Build distributed APIs.",
             "provider": "greenhouse",
             "external_job_id": "world-1",
+            "lifecycle_managed": True,
         },
         {
             "title": "Staff Platform Engineer",
@@ -1086,41 +1132,323 @@ def test_role_focus_clusters_location_variants_without_losing_provenance() -> No
             "description_text": "Own the data platform.",
             "provider": "greenhouse",
             "external_job_id": "platform-1",
+            "lifecycle_managed": True,
         },
     ]
 
     target = target_record(
         score_company(company, DEFAULT_CANDIDATE_PROFILE),
         rank=1,
-        canonical_jobs=jobs,
+        jobs=jobs,
     )
 
-    assert target["canonical_raw_active_job_count"] == 3
-    assert target["canonical_active_job_count"] == 2
-    assert target["canonical_duplicate_posting_count"] == 1
-    assert target["canonical_raw_matching_job_count"] == 3
-    assert target["canonical_matching_job_count"] == 2
-    assert target["canonical_duplicate_matching_job_count"] == 1
+    assert target["raw_active_job_count"] == 3
+    assert target["active_job_count"] == 3
+    assert target["duplicate_posting_count"] == 0
+    assert target["raw_matching_job_count"] == 3
+    assert target["matching_job_count"] == 3
+    assert target["duplicate_matching_job_count"] == 0
+    assert target["managed_raw_active_job_count"] == 3
+    assert target["managed_active_job_count"] == 3
+    assert target["managed_duplicate_posting_count"] == 0
+    assert target["managed_raw_matching_job_count"] == 3
+    assert target["managed_matching_job_count"] == 3
+    assert target["managed_duplicate_matching_job_count"] == 0
     assert target["best_remote_eligibility"] == "global_explicit"
 
-    backend_cluster = next(
+    backend_clusters = [
         item
         for item in target["matching_job_provenance"]
         if item["title"] == "Senior Backend Engineer"
-    )
-    assert backend_cluster["posting_variant_count"] == 2
-    assert backend_cluster["remote_eligibility"] == "global_explicit"
-    assert backend_cluster["remote_eligibility_distribution"] == {
-        "restricted_remote": 1,
-        "global_explicit": 1,
-    }
+    ]
+    assert len(backend_clusters) == 2
+    assert all(item["posting_variant_count"] == 1 for item in backend_clusters)
+    assert all(item["identity_anchors"] == [] for item in backend_clusters)
     assert {
         (item["external_job_id"], item["location"], item["remote_eligibility"])
-        for item in backend_cluster["posting_variants"]
+        for cluster in backend_clusters
+        for item in cluster["posting_variants"]
     } == {
         ("us-1", "Remote - United States", "restricted_remote"),
         ("world-1", "Remote - Worldwide", "global_explicit"),
     }
+
+
+def test_role_focus_clusters_cross_source_jobs_by_normalized_url() -> None:
+    company = Company(name="URL Anchor Co", slug="url-anchor-co")
+    target = target_record(
+        score_company(company, DEFAULT_CANDIDATE_PROFILE),
+        rank=1,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "greenhouse",
+                "company_source_id": 1,
+                "external_job_id": "gh-42",
+                "posting_url": "http://www.example.test/jobs/42/?utm_source=greenhouse",
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "ashby",
+                "company_source_id": 2,
+                "external_job_id": "ashby-42",
+                "apply_url": "https://example.test/jobs/42",
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "yc",
+                "company_source_id": 3,
+                "external_job_id": "yc-unrelated",
+                "posting_url": "https://example.test/jobs/99",
+            },
+        ],
+    )
+
+    assert target["raw_active_job_count"] == 3
+    assert target["active_job_count"] == 2
+    clustered = next(
+        cluster
+        for cluster in target["matching_job_provenance"]
+        if cluster["posting_variant_count"] == 2
+    )
+    assert clustered["identity_anchors"] == [
+        "normalized_url:https://example.test/jobs/42"
+    ]
+    assert {variant["external_job_id"] for variant in clustered["posting_variants"]} == {
+        "gh-42",
+        "ashby-42",
+    }
+
+
+def test_role_focus_does_not_merge_a_transitive_three_source_identity_chain() -> None:
+    company = Company(name="Chain Anchor Co", slug="chain-anchor-co")
+    target = role_focus_record(
+        company,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "company_source_id": 1,
+                "external_job_id": "url-only",
+                "posting_url": "https://example.test/jobs/42",
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "company_source_id": 2,
+                "external_job_id": "bridge",
+                "apply_url": "https://example.test/jobs/42",
+                "structured_evidence": {"requisition_id": "REQ-9"},
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "company_source_id": 3,
+                "external_job_id": "requisition-only",
+                "structured_evidence": {"requisition_id": "req 9"},
+            },
+        ],
+    )
+
+    assert target["raw_active_job_count"] == 3
+    assert target["active_job_count"] == 2
+    assert sorted(
+        cluster["posting_variant_count"] for cluster in target["matching_job_provenance"]
+    ) == [1, 2]
+    clustered = next(
+        cluster
+        for cluster in target["matching_job_provenance"]
+        if cluster["posting_variant_count"] == 2
+    )
+    assert {variant["external_job_id"] for variant in clustered["posting_variants"]} == {
+        "url-only",
+        "bridge",
+    }
+    assert clustered["identity_anchors"] == [
+        "normalized_url:https://example.test/jobs/42"
+    ]
+
+
+def test_role_focus_clusters_by_compatible_requisition_or_content_anchor() -> None:
+    company = Company(name="Explicit Anchor Co", slug="explicit-anchor-co")
+    requisition_target = role_focus_record(
+        company,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "greenhouse",
+                "company_source_id": 1,
+                "external_job_id": "gh-req",
+                "structured_evidence": {"requisition_id": "REQ-42"},
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "ashby",
+                "company_source_id": 2,
+                "external_job_id": "ashby-req",
+                "structured_evidence": {"requisition_id": "req 42"},
+            },
+        ],
+    )
+    content_target = role_focus_record(
+        company,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "greenhouse",
+                "company_source_id": 1,
+                "external_job_id": "gh-content",
+                "content_hash": "abc123",
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "provider": "ashby",
+                "company_source_id": 2,
+                "external_job_id": "ashby-content",
+                "content_hash": "ABC123",
+            },
+        ],
+    )
+
+    assert requisition_target["active_job_count"] == 1
+    assert requisition_target["matching_jobs"][0]["identity_anchors"] == [
+        "requisition_id:req42:title:senior backend engineer"
+    ]
+    assert content_target["active_job_count"] == 1
+    assert content_target["matching_jobs"][0]["identity_anchors"] == [
+        "content_hash:abc123:title:senior backend engineer"
+    ]
+
+
+def test_role_focus_never_collapses_distinct_ids_from_the_same_source() -> None:
+    company = Company(name="Same Source Co", slug="same-source-co")
+    target = role_focus_record(
+        company,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "company_source_id": 1,
+                "external_job_id": "one",
+                "content_hash": "same-content",
+            },
+            {
+                "title": "Senior Backend Engineer",
+                "company_source_id": 1,
+                "external_job_id": "two",
+                "content_hash": "same-content",
+            },
+        ],
+    )
+
+    assert target["raw_active_job_count"] == 2
+    assert target["active_job_count"] == 2
+    assert target["duplicate_posting_count"] == 0
+
+
+def test_unmanaged_jobs_remain_visible_without_lifecycle_snapshot_scoring() -> None:
+    company = Company(
+        name="Unreconciled Jobs Co",
+        slug="unreconciled-jobs-co",
+        website="https://unreconciled-jobs.example",
+    )
+    target = target_record(
+        score_company(company, DEFAULT_CANDIDATE_PROFILE),
+        rank=1,
+        jobs=[
+            {
+                "job_key": "yc:101",
+                "source_kind": "yc",
+                "source_record_id": "101",
+                "title": "Senior Backend Engineer",
+                "location": "Remote - Worldwide",
+                "provider": "yc",
+                "external_job_id": "101",
+                "lifecycle_managed": False,
+                "status_confidence": "snapshot_row_unreconciled",
+            }
+        ],
+    )
+
+    assert target["raw_active_job_count"] == 1
+    assert target["active_job_count"] == 1
+    assert target["matching_job_count"] == 1
+    assert target["best_remote_eligibility"] == "global_explicit"
+    assert target["managed_raw_active_job_count"] == 0
+    assert target["managed_active_job_count"] == 0
+    assert target["managed_matching_job_count"] == 0
+    assert target["managed_matching_jobs"] == []
+    assert target["managed_best_remote_eligibility"] == "no_remote_evidence"
+    assert target["opportunity_score"] == 16
+    assert target["opportunity_score_reasons"] == [
+        "Matching role evidence lacks a complete provider snapshot"
+    ]
+
+
+def test_lifecycle_managed_variant_controls_cluster_and_snapshot_remote_scoring() -> None:
+    company = Company(
+        name="Conflicting Evidence Co",
+        slug="conflicting-evidence-co",
+        website="https://conflicting-evidence.example",
+    )
+    target = target_record(
+        score_company(company, DEFAULT_CANDIDATE_PROFILE),
+        rank=1,
+        jobs=[
+            {
+                "job_key": "source:greenhouse:example:managed-us",
+                "source_kind": "ats_board",
+                "source_record_id": "1",
+                "title": "Senior Backend Engineer",
+                "location": "Remote - United States",
+                "provider": "greenhouse",
+                "external_job_id": "managed-us",
+                "posting_url": "https://conflicting-evidence.example/jobs/backend",
+                "lifecycle_managed": True,
+                "status_confidence": "provider_complete_snapshot",
+            },
+            {
+                "job_key": "yc:2",
+                "source_kind": "yc",
+                "source_record_id": "2",
+                "title": "Senior Backend Engineer",
+                "location": "Remote - Worldwide",
+                "provider": "yc",
+                "external_job_id": "unmanaged-worldwide",
+                "apply_url": "https://conflicting-evidence.example/jobs/backend?utm_source=yc",
+                "lifecycle_managed": False,
+                "status_confidence": "snapshot_row_unreconciled",
+            },
+            {
+                "job_key": "external:3",
+                "source_kind": "external",
+                "source_record_id": "3",
+                "title": "Staff Platform Engineer",
+                "location": "Remote - Worldwide",
+                "provider": "json_ld",
+                "external_job_id": "unmanaged-platform-worldwide",
+                "lifecycle_managed": False,
+                "status_confidence": "url_observation",
+            },
+        ],
+    )
+
+    assert target["raw_active_job_count"] == 3
+    assert target["active_job_count"] == 2
+    assert target["managed_raw_active_job_count"] == 1
+    assert target["managed_active_job_count"] == 1
+    assert target["managed_matching_job_count"] == 1
+    assert target["best_remote_eligibility"] == "global_explicit"
+    assert target["managed_best_remote_eligibility"] == "restricted_remote"
+    cluster = next(
+        job
+        for job in target["matching_job_provenance"]
+        if job["title"] == "Senior Backend Engineer"
+    )
+    assert cluster["external_job_id"] == "managed-us"
+    assert cluster["lifecycle_managed"] is True
+    assert cluster["posting_variant_count"] == 2
+    assert target["opportunity_score_reasons"] == [
+        "Has a current strong senior software engineering role",
+        "Backed by a lifecycle-managed complete source snapshot",
+        "Matching remote roles appear geographically restricted",
+    ]
 
 
 def test_live_global_remote_backend_role_can_outrank_metadata_rich_company_without_roles() -> None:
@@ -1143,20 +1471,21 @@ def test_live_global_remote_backend_role_can_outrank_metadata_rich_company_witho
     independent_target = target_record(
         score_company(independent, DEFAULT_CANDIDATE_PROFILE),
         rank=1,
-        canonical_jobs=[
+        jobs=[
             {
                 "title": "Senior Backend Engineer",
                 "location": "Remote - Worldwide",
                 "description_text": "Build distributed APIs. Remote worldwide.",
                 "provider": "greenhouse",
                 "external_job_id": "1",
+                "lifecycle_managed": True,
             }
         ],
     )
     metadata_target = target_record(
         score_company(metadata_rich, DEFAULT_CANDIDATE_PROFILE),
         rank=2,
-        canonical_jobs=[],
+        jobs=[],
     )
 
     assert independent_target["best_remote_eligibility"] == "global_explicit"

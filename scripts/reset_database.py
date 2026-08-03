@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rebuild-schema",
         action="store_true",
-        help="Destructively downgrade to base and upgrade Alembic migrations instead of truncating rows.",
+        help="Drop every table/view in the configured schema and apply the fresh Alembic baseline.",
     )
     return parser.parse_args()
 

@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
+
+from yc_radar.services.database import companies_table, company_sources_table, engine_from_url
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "scout_greenhouse_sources.py"
@@ -34,21 +37,13 @@ def result(**overrides: str) -> dict[str, str]:
     return row
 
 
-def test_resume_reuses_completed_and_checkpointed_homepage_negative_rows() -> None:
+def test_resume_reuses_completed_rows_and_retries_failures() -> None:
     assert scout.can_resume_row(result(), candidate=candidate(), apply=True) is True
     assert (
         scout.can_resume_row(
             result(verification_status="failed"), candidate=candidate(), apply=True
         )
         is False
-    )
-    assert (
-        scout.can_resume_row(
-            result(registration_status="homepage_unverified"),
-            candidate=candidate(),
-            apply=True,
-        )
-        is True
     )
 
 
@@ -121,9 +116,7 @@ def test_union_crawl_provenance_is_preserved_in_scout_rows_and_registration_evid
     )
 
     row = scout.result_row(union_candidate, evidence, resolution)
-    provenance = scout.candidate_crawl_provenance(
-        union_candidate, fallback_crawl=None
-    )
+    provenance = scout.candidate_crawl_provenance(union_candidate, fallback_crawl=None)
 
     assert {field: row[field] for field in scout.OUTPUT_FIELDS[4:10]} == {
         "first_observed_at": "2026-05-08T00:00:00Z",
@@ -162,7 +155,7 @@ def test_apply_registration_writes_union_crawl_provenance(monkeypatch) -> None:
 
         def register_url(self, **kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(career_source_id=8, created=True)
+            return SimpleNamespace(company_source_id=8, created=True)
 
     monkeypatch.setattr(scout, "JobSourceRegistry", FakeJobSourceRegistry)
     union_candidate = {
@@ -201,6 +194,7 @@ def test_apply_registration_writes_union_crawl_provenance(monkeypatch) -> None:
     )
 
     assert row["registration_status"] == "company_reused_source_created"
+    assert row["company_source_id"] == 8
     assert captured["evidence"] == {
         "discovery_provider": "commoncrawl_url_index",
         "observation_count": 9,
@@ -214,3 +208,49 @@ def test_apply_registration_writes_union_crawl_provenance(monkeypatch) -> None:
         "verified_job_count": 3,
         "website_evidence": None,
     }
+
+
+def test_verified_unresolved_board_registers_a_provisional_company_and_source(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    unresolved_candidate = {
+        **candidate("provider-confirmed"),
+        "example_observed_url": ("https://job-boards.greenhouse.io/provider-confirmed/jobs/1"),
+        "observation_count": "3",
+    }
+    evidence = SimpleNamespace(
+        board_token="provider-confirmed",
+        company_name="Provider Confirmed",
+        job_count=4,
+    )
+    resolution = SimpleNamespace(
+        status="unresolved_no_domain",
+        company_id=None,
+        website_candidate=None,
+    )
+    row: dict = {}
+
+    scout.apply_registration(
+        row,
+        evidence=evidence,
+        resolution=resolution,
+        candidate=unresolved_candidate,
+        companies=[],
+        existing_sources={},
+        crawl=None,
+        engine=engine,
+        homepage_verifier=lambda _url: None,
+    )
+
+    with engine.connect() as connection:
+        company = connection.execute(select(companies_table)).mappings().one()
+        source = connection.execute(select(company_sources_table)).mappings().one()
+    assert row["registration_status"] == "company_provisional_source_created"
+    assert row["company_id"] == company["id"]
+    assert row["company_source_id"] == source["id"]
+    assert company["identity_state"] == "provisional"
+    assert company["website"] is None
+    assert source["provider"] == "greenhouse"
+    assert source["external_id"] == "provider-confirmed"
+    assert source["sync_mode"] == "complete_snapshot"

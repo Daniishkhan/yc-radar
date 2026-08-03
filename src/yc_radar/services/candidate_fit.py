@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from yc_radar.agents.llm import LLMClient
 from yc_radar.domain.models import Company
@@ -97,18 +98,6 @@ SOFTWARE_ROLE_TERMS = (
 )
 FULL_STACK_TERMS = ("full stack", "full-stack", "fullstack")
 FOUNDING_TERMS = ("founding engineer", "founding software engineer")
-FRONTEND_TERMS = (
-    "frontend",
-    "front end",
-    "front-end",
-    "ui engineer",
-    "web engineer",
-    "react engineer",
-    "react developer",
-    "ui developer",
-    "web developer",
-    "design engineer",
-)
 FRONTEND_ONLY_TITLE_TERMS = (
     "frontend",
     "front end",
@@ -802,30 +791,224 @@ def _normalise_job_title(title: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+#]+", " ", title.casefold())).strip()
 
 
-def _canonical_job_cluster_key(job: dict[str, Any], fallback_index: int) -> str:
-    title_key = _normalise_job_title(str(job.get("title") or ""))
-    if title_key:
-        return title_key
-    provider = str(job.get("provider") or "unknown")
-    external_job_id = str(job.get("external_job_id") or fallback_index)
-    return f"{provider}:{external_job_id}"
+_REQUISITION_ID_KEYS = (
+    "requisition_id",
+    "requisitionId",
+    "requisitionID",
+    "requisition_number",
+    "requisitionNumber",
+    "req_id",
+    "reqId",
+    "job_code",
+    "jobCode",
+)
+_TRACKING_QUERY_KEYS = frozenset({"gh_src", "ref", "referrer", "source"})
+
+
+def _normalise_job_url(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.casefold().rstrip(".").removeprefix("www.")
+    if port is not None and port not in {80, 443}:
+        host = f"{host}:{port}"
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    query = urlencode(
+        sorted(
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in _TRACKING_QUERY_KEYS
+        ),
+        doseq=True,
+    )
+    return urlunsplit(("https", host, path, query, ""))
+
+
+def _job_source_identity(job: dict[str, Any], fallback_index: int) -> str:
+    company_source_id = job.get("company_source_id")
+    if company_source_id is not None and str(company_source_id).strip():
+        return f"company_source:{company_source_id}"
+    provider = str(job.get("provider") or "").strip().casefold()
+    source_external_id = str(job.get("source_external_id") or "").strip().casefold()
+    if provider and source_external_id:
+        return f"provider_source:{provider}:{source_external_id}"
+    source_url = _normalise_job_url(job.get("source_url"))
+    if provider and source_url:
+        return f"provider_url:{provider}:{source_url}"
+    if provider:
+        return f"provider:{provider}"
+    if source_url:
+        return f"source_url:{source_url}"
+    source_kind = str(job.get("source_kind") or "").strip().casefold()
+    if source_kind:
+        return f"source_kind:{source_kind}"
+    return f"unknown_source:{fallback_index}"
+
+
+def _job_source_external_identity(job: dict[str, Any], fallback_index: int) -> str:
+    source = _job_source_identity(job, fallback_index)
+    external_job_id = str(job.get("external_job_id") or "").strip()
+    if external_job_id:
+        return f"{source}:external_job:{external_job_id}"
+    job_key = str(job.get("job_key") or "").strip()
+    if job_key:
+        return f"{source}:job_key:{job_key}"
+    source_record_id = str(job.get("source_record_id") or "").strip()
+    if source_record_id:
+        return f"{source}:source_record:{source_record_id}"
+    return f"{source}:row:{fallback_index}"
+
+
+def _normalise_requisition_id(value: Any) -> str | None:
+    raw = str(value or "").strip().casefold()
+    if not raw:
+        return None
+    normalized = re.sub(r"[^a-z0-9]+", "", raw)
+    return normalized or None
+
+
+def _job_requisition_id(job: dict[str, Any]) -> str | None:
+    for key in _REQUISITION_ID_KEYS:
+        if normalized := _normalise_requisition_id(job.get(key)):
+            return normalized
+    evidence = job.get("structured_evidence")
+    if isinstance(evidence, dict):
+        for key in _REQUISITION_ID_KEYS:
+            if normalized := _normalise_requisition_id(evidence.get(key)):
+                return normalized
+    return None
+
+
+def _job_cross_source_anchors(job: dict[str, Any]) -> dict[str, set[str]]:
+    urls: set[str] = set()
+    for value in (job.get("posting_url"), job.get("apply_url")):
+        if normalized := _normalise_job_url(value):
+            urls.add(f"normalized_url:{normalized}")
+    evidence = job.get("structured_evidence")
+    application = evidence.get("application") if isinstance(evidence, dict) else None
+    if isinstance(application, dict):
+        for key in ("posting_url", "apply_url"):
+            if normalized := _normalise_job_url(application.get(key)):
+                urls.add(f"normalized_url:{normalized}")
+
+    title = _normalise_job_title(str(job.get("title") or ""))
+    requisitions: set[str] = set()
+    if title and (requisition_id := _job_requisition_id(job)):
+        requisitions.add(f"requisition_id:{requisition_id}:title:{title}")
+    content: set[str] = set()
+    content_hash = str(job.get("content_hash") or "").strip().casefold()
+    if content_hash and title:
+        content.add(f"content_hash:{content_hash}:title:{title}")
+    return {"url": urls, "requisition": requisitions, "content": content}
+
+
+def _cluster_jobs(
+    jobs: list[dict[str, Any]],
+) -> list[tuple[list[dict[str, Any]], list[str]]]:
+    """Group only source variants connected by conservative, auditable identity anchors."""
+    records = [
+        {
+            "job": job,
+            "source": _job_source_identity(job, index),
+            "source_external": _job_source_external_identity(job, index),
+            "anchors": _job_cross_source_anchors(job),
+        }
+        for index, job in enumerate(jobs)
+    ]
+    groups = [
+        {"members": {index}, "anchors": set()} for index in range(len(records))
+    ]
+    direct_matches: dict[tuple[int, int], tuple[int, tuple[str, ...]]] = {}
+    edges: list[tuple[int, int, int, tuple[str, ...]]] = []
+    for left_index, left in enumerate(records):
+        for right_index in range(left_index + 1, len(records)):
+            right = records[right_index]
+            reasons: set[str] = set()
+            priority = 99
+            if left["source_external"] == right["source_external"]:
+                priority = 0
+                reasons.add(f"source_external_id:{left['source_external']}")
+            elif left["source"] != right["source"]:
+                for anchor_kind, anchor_priority in (
+                    ("url", 1),
+                    ("requisition", 2),
+                    ("content", 3),
+                ):
+                    shared = left["anchors"][anchor_kind] & right["anchors"][anchor_kind]
+                    if shared:
+                        priority = min(priority, anchor_priority)
+                        reasons.update(shared)
+            if reasons:
+                match = (priority, tuple(sorted(reasons)))
+                direct_matches[(left_index, right_index)] = match
+                edges.append((priority, left_index, right_index, match[1]))
+
+    def group_for(index: int) -> dict[str, Any]:
+        return next(group for group in groups if index in group["members"])
+
+    def complete_linkage_reasons(
+        left: dict[str, Any], right: dict[str, Any]
+    ) -> set[str] | None:
+        reasons: set[str] = set()
+        for left_member in left["members"]:
+            for right_member in right["members"]:
+                pair = tuple(sorted((left_member, right_member)))
+                match = direct_matches.get(pair)
+                if match is None:
+                    return None
+                reasons.update(match[1])
+        return reasons
+
+    for _, left_index, right_index, reasons in sorted(edges):
+        left = group_for(left_index)
+        right = group_for(right_index)
+        if left is right:
+            left["anchors"].update(reasons)
+            continue
+        merge_reasons = complete_linkage_reasons(left, right)
+        if merge_reasons is None:
+            continue
+        left["members"].update(right["members"])
+        left["anchors"].update(right["anchors"])
+        left["anchors"].update(merge_reasons)
+        groups.remove(right)
+
+    groups.sort(key=lambda group: min(group["members"]))
+    return [
+        (
+            [records[index]["job"] for index in sorted(group["members"])],
+            sorted(group["anchors"]),
+        )
+        for group in groups
+    ]
 
 
 def _cluster_matching_job_provenance(
     classifications: list[tuple[str, RoleClassification, dict[str, Any] | None]],
 ) -> list[dict[str, Any]]:
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for index, (title, classification, job) in enumerate(classifications):
+    matching_jobs: list[dict[str, Any]] = []
+    for _, classification, job in classifications:
         if job is None or classification.status not in {"strong", "possible"}:
             continue
-        key = _normalise_job_title(title) or _canonical_job_cluster_key(job, index)
-        groups.setdefault(key, []).append(_canonical_job_provenance(job))
+        matching_jobs.append(job)
 
     clusters: list[dict[str, Any]] = []
-    for variants in groups.values():
+    for jobs, identity_anchors in _cluster_jobs(matching_jobs):
+        variants = [_job_provenance(job) for job in jobs]
         representative = min(
             variants,
             key=lambda item: (
+                0 if item.get("lifecycle_managed") is True else 1,
                 REMOTE_ELIGIBILITY_ORDER.get(str(item["remote_eligibility"]), 99),
                 str(item.get("provider") or ""),
                 str(item.get("external_job_id") or ""),
@@ -838,6 +1021,7 @@ def _cluster_matching_job_provenance(
 
         cluster = dict(representative)
         cluster["posting_variant_count"] = len(variants)
+        cluster["identity_anchors"] = identity_anchors
         cluster["remote_eligibility_distribution"] = status_distribution
         cluster["posting_variants"] = variants
         clusters.append(cluster)
@@ -847,16 +1031,12 @@ def _cluster_matching_job_provenance(
 def role_focus_record(
     company: Company,
     *,
-    yc_jobs: list[dict[str, Any]] | None = None,
-    canonical_jobs: list[dict[str, Any]] | None = None,
+    jobs: list[dict[str, Any]] | None = None,
     verified_roles: list[str] | None = None,
 ) -> dict[str, Any]:
     role_inputs: list[tuple[str, str, dict[str, Any] | None]] = []
-    for job in yc_jobs or []:
-        title = str(job.get("title") or "").strip()
-        if title:
-            role_inputs.append((title, _job_context(job), None))
-    for job in canonical_jobs or []:
+    inventory_jobs = [dict(job) for job in jobs or []]
+    for job in inventory_jobs:
         title = str(job.get("title") or "").strip()
         if title:
             role_inputs.append((title, _job_context(job), job))
@@ -866,8 +1046,8 @@ def role_focus_record(
             role_inputs.append((title, title, None))
 
     classifications = [
-        (title, classify_role_text(title, context), canonical_job)
-        for title, context, canonical_job in role_inputs
+        (title, classify_role_text(title, context), inventory_job)
+        for title, context, inventory_job in role_inputs
     ]
     matching_titles = [
         title
@@ -930,42 +1110,72 @@ def role_focus_record(
         key=lambda status: REMOTE_ELIGIBILITY_ORDER.get(status, 99),
         default="no_remote_evidence",
     )
-    canonical_classifications = [
+    inventory_classifications = [
         (title, classification)
         for title, classification, job in classifications
         if job is not None
     ]
-    canonical_role_status = (
-        _best_status(canonical_classifications) if canonical_classifications else "none"
+    inventory_role_status = (
+        _best_status(inventory_classifications) if inventory_classifications else "none"
     )
-    canonical_jobs_all = canonical_jobs or []
-    canonical_active_cluster_count = len(
-        {
-            _canonical_job_cluster_key(job, index)
-            for index, job in enumerate(canonical_jobs_all)
-        }
-    )
-    canonical_raw_active_count = len(canonical_jobs_all)
-    canonical_raw_matching_count = sum(
+    active_cluster_count = len(_cluster_jobs(inventory_jobs))
+    raw_active_count = len(inventory_jobs)
+    raw_matching_count = sum(
         1
         for _, classification, job in classifications
         if job is not None and classification.status in {"strong", "possible"}
     )
-    return {
+    lifecycle_managed_jobs = [
+        job for job in inventory_jobs if job.get("lifecycle_managed") is True
+    ]
+    lifecycle_managed_classifications = [
+        (title, classification, job)
+        for title, classification, job in classifications
+        if job is not None and job.get("lifecycle_managed") is True
+    ]
+    lifecycle_managed_matching_jobs = _cluster_matching_job_provenance(
+        lifecycle_managed_classifications
+    )
+    lifecycle_managed_active_cluster_count = len(
+        _cluster_jobs(lifecycle_managed_jobs)
+    )
+    lifecycle_managed_raw_matching_count = sum(
+        1
+        for _, classification, _ in lifecycle_managed_classifications
+        if classification.status in {"strong", "possible"}
+    )
+    lifecycle_managed_role_status = (
+        _best_status(
+            [
+                (title, classification)
+                for title, classification, _ in lifecycle_managed_classifications
+            ]
+        )
+        if lifecycle_managed_classifications
+        else "none"
+    )
+    lifecycle_managed_remote_counts: dict[str, int] = {}
+    for job in lifecycle_managed_matching_jobs:
+        remote_status = str(job["remote_eligibility"])
+        lifecycle_managed_remote_counts[remote_status] = (
+            lifecycle_managed_remote_counts.get(remote_status, 0) + 1
+        )
+    lifecycle_managed_best_remote = min(
+        lifecycle_managed_remote_counts,
+        key=lambda remote_status: REMOTE_ELIGIBILITY_ORDER.get(remote_status, 99),
+        default="no_remote_evidence",
+    )
+    result = {
         "target_role_lane": target_role_lane,
         "matching_job_titles": _dedupe_preserve_order(matching_titles)[:MAX_MATCHING_JOB_DETAILS],
-        "canonical_active_job_count": canonical_active_cluster_count,
-        "canonical_raw_active_job_count": canonical_raw_active_count,
-        "canonical_duplicate_posting_count": (
-            canonical_raw_active_count - canonical_active_cluster_count
-        ),
-        "canonical_matching_job_count": len(matching_provenance_all),
-        "canonical_raw_matching_job_count": canonical_raw_matching_count,
-        "canonical_duplicate_matching_job_count": (
-            canonical_raw_matching_count - len(matching_provenance_all)
-        ),
-        "canonical_role_match_status": canonical_role_status,
-        "canonical_matching_jobs": matching_provenance_all,
+        "active_job_count": active_cluster_count,
+        "raw_active_job_count": raw_active_count,
+        "duplicate_posting_count": raw_active_count - active_cluster_count,
+        "matching_job_count": len(matching_provenance_all),
+        "raw_matching_job_count": raw_matching_count,
+        "duplicate_matching_job_count": raw_matching_count - len(matching_provenance_all),
+        "job_role_match_status": inventory_role_status,
+        "matching_jobs": matching_provenance_all,
         "matching_job_provenance": matching_provenance_all,
         "best_remote_eligibility": best_remote,
         "pakistan_explicit_matching_job_count": remote_counts.get(
@@ -995,19 +1205,42 @@ def role_focus_record(
         "application_angle": application_angle,
         "proof_points_to_emphasize": proof_points_for_role_status(status),
     }
+    result.update(
+        {
+            "managed_active_job_count": lifecycle_managed_active_cluster_count,
+            "managed_raw_active_job_count": len(lifecycle_managed_jobs),
+            "managed_duplicate_posting_count": (
+                len(lifecycle_managed_jobs) - lifecycle_managed_active_cluster_count
+            ),
+            "managed_matching_job_count": len(lifecycle_managed_matching_jobs),
+            "managed_raw_matching_job_count": lifecycle_managed_raw_matching_count,
+            "managed_duplicate_matching_job_count": (
+                lifecycle_managed_raw_matching_count
+                - len(lifecycle_managed_matching_jobs)
+            ),
+            "managed_role_match_status": lifecycle_managed_role_status,
+            "managed_matching_jobs": lifecycle_managed_matching_jobs,
+            "managed_best_remote_eligibility": lifecycle_managed_best_remote,
+        }
+    )
+    return result
 
 
-def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
+def _job_provenance(job: dict[str, Any]) -> dict[str, Any]:
     def iso(value: Any) -> Any:
         return value.isoformat() if hasattr(value, "isoformat") else value
 
     remote = classify_remote_eligibility(job)
     return {
+        "job_key": job.get("job_key"),
+        "source_kind": job.get("source_kind"),
+        "source_record_id": str(job.get("source_record_id") or ""),
         "title": job.get("title"),
         "provider": job.get("provider"),
         "external_job_id": str(job.get("external_job_id") or ""),
-        "career_source_kind": job.get("career_source_kind"),
-        "career_source_url": job.get("career_source_url"),
+        "company_source_id": job.get("company_source_id"),
+        "source_external_id": job.get("source_external_id"),
+        "source_url": job.get("source_url"),
         "posting_url": job.get("posting_url"),
         "location": job.get("location"),
         "department": job.get("department"),
@@ -1015,6 +1248,9 @@ def _canonical_job_provenance(job: dict[str, Any]) -> dict[str, Any]:
         "remote_reasons": remote.reasons,
         "remote_evidence": remote.evidence,
         "structured_evidence": job.get("structured_evidence"),
+        "status": job.get("status"),
+        "lifecycle_managed": job.get("lifecycle_managed"),
+        "status_confidence": job.get("status_confidence"),
         "source_published_at": iso(job.get("source_published_at")),
         "source_updated_at": iso(job.get("source_updated_at")),
     }
@@ -1179,6 +1415,7 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     regional_title_remote_scope = _title_remote_region_match(
         title_raw, _REGIONAL_UNCONFIRMED_PATTERNS
     )
+    global_title_remote_scope = _title_global_remote_scope_match(title_raw)
 
     global_match = _first_pattern_match(descriptive_evidence, _GLOBAL_REMOTE_CLAIM_PATTERNS)
     role_remote_match = _first_pattern_match(
@@ -1389,6 +1626,13 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             else "",
         )
 
+    if global_title_remote_scope and remote_signal:
+        return _remote_result(
+            "global_explicit",
+            "Job title explicitly scopes the role as worldwide remote",
+            _evidence("title global scope", global_title_remote_scope),
+        )
+
     if global_primary_location or _is_unambiguously_global_remote_location(
         scope_with_remote
     ):
@@ -1509,6 +1753,18 @@ def _title_remote_region_match(
         if match:
             return match
     return None
+
+
+def _title_global_remote_scope_match(title: str) -> str | None:
+    return _first_pattern_match(
+        title,
+        (
+            r"\b(?:global(?:ly)?|worldwide|world wide)"
+            r"[-–—,/|:()\[\]\s]*remote\b(?:\s*[)\]])?",
+            r"\bremote[-–—,/|:()\[\]\s]*"
+            r"(?:global(?:ly)?|worldwide|world wide)\b(?:\s*[)\]])?",
+        ),
+    )
 
 
 _SEMANTIC_REMOTE_TITLE_PATTERNS = (
@@ -1678,9 +1934,9 @@ def _generic_location_restriction_match(text: str) -> str | None:
 
 def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
     matching_titles = list(target.get("matching_job_titles") or [])
-    active_count = int(target.get("canonical_active_job_count") or 0)
-    canonical_matching_count = int(target.get("canonical_matching_job_count") or 0)
-    if not canonical_matching_count:
+    active_count = int(target.get("managed_active_job_count") or 0)
+    managed_matching_count = int(target.get("managed_matching_job_count") or 0)
+    if not managed_matching_count:
         if active_count:
             return -12, ["Has active jobs, but none match the target engineering lanes"]
         role_status = str(target.get("role_match_status") or "weak")
@@ -1691,7 +1947,7 @@ def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
 
     score = 0
     reasons: list[str] = []
-    role_status = str(target.get("canonical_role_match_status") or "weak")
+    role_status = str(target.get("managed_role_match_status") or "weak")
     if role_status == "strong":
         score += 70
         reasons.append("Has a current strong senior software engineering role")
@@ -1701,12 +1957,16 @@ def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
     elif role_status == "exclude":
         score -= 30
 
-    score += min(canonical_matching_count, 10) * 2
+    score += min(managed_matching_count, 10) * 2
     if active_count:
         score += 8
-        reasons.append("Backed by a complete canonical provider snapshot")
+        reasons.append("Backed by a lifecycle-managed complete source snapshot")
 
-    remote_status = str(target.get("best_remote_eligibility") or "no_remote_evidence")
+    remote_status = str(
+        target.get("managed_best_remote_eligibility")
+        or target.get("best_remote_eligibility")
+        or "no_remote_evidence"
+    )
     if remote_status == "pakistan_explicit":
         score += 30
         reasons.append("At least one matching role explicitly includes Pakistan")
@@ -1839,8 +2099,7 @@ def target_record(
     score: CandidateScore,
     *,
     rank: int,
-    yc_jobs: list[dict[str, Any]] | None = None,
-    canonical_jobs: list[dict[str, Any]] | None = None,
+    jobs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     company = score.company
     record = {
@@ -1886,7 +2145,12 @@ def target_record(
         "risks": [],
         "next_action": "",
     }
-    record.update(role_focus_record(company, yc_jobs=yc_jobs, canonical_jobs=canonical_jobs))
+    record.update(
+        role_focus_record(
+            company,
+            jobs=jobs,
+        )
+    )
     apply_current_opportunity_score(record)
     return record
 

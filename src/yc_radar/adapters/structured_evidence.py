@@ -55,6 +55,7 @@ def greenhouse_structured_evidence(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "provider": "greenhouse",
+        "requisition_id": _explicit_requisition_id(payload),
         "workplace": {},
         "primary_location": _labelled_location(payload.get("location")),
         "secondary_locations": [],
@@ -95,6 +96,7 @@ def ashby_structured_evidence(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "provider": "ashby",
+        "requisition_id": _explicit_requisition_id(payload),
         "workplace": workplace,
         "primary_location": primary_location,
         "secondary_locations": secondary_locations,
@@ -254,3 +256,20 @@ def _optional_string(value: Any) -> str | None:
         return None
     result = str(value).strip()
     return result or None
+
+
+def _explicit_requisition_id(payload: dict[str, Any]) -> str | None:
+    for key in (
+        "requisition_id",
+        "requisitionId",
+        "requisitionID",
+        "requisition_number",
+        "requisitionNumber",
+        "req_id",
+        "reqId",
+        "job_code",
+        "jobCode",
+    ):
+        if value := _optional_string(payload.get(key)):
+            return value
+    return None

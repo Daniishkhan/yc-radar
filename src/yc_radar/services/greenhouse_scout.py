@@ -310,7 +310,7 @@ class GreenhouseBoardScout:
     def __enter__(self) -> GreenhouseBoardScout:
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
         self.close()
 
     def _get(
@@ -631,10 +631,16 @@ def resolve_company(
                 website_candidate=website_candidate,
                 reason=f"name matched but domains differ: {stored_domain} vs {candidate_domain}",
             )
+        if candidate_domain and stored_domain:
+            return CompanyResolution(
+                "existing_exact_name",
+                company_id=int(company["id"]),
+                website_candidate=website_candidate,
+            )
         return CompanyResolution(
-            "existing_exact_name",
-            company_id=int(company["id"]),
+            "ambiguous_name",
             website_candidate=website_candidate,
+            reason="exact name match lacks independent domain corroboration",
         )
 
     if website_candidate and candidate_domain:

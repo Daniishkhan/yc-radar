@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .pi-subagents/
+.pi/diagrams/
 .mypy_cache/
 .coverage
 htmlcov/

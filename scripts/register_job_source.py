@@ -36,8 +36,8 @@ def main() -> None:
         discovered_from_url=args.discovered_from_url,
     )
     print(
-        f"company_id={result.company_id} career_source_id={result.career_source_id} "
-        f"provider={result.provider} external_source_id={result.external_source_id} "
+        f"company_id={result.company_id} company_source_id={result.company_source_id} "
+        f"provider={result.provider} external_id={result.external_id} "
         f"created={result.created}"
     )
 

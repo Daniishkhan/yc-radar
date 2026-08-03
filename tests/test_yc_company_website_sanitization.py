@@ -4,11 +4,11 @@ from sqlalchemy import select
 from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.database import (
     companies_table,
+    company_sources_table,
     engine_from_url,
     sanitized_yc_company_website,
     sanitized_yc_company_payloads,
     upsert_yc_companies,
-    yc_company_profiles_table,
 )
 
 
@@ -95,6 +95,14 @@ def test_sanitized_yc_company_payloads_deconflicts_shared_domain_claims() -> Non
 
     assert sanitized[0]["website"] is None
     assert sanitized[1]["website"] == "https://trycardinal.ai/"
+    assert sanitized[0]["_identity_conflict_evidence"] == {
+        "kind": "website_domain_conflict",
+        "claimed_website": "https://trycardinal.ai",
+        "claimed_domain": "trycardinal.ai",
+        "conflicting_incoming_companies": [
+            {"external_id": "2", "name": "Cardinal"}
+        ],
+    }
     assert original[0]["website"] == "https://trycardinal.ai"
 
 
@@ -152,11 +160,11 @@ def test_yc_ingestion_sanitizes_neutral_website_but_preserves_raw_profile_json(
 
     with engine.connect() as connection:
         company = connection.execute(select(companies_table)).mappings().one()
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
+        source = connection.execute(select(company_sources_table)).mappings().one()
 
     assert company["website"] is None
     assert company["primary_domain"] is None
-    assert profile["raw_json"]["website"] == raw_website
+    assert source["metadata"]["raw_payload"]["website"] == raw_website
 
 
 def test_yc_bare_domain_matches_and_updates_the_same_neutral_company(
@@ -182,10 +190,10 @@ def test_yc_bare_domain_matches_and_updates_the_same_neutral_company(
 
     with engine.connect() as connection:
         companies = list(connection.execute(select(companies_table)).mappings())
-        profile = connection.execute(select(yc_company_profiles_table)).mappings().one()
+        source = connection.execute(select(company_sources_table)).mappings().one()
 
     assert len(companies) == 1
-    assert profile["company_id"] == existing.company_id
+    assert source["company_id"] == existing.company_id
     assert companies[0]["website"] == "https://shared.example"
     assert companies[0]["primary_domain"] == "shared.example"
 
@@ -277,10 +285,25 @@ def test_partial_yc_upserts_deconflict_against_persisted_claims(
         companies = {
             row["name"]: row for row in connection.execute(select(companies_table)).mappings()
         }
-    assert companies["Leafpress"]["website"] is None
-    assert companies["Leafpress"]["primary_domain"] is None
-    assert companies["Cardinal"]["website"] == "https://trycardinal.ai"
-    assert companies["Cardinal"]["primary_domain"] == "trycardinal.ai"
+        sources = {
+            row["external_id"]: row
+            for row in connection.execute(select(company_sources_table)).mappings()
+        }
+    assert companies["Leafpress"]["website"] == "https://trycardinal.ai"
+    assert companies["Leafpress"]["primary_domain"] == "trycardinal.ai"
+    assert companies["Cardinal"]["website"] is None
+    assert companies["Cardinal"]["primary_domain"] is None
+    assert sources["2"]["metadata"]["identity_conflict_evidence"] == {
+        "kind": "website_domain_conflict",
+        "claimed_website": "https://trycardinal.ai",
+        "claimed_domain": "trycardinal.ai",
+        "conflicting_companies": [
+            {
+                "company_id": companies["Leafpress"]["id"],
+                "name": "Leafpress",
+            }
+        ],
+    }
 
 
 def test_yc_upsert_does_not_duplicate_mismatched_standalone_domain_owner(
@@ -308,6 +331,50 @@ def test_yc_upsert_does_not_duplicate_mismatched_standalone_domain_owner(
         companies = {
             row["name"]: row for row in connection.execute(select(companies_table)).mappings()
         }
+        source = connection.execute(select(company_sources_table)).mappings().one()
     assert companies["Cardinal"]["primary_domain"] == "trycardinal.ai"
     assert companies["Leafpress"]["website"] is None
     assert companies["Leafpress"]["primary_domain"] is None
+    assert source["metadata"]["identity_conflict_evidence"]["claimed_domain"] == (
+        "trycardinal.ai"
+    )
+
+
+def test_yc_refresh_never_takes_or_clears_another_company_domain(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    upsert_yc_companies(
+        engine,
+        [{"id": 1, "name": "Acme", "slug": "acme", "website": "https://acme.test"}],
+    )
+    owner = CompanyRegistry(engine).register_company(
+        name="Other Company",
+        website="https://other.test",
+    )
+
+    upsert_yc_companies(
+        engine,
+        [{"id": 1, "name": "Acme", "slug": "acme", "website": "https://other.test"}],
+    )
+
+    with engine.connect() as connection:
+        companies = {
+            row["name"]: row for row in connection.execute(select(companies_table)).mappings()
+        }
+        source = connection.execute(
+            select(company_sources_table).where(company_sources_table.c.external_id == "1")
+        ).mappings().one()
+
+    assert companies["Acme"]["website"] == "https://acme.test"
+    assert companies["Acme"]["primary_domain"] == "acme.test"
+    assert companies["Other Company"]["website"] == "https://other.test"
+    assert companies["Other Company"]["primary_domain"] == "other.test"
+    assert source["metadata"]["identity_conflict_evidence"] == {
+        "kind": "website_domain_conflict",
+        "claimed_website": "https://other.test",
+        "claimed_domain": "other.test",
+        "conflicting_companies": [
+            {"company_id": owner.company_id, "name": "Other Company"}
+        ],
+    }

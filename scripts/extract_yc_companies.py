@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export YC's public company directory from the Algolia index used by the site."""
+"""Refresh YC companies and jobs through the unified company/source/job store."""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from yc_radar.core.config import get_settings
+from yc_radar.services.company_registry import sync_yc_job_snapshots
 from yc_radar.services.database import (
     create_schema,
     engine_from_url,
     upsert_yc_companies,
-    upsert_yc_job_postings,
 )
 
 
@@ -219,10 +219,11 @@ def extract_company_job_postings(company: dict[str, Any]) -> list[dict[str, Any]
 
 def extract_all_job_postings(
     companies: list[dict[str, Any]],
-) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+) -> tuple[dict[str, list[dict[str, Any]]], list[str], set[str]]:
     hiring_companies = [company for company in companies if company.get("isHiring")]
     jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
     errors: list[str] = []
+    successful_slugs: set[str] = set()
 
     with ThreadPoolExecutor(max_workers=COMPANY_PAGE_CONCURRENCY) as executor:
         future_to_company = {
@@ -234,7 +235,9 @@ def extract_all_job_postings(
             company = future_to_company[future]
             completed += 1
             try:
-                jobs_by_slug[str(company["slug"])] = future.result()
+                company_slug = str(company["slug"])
+                jobs_by_slug[company_slug] = future.result()
+                successful_slugs.add(company_slug)
             except Exception as exc:
                 errors.append(f"{company.get('slug')}: {exc}")
                 jobs_by_slug[str(company["slug"])] = []
@@ -244,7 +247,7 @@ def extract_all_job_postings(
                     f"Fetched job postings for {completed} / {len(hiring_companies)} hiring companies."
                 )
 
-    return jobs_by_slug, errors
+    return jobs_by_slug, errors, successful_slugs
 
 
 def as_joined(value: Any) -> str:
@@ -308,6 +311,11 @@ def job_csv_row(job: dict[str, Any]) -> dict[str, Any]:
         "created_at": job.get("createdAt", ""),
         "last_active": job.get("lastActive", ""),
     }
+
+
+def company_persistence_payload(company: dict[str, Any]) -> dict[str, Any]:
+    """Keep provider company evidence without duplicating every job in source metadata."""
+    return {key: value for key, value in company.items() if key != "jobPostings"}
 
 
 def text_blob(company: dict[str, Any]) -> str:
@@ -425,7 +433,9 @@ def _clean_csv_value(value: Any) -> Any:
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
     parser = argparse.ArgumentParser(
-        description="Refresh YC companies/jobs into Postgres and lightweight CSV snapshots."
+        description=(
+            "Refresh YC companies/jobs into the unified Postgres inventory and CSV snapshots."
+        )
     )
     parser.add_argument("--snapshot-dir", type=Path, default=settings.snapshots_dir)
     parser.add_argument("--write-raw-json", action="store_true")
@@ -461,7 +471,7 @@ def main() -> None:
             time.sleep(0.15)
 
     companies = sorted(by_object_id.values(), key=lambda company: str(company.get("id", "")))
-    jobs_by_slug, job_errors = extract_all_job_postings(companies)
+    jobs_by_slug, job_errors, successful_job_slugs = extract_all_job_postings(companies)
     for company in companies:
         company["jobPostings"] = jobs_by_slug.get(str(company.get("slug")), [])
         company["prototype_score"] = prototype_score(company)
@@ -474,22 +484,36 @@ def main() -> None:
         if isinstance(job, dict)
     ]
 
-    upsert_yc_companies(engine, companies)
-    upsert_yc_job_postings(engine, job_postings)
+    upsert_yc_companies(
+        engine,
+        [company_persistence_payload(company) for company in companies],
+    )
+    complete_job_slugs = successful_job_slugs | {
+        str(company.get("slug") or "")
+        for company in companies
+        if not company.get("isHiring") and company.get("slug")
+    }
+    sync_yc_job_snapshots(
+        engine,
+        job_postings,
+        complete_company_slugs=complete_job_slugs,
+    )
 
     write_csv(
         args.snapshot_dir / "yc_companies.csv",
         [csv_row(company) for company in companies],
         CSV_FIELDS,
     )
-    write_csv(
-        args.snapshot_dir / "yc_job_postings.csv",
-        [job_csv_row(job) for job in job_postings],
-        JOB_CSV_FIELDS,
-    )
+    if not job_errors:
+        write_csv(
+            args.snapshot_dir / "yc_job_postings.csv",
+            [job_csv_row(job) for job in job_postings],
+            JOB_CSV_FIELDS,
+        )
     if args.write_raw_json:
         write_json(args.raw_output_dir / "yc_companies_raw.json", companies)
-        write_json(args.raw_output_dir / "yc_job_postings_raw.json", job_postings)
+        if not job_errors:
+            write_json(args.raw_output_dir / "yc_job_postings_raw.json", job_postings)
 
     print(f"Fetched {len(companies)} / {nb_hits} companies across {len(batch_counts)} YC batches.")
     print(
@@ -498,8 +522,10 @@ def main() -> None:
     )
     if job_errors:
         print(f"Job posting page errors: {len(job_errors)}")
+        print("Kept the previous complete YC job snapshot; partial results were not exported.")
     print(f"Wrote {args.snapshot_dir / 'yc_companies.csv'}")
-    print(f"Wrote {args.snapshot_dir / 'yc_job_postings.csv'}")
+    if not job_errors:
+        print(f"Wrote {args.snapshot_dir / 'yc_job_postings.csv'}")
     if args.write_raw_json:
         print(f"Wrote raw JSON debug files under {args.raw_output_dir}")
     print(f"Wrote {engine.url.database}")

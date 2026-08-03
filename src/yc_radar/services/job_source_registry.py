@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 from yc_radar.adapters.ashby import AshbyAdapter
 from yc_radar.adapters.base import JobSourceAdapter
 from yc_radar.adapters.greenhouse import GreenhouseAdapter
-from yc_radar.services.database import companies_table, fetch_company_career_page_rows
+from yc_radar.services.database import companies_table
 from yc_radar.services.job_repository import JobRepository
 
 
@@ -26,22 +26,22 @@ class AmbiguousJobSourceProvider(ValueError):
 class DetectedJobSource:
     provider: str
     source_kind: str
-    external_source_id: str
+    external_id: str
     canonical_url: str
     observed_url: str
 
 
 @dataclass(frozen=True)
 class JobSourceRegistrationResult:
-    career_source_id: int
+    company_source_id: int
     company_id: int
     provider: str
-    external_source_id: str
+    external_id: str
     created: bool
 
 
 class JobSourceProviderRegistry:
-    """In-process catalog of independently implemented public job-source adapters."""
+    """Small in-process catalog of public job-source adapters."""
 
     def __init__(self, adapters: Iterable[JobSourceAdapter] = ()) -> None:
         self._adapters: dict[str, JobSourceAdapter] = {}
@@ -71,21 +71,19 @@ class JobSourceProviderRegistry:
 
     def detect(self, url: str, *, provider: str | None = None) -> DetectedJobSource | None:
         adapters = (
-            [self.adapter_for(provider)]
-            if provider is not None
-            else list(self._adapters.values())
+            [self.adapter_for(provider)] if provider is not None else list(self._adapters.values())
         )
         matches: list[DetectedJobSource] = []
         for adapter in adapters:
-            external_source_id = adapter.extract_source_id(url)
-            if external_source_id is None:
+            external_id = adapter.extract_source_id(url)
+            if external_id is None:
                 continue
             matches.append(
                 DetectedJobSource(
                     provider=adapter.provider,
                     source_kind=adapter.source_kind,
-                    external_source_id=external_source_id,
-                    canonical_url=adapter.canonical_source_url(external_source_id),
+                    external_id=external_id,
+                    canonical_url=adapter.canonical_source_url(external_id),
                     observed_url=url,
                 )
             )
@@ -100,7 +98,7 @@ def default_job_source_providers() -> JobSourceProviderRegistry:
 
 
 class JobSourceRegistry:
-    """Persistence service for ATS/feed sources attached directly to neutral companies."""
+    """Attach supported job sources directly to canonical companies."""
 
     def __init__(
         self,
@@ -132,77 +130,30 @@ class JobSourceRegistry:
             )
         if company_exists is None:
             raise ValueError(f"unknown company_id: {company_id}")
-        source, allowed, created = self.repository.register_career_source(
+
+        source, allowed, created = self.repository.register_source(
             company_id=company_id,
             provider=detected.provider,
             source_kind=detected.source_kind,
-            external_source_id=detected.external_source_id,
+            external_id=detected.external_id,
             source_url=detected.canonical_url,
-            discovered_from_url=discovered_from_url or detected.observed_url,
+            sync_mode="complete_snapshot",
             now=now or datetime.now(UTC),
-            raw_json={
+            metadata={
                 "observed_url": detected.observed_url,
-                "registration": "job_source_registry",
+                "discovered_from_url": discovered_from_url or detected.observed_url,
                 "evidence": evidence or {},
             },
         )
         if not allowed:
             raise ValueError(
-                f"{detected.provider} source {detected.external_source_id} already belongs "
+                f"{detected.provider} source {detected.external_id} already belongs "
                 f"to company_id={source['company_id']}"
             )
         return JobSourceRegistrationResult(
-            career_source_id=int(source["id"]),
+            company_source_id=int(source["id"]),
             company_id=company_id,
             provider=detected.provider,
-            external_source_id=detected.external_source_id,
+            external_id=detected.external_id,
             created=created,
         )
-
-    def discover_from_career_pages(self, *, provider: str | None = None) -> dict[str, object]:
-        registered = 0
-        existing = 0
-        skipped = 0
-        conflicts: list[dict[str, object]] = []
-        seen: set[tuple[int, str, str]] = set()
-        for page in fetch_company_career_page_rows(self.engine):
-            company_id = page.get("company_id")
-            observed_url = str(page.get("career_page_url") or "")
-            if company_id is None:
-                skipped += 1
-                continue
-            detected = self.providers.detect(observed_url, provider=provider)
-            if detected is None:
-                skipped += 1
-                continue
-            identity = (int(company_id), detected.provider, detected.external_source_id)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            try:
-                result = self.register_url(
-                    company_id=int(company_id),
-                    source_url=observed_url,
-                    provider=detected.provider,
-                    discovered_from_url=observed_url,
-                )
-            except ValueError as exc:
-                conflicts.append(
-                    {
-                        "company_id": int(company_id),
-                        "provider": detected.provider,
-                        "external_source_id": detected.external_source_id,
-                        "message": str(exc),
-                    }
-                )
-                continue
-            if result.created:
-                registered += 1
-            else:
-                existing += 1
-        return {
-            "registered": registered,
-            "existing": existing,
-            "skipped": skipped,
-            "conflicts": conflicts,
-        }

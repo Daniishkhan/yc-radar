@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export public canonical job opportunities for local inspection."""
+"""Export the source-neutral public job inventory for local inspection."""
 
 from __future__ import annotations
 
@@ -21,30 +21,43 @@ CSV_FIELDS = [
     "title",
     "role_match_status",
     "role_match_reasons",
+    "job_key",
+    "source_kind",
+    "origin_kind",
+    "source_record_id",
     "provider",
     "external_job_id",
-    "career_source_kind",
-    "career_source_url",
+    "company_source_id",
+    "source_external_id",
+    "source_url",
+    "source_enabled",
+    "source_sync_status",
+    "source_last_synced_at",
     "posting_url",
     "apply_url",
     "location",
     "department",
     "employment_type",
     "status",
+    "lifecycle_managed",
+    "status_confidence",
     "source_published_at",
     "source_updated_at",
+    "observed_at",
     "last_changed_at",
 ]
 
 
 def parse_args() -> argparse.Namespace:
     settings = get_settings()
-    parser = argparse.ArgumentParser(description="Export canonical public job opportunities.")
+    parser = argparse.ArgumentParser(description="Export source-neutral public job opportunities.")
     parser.add_argument("--date", default=date.today().isoformat())
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--include-closed", action="store_true")
     parser.add_argument("--changed-since", help="ISO-8601 timestamp for last_changed_at filtering.")
     parser.add_argument("--provider")
+    parser.add_argument("--source-kind")
+    parser.add_argument("--origin-kind")
     parser.add_argument("--company-slug")
     parser.add_argument("--limit", type=int, default=100)
     parser.set_defaults(default_output_root=settings.runs_dir)
@@ -58,11 +71,13 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     engine = engine_from_url()
     create_schema(engine)
-    rows = JobRepository(engine).active_job_rows(
+    rows = JobRepository(engine).list_jobs(
         include_closed=args.include_closed,
         changed_since=changed_since,
         provider=args.provider,
         company_slug=args.company_slug,
+        source_kind=args.source_kind,
+        origin_kind=args.origin_kind,
         limit=args.limit,
     )
     payload_rows = [opportunity_row(row) for row in rows]

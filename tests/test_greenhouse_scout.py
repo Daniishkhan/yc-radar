@@ -87,14 +87,22 @@ def test_resolution_is_fail_closed_on_name_domain_conflict() -> None:
     assert resolution.company_id is None
 
 
-def test_resolution_allows_unique_exact_name_or_new_custom_domain() -> None:
-    existing = GreenhouseBoardEvidence(
+def test_resolution_requires_domain_corroboration_for_exact_name_match() -> None:
+    name_only = GreenhouseBoardEvidence(
         board_token="acme",
         verification_status="verified",
         http_status=200,
         company_name="Acme",
         job_count=1,
         external_job_origins=(),
+    )
+    corroborated = GreenhouseBoardEvidence(
+        board_token="acme",
+        verification_status="verified",
+        http_status=200,
+        company_name="Acme",
+        job_count=1,
+        external_job_origins=("https://careers.acme.com",),
     )
     new = GreenhouseBoardEvidence(
         board_token="newco",
@@ -105,14 +113,20 @@ def test_resolution_allows_unique_exact_name_or_new_custom_domain() -> None:
         external_job_origins=("https://careers.newco.dev",),
     )
 
-    existing_resolution = resolve_company(
-        existing,
+    name_only_resolution = resolve_company(
+        name_only,
+        companies=[{"id": 7, "name": "Acme", "primary_domain": "acme.com"}],
+    )
+    corroborated_resolution = resolve_company(
+        corroborated,
         companies=[{"id": 7, "name": "Acme", "primary_domain": "acme.com"}],
     )
     new_resolution = resolve_company(new, companies=[])
 
-    assert existing_resolution.status == "existing_exact_name"
-    assert existing_resolution.company_id == 7
+    assert name_only_resolution.status == "ambiguous_name"
+    assert name_only_resolution.company_id is None
+    assert corroborated_resolution.status == "existing_exact_name"
+    assert corroborated_resolution.company_id == 7
     assert new_resolution.status == "new_company_domain_candidate"
     assert new_resolution.website_candidate == "https://newco.dev"
 

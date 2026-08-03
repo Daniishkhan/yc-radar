@@ -2,48 +2,36 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
     Column,
-    Computed,
     DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,
     MetaData,
-    String,
     Table,
     Text,
     UniqueConstraint,
     create_engine,
-    delete,
-    func,
-    cast,
-    literal,
-    inspect,
     select,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, insert as pg_insert
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 from sqlalchemy.engine import Engine, make_url
 
 from yc_radar.core.config import get_settings
-from yc_radar.services.url_quality import canonical_url_key
+
 
 metadata = MetaData()
-BATCH_SIZE = 100
-EMBEDDING_DIMENSIONS = 1536
-URL_INVENTORY_ADVISORY_LOCK = "yc_radar_url_cleanup_v1"
+INGEST_SCHEMA = "ingest"
+
 _DOMAIN_PATTERN = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
@@ -81,492 +69,107 @@ _SHARED_ROOT_WEBSITE_BRANDS = {
     "ycombinator.com": "y combinator",
 }
 
+
 companies_table = Table(
     "companies",
     metadata,
-    Column("id", Integer, primary_key=True),
-    Column("name", String, nullable=False),
-    Column("normalized_name", String, nullable=False),
-    Column("slug", String, nullable=False),
-    Column("website", String),
-    Column("primary_domain", String),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-)
-
-yc_company_profiles_table = Table(
-    "yc_company_profiles",
-    metadata,
-    Column("company_id", Integer, ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True),
-    Column("yc_company_id", Integer, nullable=False),
-    Column("yc_url", String, nullable=False),
-    Column("one_liner", Text),
-    Column("batch", String),
-    Column("status", String),
-    Column("stage", String),
-    Column("team_size", Integer),
-    Column("is_hiring", Boolean, nullable=False, default=False),
-    Column("all_locations", Text),
-    Column("regions", JSONB, nullable=False, default=list),
-    Column("industry", String),
-    Column("subindustry", String),
-    Column("industries", JSONB, nullable=False, default=list),
-    Column("tags", JSONB, nullable=False, default=list),
-    Column("prototype_score", Integer),
-    Column("prototype_angle", Text),
-    Column("raw_json", JSONB, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("yc_company_id", name="uq_yc_company_profiles_yc_company_id"),
-)
-
-yc_job_postings_table = Table(
-    "yc_job_postings",
-    metadata,
-    Column("id", Integer, primary_key=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column("company_yc_url", String, nullable=False),
-    Column("title", String, nullable=False),
-    Column("url", String, nullable=False),
-    Column("absolute_url", String, nullable=False),
-    Column("apply_url", Text),
-    Column("location", Text),
-    Column("type", String),
-    Column("role", String),
-    Column("role_specific_type", String),
-    Column("pretty_role", String),
-    Column("salary_range", String),
-    Column("equity_range", String),
-    Column("min_experience", String),
-    Column("min_school_year", String),
-    Column("visa", String),
-    Column("skills", JSONB, nullable=False, default=list),
-    Column("is_incomplete", Boolean, nullable=False, default=False),
-    Column("created_at_text", String),
-    Column("last_active_text", String),
-    Column("raw_json", JSONB, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-)
-
-career_page_discovery_events_table = Table(
-    "career_page_discovery_events",
-    metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column("website", String),
-    Column("url", Text, nullable=False),
-    Column("normalized_url", Text, nullable=False),
-    Column("page_type", String, nullable=False),
-    Column("discovery_source", String, nullable=False),
-    Column("confidence", Float, nullable=False),
-    Column("http_status", Integer),
-    Column("evidence", Text),
-    Column("checked_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
+    Column("name", Text, nullable=False),
+    Column("normalized_name", Text, nullable=False),
+    Column("slug", Text, nullable=False),
+    Column("website", Text),
+    Column("primary_domain", Text),
+    Column("identity_state", Text, nullable=False, default="verified", server_default="verified"),
+    Column("metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-)
-
-company_career_pages_table = Table(
-    "company_career_pages",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column("website", String),
-    Column("career_page_url", Text, nullable=False),
-    Column("normalized_url", Text, nullable=False),
-    Column("page_type", String, nullable=False),
-    Column("discovery_source", String, nullable=False),
-    Column("confidence", Float, nullable=False),
-    Column("http_status", Integer),
-    Column("evidence", Text),
-    Column("is_primary", Boolean, nullable=False, default=False),
-    Column("observed_source_count", Integer, nullable=False, default=1),
-    Column("checked_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("company_slug", "normalized_url", name="uq_company_career_page_url"),
-)
-
-discovered_urls_table = Table(
-    "discovered_urls",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column("website", String),
-    Column("url", Text, nullable=False),
-    Column("normalized_url", Text, nullable=False),
-    Column("url_key", String, nullable=False),
-    Column("url_kind", String, nullable=False, index=True),
-    Column("discovery_sources", JSONB, nullable=False, default=list),
-    Column("evidence_samples", JSONB, nullable=False, default=list),
-    Column("source_event_count", Integer, nullable=False, default=1),
-    Column("confidence", Float, nullable=False, default=0.0),
-    Column("fetch_priority", Float, nullable=False, default=0.0),
-    Column("http_status", Integer),
-    Column("is_primary", Boolean, nullable=False, default=False),
-    Column("is_active", Boolean, nullable=False, default=True),
-    Column("first_seen_at", DateTime(timezone=True), nullable=False),
-    Column("last_seen_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("company_slug", "url_key", name="uq_discovered_url_company_key"),
-)
-
-career_page_discovery_statuses_table = Table(
-    "career_page_discovery_statuses",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False),
-    Column("company_name", String, nullable=False),
-    Column("website", String),
-    Column("status", String, nullable=False, index=True),
-    Column("discovery_event_count", Integer, nullable=False, default=0),
-    Column("career_page_count", Integer, nullable=False, default=0),
-    Column("error", Text),
-    Column("checked_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-)
-
-source_documents_table = Table(
-    "source_documents",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("discovered_url_id", BigInteger, ForeignKey("discovered_urls.id", ondelete="SET NULL")),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column("source_type", String, nullable=False, index=True),
-    Column("source_key", String, nullable=False),
-    Column("url", Text),
-    Column("normalized_url", Text),
-    Column("title", Text),
-    Column("raw_text", Text),
-    Column("clean_text", Text),
-    Column("content_hash", String, nullable=False, index=True),
-    Column("http_status", Integer),
-    Column("fetched_at", DateTime(timezone=True)),
-    Column("observed_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column(
-        "search_vector",
-        TSVECTOR,
-        Computed(
-            "to_tsvector('english', coalesce(title, '') || ' ' || coalesce(clean_text, ''))",
-            persisted=True,
-        ),
+    CheckConstraint(
+        "identity_state IN ('verified', 'provisional')",
+        name="ck_companies_identity_state",
     ),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("source_type", "source_key", name="uq_source_document_source_key"),
-)
-
-page_classifications_table = Table(
-    "page_classifications",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("source_document_id", BigInteger, ForeignKey("source_documents.id", ondelete="CASCADE")),
-    Column("discovered_url_id", BigInteger, ForeignKey("discovered_urls.id", ondelete="SET NULL")),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column("url", Text, nullable=False),
-    Column("normalized_url", Text, nullable=False),
-    Column("page_kind", String, nullable=False, index=True),
-    Column("confidence", Float, nullable=False, default=0.0),
-    Column("parser_name", String, nullable=False),
-    Column("parser_version", String, nullable=False),
-    Column("http_status", Integer),
-    Column("job_title", Text),
-    Column("role_titles", JSONB, nullable=False, default=list),
-    Column("job_count", Integer, nullable=False, default=0),
-    Column("evidence", JSONB, nullable=False, default=dict),
-    Column("classified_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint(
-        "source_document_id",
-        "parser_name",
-        name="uq_page_classification_document_parser",
-    ),
-)
-
-external_job_postings_table = Table(
-    "external_job_postings",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("company_name", String, nullable=False),
-    Column(
-        "source_document_id", BigInteger, ForeignKey("source_documents.id", ondelete="SET NULL")
-    ),
-    Column("source", String, nullable=False, index=True),
-    Column("source_job_id", String),
-    Column("posting_url", Text, nullable=False),
-    Column("normalized_url", Text, nullable=False),
-    Column("apply_url", Text),
-    Column("title", Text, nullable=False),
-    Column("description_text", Text),
-    Column("location", Text),
-    Column("employment_type", String),
-    Column("department", String),
-    Column("seniority", String),
-    Column("salary_range", Text),
-    Column("equity_range", Text),
-    Column("visa", Text),
-    Column("remote_policy", Text),
-    Column("status", String, nullable=False, default="active"),
-    Column("role_fit", String, nullable=False, default="unknown"),
-    Column("extraction_confidence", Float, nullable=False, default=0.0),
-    Column("observed_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("source", "normalized_url", name="uq_external_job_source_url"),
-)
-
-job_extraction_runs_table = Table(
-    "job_extraction_runs",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("source_document_id", BigInteger, ForeignKey("source_documents.id", ondelete="CASCADE")),
-    Column("parser_name", String, nullable=False),
-    Column("model", String),
-    Column("prompt_version", String),
-    Column("status", String, nullable=False),
-    Column("extracted_jobs_count", Integer, nullable=False, default=0),
-    Column("error", Text),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("started_at", DateTime(timezone=True), nullable=False),
-    Column("completed_at", DateTime(timezone=True)),
-)
-
-document_chunks_table = Table(
-    "document_chunks",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("source_document_id", BigInteger, ForeignKey("source_documents.id", ondelete="CASCADE")),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("source_type", String, nullable=False, index=True),
-    Column("chunk_index", Integer, nullable=False),
-    Column("chunk_text", Text, nullable=False),
-    Column("content_hash", String, nullable=False, index=True),
-    Column("token_count", Integer),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column(
-        "search_vector",
-        TSVECTOR,
-        Computed(
-            "to_tsvector('english', coalesce(chunk_text, ''))",
-            persisted=True,
-        ),
-    ),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint(
-        "source_document_id",
-        "chunk_index",
-        name="uq_document_chunk_source_index",
-    ),
-)
-
-document_embeddings_table = Table(
-    "document_embeddings",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("chunk_id", BigInteger, ForeignKey("document_chunks.id", ondelete="CASCADE")),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("embedding_model", String, nullable=False, index=True),
-    Column("embedding_dimensions", Integer, nullable=False, default=EMBEDDING_DIMENSIONS),
-    Column("embedding", Vector(EMBEDDING_DIMENSIONS), nullable=False),
-    Column("embedded_at", DateTime(timezone=True), nullable=False),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint(
-        "chunk_id",
-        "embedding_model",
-        "embedding_dimensions",
-        name="uq_document_embedding_chunk_model",
-    ),
-)
-
-job_role_signals_table = Table(
-    "job_role_signals",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, index=True),
-    Column("company_slug", String, nullable=False, index=True),
-    Column("yc_job_id", Integer, ForeignKey("yc_job_postings.id", ondelete="CASCADE")),
-    Column(
-        "external_job_id", BigInteger, ForeignKey("external_job_postings.id", ondelete="CASCADE")
-    ),
-    Column("signal_type", String, nullable=False, index=True),
-    Column("signal_value", String, nullable=False, index=True),
-    Column("confidence", Float, nullable=False, default=0.0),
-    Column("evidence", Text),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("slug", name="uq_companies_slug"),
 )
 
 company_sources_table = Table(
     "company_sources",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
-    Column("provider", String, nullable=False, index=True),
-    Column("external_company_id", String, nullable=False),
+    Column(
+        "company_id",
+        BigInteger,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("provider", Text, nullable=False),
+    Column("source_kind", Text, nullable=False),
+    Column("external_id", Text, nullable=False),
     Column("source_url", Text),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("first_seen_at", DateTime(timezone=True), nullable=False),
-    Column("last_seen_at", DateTime(timezone=True), nullable=False),
+    Column("sync_mode", Text, nullable=False),
+    Column("status", Text, nullable=False, default="active"),
+    Column("metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("provider", "external_company_id", name="uq_company_source_provider_external"),
+    CheckConstraint(
+        "sync_mode IN ('none', 'complete_snapshot', 'observation')",
+        name="ck_company_sources_sync_mode",
+    ),
+    CheckConstraint(
+        "status IN ('active', 'disabled')",
+        name="ck_company_sources_status",
+    ),
+    UniqueConstraint(
+        "provider",
+        "external_id",
+        name="uq_company_sources_provider_external_id",
+    ),
 )
 
-career_sources_table = Table(
-    "career_sources",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
-    Column("provider", String, nullable=False, index=True),
-    Column("source_kind", String, nullable=False),
-    Column("external_source_id", String, nullable=False),
-    Column("source_url", Text, nullable=False),
-    Column("discovered_from_url", Text),
-    Column("status", String, nullable=False, default="active", index=True),
-    Column("last_synced_at", DateTime(timezone=True)),
-    Column("last_sync_status", String),
-    Column("raw_json", JSONB, nullable=False, default=dict),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    CheckConstraint("status IN ('active', 'disabled')", name="ck_career_sources_status"),
-    UniqueConstraint("provider", "external_source_id", name="uq_career_source_provider_external"),
-)
-
-source_sync_runs_table = Table(
-    "source_sync_runs",
+sync_runs_table = Table(
+    "sync_runs",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column(
-        "career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True
+        "company_source_id",
+        BigInteger,
+        ForeignKey("company_sources.id", ondelete="CASCADE"),
+        nullable=False,
     ),
-    Column("run_key", String, nullable=False),
-    Column("provider", String, nullable=False),
-    Column("adapter_version", String, nullable=False),
-    Column("status", String, nullable=False),
-    Column("is_complete_scan", Boolean, nullable=False),
-    Column("http_status", Integer),
-    Column("jobs_fetched", Integer, nullable=False, default=0),
-    Column("jobs_added", Integer, nullable=False, default=0),
-    Column("jobs_updated", Integer, nullable=False, default=0),
-    Column("jobs_unchanged", Integer, nullable=False, default=0),
-    Column("jobs_missed", Integer, nullable=False, default=0),
-    Column("jobs_closed", Integer, nullable=False, default=0),
-    Column("jobs_reactivated", Integer, nullable=False, default=0),
-    Column("errors_count", Integer, nullable=False, default=0),
-    Column("errors", JSONB, nullable=False, default=list),
-    Column("request_metadata", JSONB, nullable=False, default=dict),
+    Column("run_key", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("is_complete", Boolean, nullable=False),
+    Column("stats", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column("details", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
     CheckConstraint(
-        "status IN ('running', 'completed', 'partial', 'failed')", name="ck_source_sync_runs_status"
+        "status IN ('running', 'completed', 'partial', 'failed')",
+        name="ck_sync_runs_status",
     ),
-    CheckConstraint("jobs_fetched >= 0", name="ck_source_sync_runs_jobs_fetched"),
-    UniqueConstraint("career_source_id", "run_key", name="uq_source_sync_run_key"),
+    UniqueConstraint(
+        "company_source_id",
+        "run_key",
+        name="uq_sync_runs_source_run_key",
+    ),
 )
 
-job_postings_table = Table(
-    "job_postings",
+jobs_table = Table(
+    "jobs",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column(
-        "career_source_id", BigInteger, ForeignKey("career_sources.id"), nullable=False, index=True
+        "company_source_id",
+        BigInteger,
+        ForeignKey("company_sources.id", ondelete="CASCADE"),
+        nullable=False,
     ),
-    Column("company_id", Integer, ForeignKey("companies.id"), nullable=False, index=True),
-    Column("provider", String, nullable=False),
-    Column("external_job_id", String, nullable=False),
+    Column("external_job_id", Text, nullable=False),
     Column("title", Text, nullable=False),
     Column("posting_url", Text),
     Column("apply_url", Text),
-    Column("location", Text),
-    Column("department", Text),
-    Column("employment_type", Text),
-    Column(
-        "structured_evidence",
-        JSONB,
-        nullable=False,
-        default=dict,
-        server_default=text("'{}'::jsonb"),
-    ),
-    Column("status", String, nullable=False, default="active"),
-    Column("consecutive_complete_misses", Integer, nullable=False, default=0),
-    Column("content_hash", String, nullable=False, index=True),
-    Column(
-        "current_version_id",
-        BigInteger,
-        ForeignKey(
-            "job_posting_versions.id", use_alter=True, name="fk_job_postings_current_version"
-        ),
-    ),
-    Column("source_published_at", DateTime(timezone=True)),
-    Column("source_updated_at", DateTime(timezone=True)),
-    Column("first_seen_at", DateTime(timezone=True), nullable=False),
-    Column("last_seen_at", DateTime(timezone=True), nullable=False),
-    Column("last_changed_at", DateTime(timezone=True), nullable=False, index=True),
-    Column("closed_at", DateTime(timezone=True)),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-    CheckConstraint("status IN ('active', 'closed')", name="ck_job_postings_status"),
-    CheckConstraint("consecutive_complete_misses >= 0", name="ck_job_postings_misses"),
-    UniqueConstraint(
-        "provider", "career_source_id", "external_job_id", name="uq_job_posting_identity"
-    ),
-)
-
-job_posting_versions_table = Table(
-    "job_posting_versions",
-    metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("job_posting_id", BigInteger, ForeignKey("job_postings.id"), nullable=False, index=True),
-    Column(
-        "source_sync_run_id",
-        BigInteger,
-        ForeignKey("source_sync_runs.id"),
-        nullable=False,
-        index=True,
-    ),
-    Column("content_hash", String, nullable=False, index=True),
-    Column("title", Text, nullable=False),
-    Column("description_html", Text),
     Column("description_text", Text),
     Column("location", Text),
     Column("department", Text),
     Column("employment_type", Text),
-    Column("posting_url", Text),
-    Column("apply_url", Text),
-    Column("source_published_at", DateTime(timezone=True)),
-    Column("source_updated_at", DateTime(timezone=True)),
     Column(
         "structured_evidence",
         JSONB,
@@ -574,72 +177,530 @@ job_posting_versions_table = Table(
         default=dict,
         server_default=text("'{}'::jsonb"),
     ),
-    Column("raw_payload", JSONB, nullable=False),
-    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "raw_payload",
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column("status", Text, nullable=False, default="active"),
+    Column("consecutive_complete_misses", Integer, nullable=False, default=0, server_default="0"),
+    Column("content_hash", Text, nullable=False),
+    Column("source_published_at", DateTime(timezone=True)),
+    Column("source_updated_at", DateTime(timezone=True)),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_changed_at", DateTime(timezone=True), nullable=False),
+    Column("closed_at", DateTime(timezone=True)),
+    Column("last_seen_run_id", BigInteger, ForeignKey("sync_runs.id", ondelete="SET NULL")),
     Column("created_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("job_posting_id", "source_sync_run_id", name="uq_job_posting_version_run"),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("status IN ('active', 'closed')", name="ck_jobs_status"),
+    CheckConstraint(
+        "consecutive_complete_misses >= 0",
+        name="ck_jobs_nonnegative_misses",
+    ),
+    UniqueConstraint(
+        "company_source_id",
+        "external_job_id",
+        name="uq_jobs_source_external_job_id",
+    ),
 )
 
-job_posting_observations_table = Table(
-    "job_posting_observations",
+ingest_runs_table = Table(
+    "runs",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("job_posting_id", BigInteger, ForeignKey("job_postings.id"), nullable=False, index=True),
-    Column(
-        "source_sync_run_id",
-        BigInteger,
-        ForeignKey("source_sync_runs.id"),
-        nullable=False,
-        index=True,
-    ),
-    Column("observation_kind", String, nullable=False),
-    Column("status_before", String, nullable=False),
-    Column("status_after", String, nullable=False),
-    Column("content_hash", String),
-    Column("job_posting_version_id", BigInteger, ForeignKey("job_posting_versions.id")),
-    Column("observed_at", DateTime(timezone=True), nullable=False),
-    Column("evidence", JSONB, nullable=False, default=dict),
-    CheckConstraint("observation_kind IN ('seen', 'missed')", name="ck_job_observation_kind"),
+    Column("run_key", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("status", Text, nullable=False, default="running", server_default=text("'running'")),
+    Column("parser_version", Text, nullable=False),
+    Column("normalizer_version", Text, nullable=False),
+    Column("input_uri", Text),
+    Column("input_sha256", Text),
+    Column("cursor", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column("stats", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
     CheckConstraint(
-        "status_before IN ('active', 'closed')", name="ck_job_observation_status_before"
+        "status IN ('running', 'completed', 'partial', 'failed')",
+        name="ck_ingest_runs_status",
     ),
-    CheckConstraint("status_after IN ('active', 'closed')", name="ck_job_observation_status_after"),
-    UniqueConstraint("source_sync_run_id", "job_posting_id", name="uq_job_observation_run_job"),
+    CheckConstraint(
+        "char_length(run_key) BETWEEN 1 AND 512",
+        name="ck_ingest_runs_run_key_length",
+    ),
+    CheckConstraint(
+        "char_length(source) BETWEEN 1 AND 128",
+        name="ck_ingest_runs_source_length",
+    ),
+    CheckConstraint(
+        "char_length(parser_version) BETWEEN 1 AND 128",
+        name="ck_ingest_runs_parser_version_length",
+    ),
+    CheckConstraint(
+        "char_length(normalizer_version) BETWEEN 1 AND 128",
+        name="ck_ingest_runs_normalizer_version_length",
+    ),
+    CheckConstraint(
+        "input_uri IS NULL OR char_length(input_uri) BETWEEN 1 AND 8192",
+        name="ck_ingest_runs_input_uri_length",
+    ),
+    CheckConstraint(
+        "input_sha256 IS NULL OR input_sha256 ~ '^[0-9a-f]{64}$'",
+        name="ck_ingest_runs_input_sha256",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(cursor) = 'object' AND pg_column_size(cursor) <= 262144",
+        name="ck_ingest_runs_cursor",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(stats) = 'object' AND pg_column_size(stats) <= 262144",
+        name="ck_ingest_runs_stats",
+    ),
+    CheckConstraint(
+        "(status = 'running' AND completed_at IS NULL) OR "
+        "(status <> 'running' AND completed_at IS NOT NULL)",
+        name="ck_ingest_runs_completion",
+    ),
+    UniqueConstraint("source", "run_key", name="uq_ingest_runs_source_run_key"),
+    schema=INGEST_SCHEMA,
 )
 
-Index("ix_companies_slug", companies_table.c.slug, unique=True)
+ingest_raw_observations_table = Table(
+    "raw_observations",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "run_id",
+        BigInteger,
+        ForeignKey(
+            "ingest.runs.id",
+            name="fk_ingest_raw_observations_run_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column(
+        "url_work_item_id",
+        BigInteger,
+        ForeignKey(
+            "ingest.url_work_items.id",
+            name="fk_ingest_raw_observations_url_work_item_id",
+            ondelete="SET NULL",
+        ),
+    ),
+    Column("observation_key", Text, nullable=False),
+    Column("observed_url", Text),
+    Column("payload", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "char_length(observation_key) BETWEEN 1 AND 512",
+        name="ck_ingest_raw_observations_key_length",
+    ),
+    CheckConstraint(
+        "observed_url IS NULL OR char_length(observed_url) BETWEEN 1 AND 8192",
+        name="ck_ingest_raw_observations_url_length",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(payload) = 'object' AND pg_column_size(payload) <= 1048576",
+        name="ck_ingest_raw_observations_payload",
+    ),
+    UniqueConstraint(
+        "run_id",
+        "observation_key",
+        name="uq_ingest_raw_observations_run_key",
+    ),
+    schema=INGEST_SCHEMA,
+)
+
+ingest_url_work_items_table = Table(
+    "url_work_items",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "run_id",
+        BigInteger,
+        ForeignKey(
+            "ingest.runs.id",
+            name="fk_ingest_url_work_items_run_id",
+            ondelete="SET NULL",
+        ),
+    ),
+    Column("normalized_url", Text, nullable=False),
+    Column("host", Text, nullable=False),
+    Column("stage", Text, nullable=False, default="fetch", server_default=text("'fetch'")),
+    Column("state", Text, nullable=False, default="ready", server_default=text("'ready'")),
+    Column("priority", Integer, nullable=False, default=0, server_default="0"),
+    Column("attempt_count", Integer, nullable=False, default=0, server_default="0"),
+    Column("max_attempts", Integer, nullable=False, default=5, server_default="5"),
+    Column("available_at", DateTime(timezone=True), nullable=False),
+    Column("lease_owner", Text),
+    Column("lease_token", Text),
+    Column("lease_expires_at", DateTime(timezone=True)),
+    Column("artifact_uri", Text),
+    Column("http_status", Integer),
+    Column("content_type", Text),
+    Column("content_hash", Text),
+    Column("result", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column(
+        "last_error",
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column("parser_version", Text, nullable=False),
+    Column("normalizer_version", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "stage IN ('fetch', 'parse', 'enrich', 'promote', 'done')",
+        name="ck_ingest_url_work_items_stage",
+    ),
+    CheckConstraint(
+        "state IN "
+        "('ready', 'leased', 'retry', 'verified', 'promoted', 'quarantined', 'dead')",
+        name="ck_ingest_url_work_items_state",
+    ),
+    CheckConstraint(
+        "priority BETWEEN -1000000 AND 1000000",
+        name="ck_ingest_url_work_items_priority",
+    ),
+    CheckConstraint(
+        "attempt_count >= 0 AND max_attempts BETWEEN 1 AND 100 "
+        "AND attempt_count <= max_attempts",
+        name="ck_ingest_url_work_items_attempts",
+    ),
+    CheckConstraint(
+        "(state = 'leased' AND lease_owner IS NOT NULL AND lease_token IS NOT NULL "
+        "AND lease_expires_at IS NOT NULL) OR "
+        "(state <> 'leased' AND lease_owner IS NULL AND lease_token IS NULL "
+        "AND lease_expires_at IS NULL)",
+        name="ck_ingest_url_work_items_lease",
+    ),
+    CheckConstraint(
+        "char_length(normalized_url) BETWEEN 1 AND 2048",
+        name="ck_ingest_url_work_items_url_length",
+    ),
+    CheckConstraint(
+        "char_length(host) BETWEEN 1 AND 253",
+        name="ck_ingest_url_work_items_host_length",
+    ),
+    CheckConstraint(
+        "lease_owner IS NULL OR char_length(lease_owner) BETWEEN 1 AND 256",
+        name="ck_ingest_url_work_items_lease_owner_length",
+    ),
+    CheckConstraint(
+        "lease_token IS NULL OR char_length(lease_token) BETWEEN 1 AND 512",
+        name="ck_ingest_url_work_items_lease_token_length",
+    ),
+    CheckConstraint(
+        "artifact_uri IS NULL OR char_length(artifact_uri) BETWEEN 1 AND 8192",
+        name="ck_ingest_url_work_items_artifact_uri_length",
+    ),
+    CheckConstraint(
+        "http_status IS NULL OR http_status BETWEEN 100 AND 599",
+        name="ck_ingest_url_work_items_http_status",
+    ),
+    CheckConstraint(
+        "content_type IS NULL OR char_length(content_type) BETWEEN 1 AND 255",
+        name="ck_ingest_url_work_items_content_type_length",
+    ),
+    CheckConstraint(
+        "content_hash IS NULL OR char_length(content_hash) BETWEEN 1 AND 256",
+        name="ck_ingest_url_work_items_content_hash_length",
+    ),
+    CheckConstraint(
+        "char_length(parser_version) BETWEEN 1 AND 128",
+        name="ck_ingest_url_work_items_parser_version_length",
+    ),
+    CheckConstraint(
+        "char_length(normalizer_version) BETWEEN 1 AND 128",
+        name="ck_ingest_url_work_items_normalizer_version_length",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(result) = 'object' AND pg_column_size(result) <= 262144",
+        name="ck_ingest_url_work_items_result",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(last_error) = 'object' AND pg_column_size(last_error) <= 262144",
+        name="ck_ingest_url_work_items_last_error",
+    ),
+    UniqueConstraint(
+        "normalized_url",
+        "parser_version",
+        "normalizer_version",
+        name="uq_ingest_url_work_items_url_versions",
+    ),
+    schema=INGEST_SCHEMA,
+)
+
+ingest_job_candidates_table = Table(
+    "job_candidates",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "run_id",
+        BigInteger,
+        ForeignKey(
+            "ingest.runs.id",
+            name="fk_ingest_job_candidates_run_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    ),
+    Column(
+        "raw_observation_id",
+        BigInteger,
+        ForeignKey(
+            "ingest.raw_observations.id",
+            name="fk_ingest_job_candidates_raw_observation_id",
+        ),
+        nullable=False,
+    ),
+    Column(
+        "work_item_id",
+        BigInteger,
+        ForeignKey(
+            "ingest.url_work_items.id",
+            name="fk_ingest_job_candidates_work_item_id",
+            ondelete="SET NULL",
+        ),
+    ),
+    Column("candidate_key", Text, nullable=False),
+    Column(
+        "company_source_id",
+        BigInteger,
+        ForeignKey(
+            "company_sources.id",
+            name="fk_ingest_job_candidates_company_source_id",
+            ondelete="RESTRICT",
+        ),
+    ),
+    Column("provider", Text),
+    Column("external_source_id", Text),
+    Column("external_job_id", Text),
+    Column("snapshot_complete", Boolean, nullable=False, default=False, server_default="false"),
+    Column("title", Text),
+    Column("posting_url", Text),
+    Column("apply_url", Text),
+    Column("description_text", Text),
+    Column("location", Text),
+    Column("department", Text),
+    Column("employment_type", Text),
+    Column("content_hash", Text),
+    Column("source_published_at", DateTime(timezone=True)),
+    Column("source_updated_at", DateTime(timezone=True)),
+    Column(
+        "field_provenance",
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column(
+        "quality_flags",
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    ),
+    Column("payload", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column(
+        "status",
+        Text,
+        nullable=False,
+        default="normalized",
+        server_default=text("'normalized'"),
+    ),
+    Column("parser_version", Text, nullable=False),
+    Column("normalizer_version", Text, nullable=False),
+    Column("error", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")),
+    Column(
+        "promoted_job_id",
+        BigInteger,
+        ForeignKey(
+            "jobs.id",
+            name="fk_ingest_job_candidates_promoted_job_id",
+            ondelete="SET NULL",
+        ),
+    ),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "status IN ('normalized', 'ready', 'quarantined', 'promoted', 'rejected')",
+        name="ck_ingest_job_candidates_status",
+    ),
+    CheckConstraint(
+        "raw_observation_id IS NOT NULL",
+        name="ck_ingest_job_candidates_lineage",
+    ),
+    CheckConstraint(
+        "char_length(candidate_key) BETWEEN 1 AND 512",
+        name="ck_ingest_job_candidates_key_length",
+    ),
+    CheckConstraint(
+        "provider IS NULL OR char_length(provider) BETWEEN 1 AND 128",
+        name="ck_ingest_job_candidates_provider_length",
+    ),
+    CheckConstraint(
+        "external_source_id IS NULL OR char_length(external_source_id) BETWEEN 1 AND 512",
+        name="ck_ingest_job_candidates_external_source_id_length",
+    ),
+    CheckConstraint(
+        "external_job_id IS NULL OR char_length(external_job_id) BETWEEN 1 AND 512",
+        name="ck_ingest_job_candidates_external_job_id_length",
+    ),
+    CheckConstraint(
+        "title IS NULL OR char_length(title) BETWEEN 1 AND 1000",
+        name="ck_ingest_job_candidates_title_length",
+    ),
+    CheckConstraint(
+        "posting_url IS NULL OR char_length(posting_url) BETWEEN 1 AND 8192",
+        name="ck_ingest_job_candidates_posting_url_length",
+    ),
+    CheckConstraint(
+        "apply_url IS NULL OR char_length(apply_url) BETWEEN 1 AND 8192",
+        name="ck_ingest_job_candidates_apply_url_length",
+    ),
+    CheckConstraint(
+        "description_text IS NULL OR octet_length(description_text) <= 1048576",
+        name="ck_ingest_job_candidates_description_size",
+    ),
+    CheckConstraint(
+        "location IS NULL OR char_length(location) BETWEEN 1 AND 2000",
+        name="ck_ingest_job_candidates_location_length",
+    ),
+    CheckConstraint(
+        "department IS NULL OR char_length(department) BETWEEN 1 AND 1000",
+        name="ck_ingest_job_candidates_department_length",
+    ),
+    CheckConstraint(
+        "employment_type IS NULL OR char_length(employment_type) BETWEEN 1 AND 512",
+        name="ck_ingest_job_candidates_employment_type_length",
+    ),
+    CheckConstraint(
+        "content_hash IS NULL OR char_length(content_hash) BETWEEN 1 AND 256",
+        name="ck_ingest_job_candidates_content_hash_length",
+    ),
+    CheckConstraint(
+        "char_length(parser_version) BETWEEN 1 AND 128",
+        name="ck_ingest_job_candidates_parser_version_length",
+    ),
+    CheckConstraint(
+        "char_length(normalizer_version) BETWEEN 1 AND 128",
+        name="ck_ingest_job_candidates_normalizer_version_length",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(field_provenance) = 'object' "
+        "AND pg_column_size(field_provenance) <= 262144",
+        name="ck_ingest_job_candidates_field_provenance",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(quality_flags) = 'array' "
+        "AND pg_column_size(quality_flags) <= 262144",
+        name="ck_ingest_job_candidates_quality_flags",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(payload) = 'object' AND pg_column_size(payload) <= 1048576",
+        name="ck_ingest_job_candidates_payload",
+    ),
+    CheckConstraint(
+        "jsonb_typeof(error) = 'object' AND pg_column_size(error) <= 262144",
+        name="ck_ingest_job_candidates_error",
+    ),
+    CheckConstraint(
+        "status NOT IN ('ready', 'promoted') OR "
+        "(provider IS NOT NULL AND btrim(provider) <> '' "
+        "AND external_source_id IS NOT NULL AND btrim(external_source_id) <> '' "
+        "AND external_job_id IS NOT NULL AND btrim(external_job_id) <> '' "
+        "AND title IS NOT NULL AND btrim(title) <> '')",
+        name="ck_ingest_job_candidates_ready_fields",
+    ),
+    CheckConstraint(
+        "status <> 'promoted' OR company_source_id IS NOT NULL",
+        name="ck_ingest_job_candidates_promoted_source",
+    ),
+    CheckConstraint(
+        "promoted_job_id IS NULL OR status = 'promoted'",
+        name="ck_ingest_job_candidates_promoted_job",
+    ),
+    UniqueConstraint(
+        "run_id",
+        "candidate_key",
+        name="uq_ingest_job_candidates_run_key",
+    ),
+    schema=INGEST_SCHEMA,
+)
+
 Index("ix_companies_normalized_name", companies_table.c.normalized_name)
 Index("ix_companies_primary_domain", companies_table.c.primary_domain)
+Index("ix_companies_identity_state", companies_table.c.identity_state)
+Index("ix_company_sources_company_id", company_sources_table.c.company_id)
+Index("ix_company_sources_provider", company_sources_table.c.provider)
+Index("ix_company_sources_status", company_sources_table.c.status)
+Index("ix_sync_runs_company_source_id", sync_runs_table.c.company_source_id)
+Index("ix_sync_runs_started_at", sync_runs_table.c.started_at)
+Index("ix_jobs_company_source_id", jobs_table.c.company_source_id)
+Index("ix_jobs_status", jobs_table.c.status)
+Index("ix_jobs_last_changed_at", jobs_table.c.last_changed_at)
+Index("ix_jobs_last_seen_run_id", jobs_table.c.last_seen_run_id)
+Index("ix_ingest_runs_started_at", ingest_runs_table.c.started_at)
 Index(
-    "ix_yc_company_profiles_yc_company_id", yc_company_profiles_table.c.yc_company_id, unique=True
+    "ix_ingest_runs_running",
+    ingest_runs_table.c.started_at,
+    ingest_runs_table.c.id,
+    postgresql_where=text("status = 'running'"),
 )
 Index(
-    "ix_career_page_discovery_statuses_company_slug",
-    career_page_discovery_statuses_table.c.company_slug,
-    unique=True,
+    "ix_ingest_raw_observations_url_work_item_id",
+    ingest_raw_observations_table.c.url_work_item_id,
+    postgresql_where=text("url_work_item_id IS NOT NULL"),
 )
 Index(
-    "ix_job_postings_company_active", job_postings_table.c.company_id, job_postings_table.c.status
-)
-
-Index(
-    "ix_source_documents_search_vector",
-    source_documents_table.c.search_vector,
-    postgresql_using="gin",
+    "ix_ingest_raw_observations_observed_at",
+    ingest_raw_observations_table.c.observed_at,
 )
 Index(
-    "ix_document_chunks_search_vector",
-    document_chunks_table.c.search_vector,
-    postgresql_using="gin",
+    "ix_ingest_url_work_items_host",
+    ingest_url_work_items_table.c.host,
 )
 Index(
-    "ix_document_embeddings_embedding_hnsw",
-    document_embeddings_table.c.embedding,
-    postgresql_using="hnsw",
-    postgresql_ops={"embedding": "vector_cosine_ops"},
+    "ix_ingest_url_work_items_queue",
+    ingest_url_work_items_table.c.priority.desc(),
+    ingest_url_work_items_table.c.available_at,
+    ingest_url_work_items_table.c.id,
+    postgresql_where=text("state IN ('ready', 'retry') AND stage <> 'done'"),
 )
-Index("ix_discovered_urls_priority", discovered_urls_table.c.fetch_priority)
-Index("ix_external_job_postings_role_fit", external_job_postings_table.c.role_fit)
+Index(
+    "ix_ingest_url_work_items_lease",
+    ingest_url_work_items_table.c.lease_expires_at,
+    ingest_url_work_items_table.c.id,
+    postgresql_where=text("state = 'leased'"),
+)
+Index(
+    "ix_ingest_job_candidates_raw_observation_id",
+    ingest_job_candidates_table.c.raw_observation_id,
+    postgresql_where=text("raw_observation_id IS NOT NULL"),
+)
+Index(
+    "ix_ingest_job_candidates_work_item_id",
+    ingest_job_candidates_table.c.work_item_id,
+    postgresql_where=text("work_item_id IS NOT NULL"),
+)
+Index(
+    "ix_ingest_job_candidates_ready",
+    ingest_job_candidates_table.c.company_source_id,
+    ingest_job_candidates_table.c.id,
+    postgresql_where=text("status = 'ready'"),
+)
+Index(
+    "ix_ingest_job_candidates_promoted_job_id",
+    ingest_job_candidates_table.c.promoted_job_id,
+    postgresql_where=text("promoted_job_id IS NOT NULL"),
+)
 
 
 def engine_from_url(database_url: str | None = None) -> Engine:
@@ -650,36 +711,8 @@ def engine_from_url(database_url: str | None = None) -> Engine:
     return create_engine(parsed, future=True, pool_pre_ping=True)
 
 
-@contextmanager
-def url_inventory_writer_lock(engine: Engine) -> Iterator[None]:
-    """Prevent a cleanup apply from racing a discovery/classification writer.
-
-    Pipeline stages retain a shared session lock while they read or mutate URL
-    inventory. Cleanup's exclusive session lock fails fast while either writer is
-    running. Lightweight test doubles do not expose a SQLAlchemy Engine and are
-    intentionally left lock-free.
-    """
-    if not isinstance(engine, Engine):
-        yield
-        return
-    with engine.connect() as connection:
-        locked = connection.scalar(
-            text("SELECT pg_try_advisory_lock_shared(hashtext(:lock_name))"),
-            {"lock_name": URL_INVENTORY_ADVISORY_LOCK},
-        )
-        if not locked:
-            raise RuntimeError("URL cleanup apply is active; retry the pipeline stage later")
-        try:
-            yield
-        finally:
-            connection.execute(
-                text("SELECT pg_advisory_unlock_shared(hashtext(:lock_name))"),
-                {"lock_name": URL_INVENTORY_ADVISORY_LOCK},
-            )
-
-
 def create_schema(engine: Engine, *, checkfirst: bool = True) -> None:
-    """Compatibility entry point backed by Alembic, the sole schema authority."""
+    """Upgrade a rebuildable local database to the single Alembic baseline."""
     del checkfirst
     from yc_radar.services.migrations import upgrade_database
 
@@ -687,426 +720,146 @@ def create_schema(engine: Engine, *, checkfirst: bool = True) -> None:
 
 
 def rebuild_database(engine: Engine) -> None:
-    """Destructively rebuild the schema through migration history."""
+    """Destructively recreate the core and ingest schemas through Alembic."""
     from yc_radar.services.migrations import rebuild_database as rebuild_with_migrations
 
     rebuild_with_migrations(engine)
 
 
-def has_companies(engine: Engine) -> bool:
+def truncate_database(engine: Engine) -> None:
     create_schema(engine)
-    with engine.connect() as connection:
-        return bool(connection.scalar(select(func.count()).select_from(companies_table)))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "TRUNCATE TABLE "
+                "ingest.job_candidates, ingest.url_work_items, ingest.raw_observations, "
+                "ingest.runs, jobs, sync_runs, company_sources, companies "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
 
 
 def upsert_yc_companies(engine: Engine, companies: list[dict[str, Any]]) -> None:
-    """Upsert YC data without treating YC's external numeric ID as a local company ID.
-
-    Existing YC provider identity determines the local company row. A new YC identity may reuse a
-    source-neutral employer only when the verified primary domain and normalized name identify one
-    non-YC company unambiguously; otherwise it receives a new local ID.
-    """
+    """Attach YC identities to canonical companies without unsafe name-only merging."""
     create_schema(engine)
     if not companies:
         return
+
     now = datetime.now(UTC)
+    sanitized = sanitized_yc_company_payloads(companies)
     with engine.begin() as connection:
-        incoming_yc_ids = {str(_yc_company_id(company)) for company in companies}
-        persisted_company_rows = [
-            dict(row)
-            for row in connection.execute(
-                select(
-                    companies_table.c.id,
-                    companies_table.c.name,
-                    companies_table.c.website,
-                    companies_table.c.primary_domain,
-                )
-            ).mappings()
-        ]
-        yc_source_ids_by_company: dict[int, set[str]] = {}
-        yc_source_owner_by_id: dict[str, int] = {}
-        for row in connection.execute(
-            select(
-                company_sources_table.c.company_id,
-                company_sources_table.c.external_company_id,
-            ).where(company_sources_table.c.provider == "yc")
-        ):
-            company_id = int(row.company_id)
-            external_id = str(row.external_company_id)
-            yc_source_ids_by_company.setdefault(company_id, set()).add(external_id)
-            yc_source_owner_by_id[external_id] = company_id
-
-        persisted_by_domain: dict[str, list[dict[str, Any]]] = {}
-        for row in persisted_company_rows:
-            domain = str(row.get("primary_domain") or "")
-            if domain:
-                persisted_by_domain.setdefault(domain, []).append(row)
-
-        neutral_companies = sanitized_yc_company_payloads(companies)
-        for company, neutral_company in zip(companies, neutral_companies, strict=True):
-            domain = primary_domain_for_website(neutral_company.get("website"))
-            if not domain:
-                continue
-            current_company_id = yc_source_owner_by_id.get(str(_yc_company_id(company)))
-            standalone_owners = [
-                row
-                for row in persisted_by_domain.get(domain, [])
-                if int(row["id"]) != current_company_id
-                and not yc_source_ids_by_company.get(int(row["id"]))
-            ]
-            exact_standalone_match = len(standalone_owners) == 1 and normalize_company_name(
-                str(standalone_owners[0]["name"])
-            ) == normalize_company_name(str(neutral_company.get("name") or ""))
-            if standalone_owners and not exact_standalone_match:
-                neutral_company["website"] = None
-                neutral_company["_website_domain_conflict"] = True
-
-        persisted_claims = [
-            {
-                "id": f"persisted:{row['id']}",
-                "name": row["name"],
-                "website": row["website"],
-                "_local_company_id": int(row["id"]),
-            }
-            for row in persisted_company_rows
-            if (source_ids := yc_source_ids_by_company.get(int(row["id"])))
-            and source_ids.isdisjoint(incoming_yc_ids)
-        ]
-        sanitized_claims = sanitized_yc_company_payloads(neutral_companies + persisted_claims)
-        neutral_companies = sanitized_claims[: len(neutral_companies)]
-        for persisted, sanitized in zip(
-            persisted_claims,
-            sanitized_claims[len(companies) :],
-            strict=True,
-        ):
-            if sanitized.get("_website_domain_conflict"):
-                connection.execute(
-                    companies_table.update()
-                    .where(companies_table.c.id == persisted["_local_company_id"])
-                    .values(website=None, primary_domain=None, updated_at=now)
-                )
-
-        for company, neutral_company in zip(companies, neutral_companies, strict=True):
-            yc_company_id = _yc_company_id(company)
-            existing_source = (
+        for raw_company, neutral_company in zip(companies, sanitized, strict=True):
+            yc_company_id = _yc_company_id(raw_company)
+            external_id = str(yc_company_id)
+            source = (
                 connection.execute(
                     select(company_sources_table).where(
                         company_sources_table.c.provider == "yc",
-                        company_sources_table.c.external_company_id == str(yc_company_id),
+                        company_sources_table.c.external_id == external_id,
                     )
                 )
                 .mappings()
                 .first()
             )
-            local_company_id = (
-                int(existing_source["company_id"])
-                if existing_source is not None
-                else _matching_neutral_company_id(connection, neutral_company)
-            )
-            desired_slug = (
-                str(
-                    connection.scalar(
-                        select(companies_table.c.slug).where(
-                            companies_table.c.id == local_company_id
-                        )
-                    )
-                )
-                if local_company_id is not None
-                else _available_company_slug(
-                    connection,
-                    requested_slug=str(company.get("slug") or ""),
-                    yc_company_id=yc_company_id,
-                )
-            )
+
+            local_company_id = int(source["company_id"]) if source else None
             if local_company_id is None:
-                neutral_values = _company_row(neutral_company, slug=desired_slug, now=now)
+                local_company_id = _matching_neutral_company_id(connection, neutral_company)
+            _isolate_conflicting_neutral_website(
+                connection,
+                neutral_company,
+                exclude_company_id=local_company_id,
+            )
+
+            if local_company_id is None:
+                slug = _available_company_slug(
+                    connection,
+                    requested_slug=str(raw_company.get("slug") or ""),
+                    source_suffix=f"yc-{yc_company_id}",
+                )
                 local_company_id = int(
                     connection.execute(
                         companies_table.insert()
-                        .values(neutral_values)
+                        .values(_company_row(neutral_company, slug=slug, now=now))
                         .returning(companies_table.c.id)
                     ).scalar_one()
                 )
             else:
-                existing_company = (
+                existing = (
                     connection.execute(
                         select(companies_table).where(companies_table.c.id == local_company_id)
                     )
                     .mappings()
                     .one()
                 )
-                neutral_values = _company_row(
-                    neutral_company,
-                    local_company_id=local_company_id,
-                    slug=desired_slug,
+                incoming_website = sanitized_yc_company_website(neutral_company)
+                if incoming_website is None:
+                    incoming_website = existing["website"]
+                values = _company_row(
+                    {**neutral_company, "website": incoming_website},
+                    slug=str(existing["slug"]),
                     now=now,
+                    local_company_id=local_company_id,
+                    company_metadata=dict(existing["metadata"] or {}),
+                    created_at=existing["created_at"],
                 )
-                if (
-                    neutral_values["website"] is None
-                    and not neutral_company.get("_website_domain_conflict")
-                    and sanitized_yc_company_website(existing_company) is not None
-                ):
-                    neutral_values["website"] = existing_company["website"]
-                    neutral_values["primary_domain"] = existing_company["primary_domain"]
-                statement = pg_insert(companies_table).values(neutral_values)
+                statement = pg_insert(companies_table).values(values)
                 connection.execute(
                     statement.on_conflict_do_update(
-                        index_elements=["id"],
-                        set_=_upsert_update_columns(statement, companies_table),
+                        index_elements=[companies_table.c.id],
+                        set_={
+                            "name": statement.excluded.name,
+                            "normalized_name": statement.excluded.normalized_name,
+                            "website": statement.excluded.website,
+                            "primary_domain": statement.excluded.primary_domain,
+                            "identity_state": "verified",
+                            "updated_at": now,
+                        },
                     )
                 )
 
-            profile = _yc_company_profile_row(
-                company,
-                local_company_id=local_company_id,
-                yc_company_id=yc_company_id,
-                now=now,
-            )
-            profile_statement = pg_insert(yc_company_profiles_table).values(profile)
-            connection.execute(
-                profile_statement.on_conflict_do_update(
-                    index_elements=["company_id"],
-                    set_=_upsert_update_columns(profile_statement, yc_company_profiles_table),
-                )
-            )
+            slug = str(raw_company.get("slug") or "").strip().lower()
             source_values = {
                 "company_id": local_company_id,
                 "provider": "yc",
-                "external_company_id": str(yc_company_id),
-                "source_url": profile["yc_url"],
-                "raw_json": {"provider": "yc"},
-                "first_seen_at": now,
-                "last_seen_at": now,
+                "source_kind": "directory",
+                "external_id": external_id,
+                "source_url": f"https://www.ycombinator.com/companies/{slug}",
+                "sync_mode": "complete_snapshot",
+                "status": "active",
+                "metadata": _yc_source_metadata(
+                    raw_company,
+                    identity_conflict_evidence=neutral_company.get(
+                        "_identity_conflict_evidence"
+                    ),
+                ),
                 "created_at": now,
                 "updated_at": now,
             }
             source_statement = pg_insert(company_sources_table).values(source_values)
             connection.execute(
                 source_statement.on_conflict_do_update(
-                    index_elements=["provider", "external_company_id"],
+                    index_elements=[
+                        company_sources_table.c.provider,
+                        company_sources_table.c.external_id,
+                    ],
                     set_={
                         "source_url": source_statement.excluded.source_url,
-                        "raw_json": source_statement.excluded.raw_json,
-                        "last_seen_at": source_statement.excluded.last_seen_at,
-                        "updated_at": source_statement.excluded.updated_at,
+                        "source_kind": source_statement.excluded.source_kind,
+                        "sync_mode": source_statement.excluded.sync_mode,
+                        "status": source_statement.excluded.status,
+                        "metadata": source_statement.excluded.metadata,
+                        "updated_at": now,
                     },
                 )
             )
-        _reset_companies_id_sequence(connection)
-
-
-def upsert_yc_job_postings(engine: Engine, jobs: list[dict[str, Any]]) -> None:
-    create_schema(engine)
-    if not jobs:
-        return
-    rows = [_job_row(job) for job in jobs]
-    _upsert_rows(engine, yc_job_postings_table, rows, index_elements=["id"])
-
-
-def upsert_source_documents(engine: Engine, documents: list[dict[str, Any]]) -> None:
-    create_schema(engine)
-    if not documents:
-        return
-    with engine.begin() as connection:
-        upsert_source_documents_connection(connection, documents)
-
-
-def upsert_source_documents_connection(connection: Any, documents: list[dict[str, Any]]) -> None:
-    """Upsert source documents into an existing transaction."""
-    if not documents:
-        return
-    _upsert_rows_connection(
-        connection,
-        source_documents_table,
-        [_source_document_row(document) for document in documents],
-        index_elements=["source_type", "source_key"],
-    )
-
-
-def upsert_page_classifications(engine: Engine, classifications: list[dict[str, Any]]) -> None:
-    create_schema(engine)
-    if not classifications:
-        return
-    with engine.begin() as connection:
-        upsert_page_classifications_connection(connection, classifications)
-
-
-def upsert_page_classifications_connection(
-    connection: Any, classifications: list[dict[str, Any]]
-) -> None:
-    """Upsert classifications into an existing transaction."""
-    if not classifications:
-        return
-    _upsert_rows_connection(
-        connection,
-        page_classifications_table,
-        [_page_classification_row(classification) for classification in classifications],
-        index_elements=["source_document_id", "parser_name"],
-    )
-
-
-def upsert_external_job_postings(engine: Engine, jobs: list[dict[str, Any]]) -> None:
-    create_schema(engine)
-    if not jobs:
-        return
-    with engine.begin() as connection:
-        upsert_external_job_postings_connection(connection, jobs)
-
-
-def upsert_external_job_postings_connection(connection: Any, jobs: list[dict[str, Any]]) -> None:
-    """Upsert derived URL jobs into an existing transaction."""
-    if not jobs:
-        return
-    _upsert_rows_connection(
-        connection,
-        external_job_postings_table,
-        [_external_job_row(job) for job in jobs],
-        index_elements=["source", "normalized_url"],
-    )
-
-
-def upsert_career_page_discovery_statuses(
-    engine: Engine,
-    statuses: list[dict[str, Any]],
-) -> None:
-    create_schema(engine)
-    if not statuses:
-        return
-    with engine.begin() as connection:
-        upsert_career_page_discovery_statuses_connection(connection, statuses)
-
-
-def upsert_career_page_discovery_statuses_connection(
-    connection: Any,
-    statuses: list[dict[str, Any]],
-) -> None:
-    if not statuses:
-        return
-    rows = [_career_page_discovery_status_row(status) for status in statuses]
-    _upsert_rows_connection(
-        connection,
-        career_page_discovery_statuses_table,
-        rows,
-        index_elements=["company_slug"],
-    )
-
-
-def replace_career_page_data(
-    engine: Engine,
-    discovery_events: list[dict[str, Any]],
-    career_pages: list[dict[str, Any]],
-    *,
-    company_slugs: list[str] | None = None,
-    statuses: list[dict[str, Any]] | None = None,
-) -> None:
-    create_schema(engine)
-    with engine.begin() as connection:
-        if company_slugs:
-            connection.execute(
-                delete(career_page_discovery_events_table).where(
-                    career_page_discovery_events_table.c.company_slug.in_(company_slugs)
-                )
-            )
-            connection.execute(
-                delete(company_career_pages_table).where(
-                    company_career_pages_table.c.company_slug.in_(company_slugs)
-                )
-            )
-            connection.execute(
-                delete(discovered_urls_table).where(
-                    discovered_urls_table.c.company_slug.in_(company_slugs)
-                )
-            )
-            connection.execute(
-                delete(career_page_discovery_statuses_table).where(
-                    career_page_discovery_statuses_table.c.company_slug.in_(company_slugs)
-                )
-            )
-        else:
-            connection.execute(delete(career_page_discovery_events_table))
-            connection.execute(delete(company_career_pages_table))
-            connection.execute(delete(discovered_urls_table))
-            connection.execute(delete(career_page_discovery_statuses_table))
-        if discovery_events:
-            rows = [_career_page_discovery_event_row(event) for event in discovery_events]
-            for chunk in _chunks(rows, BATCH_SIZE):
-                connection.execute(career_page_discovery_events_table.insert(), chunk)
-        if career_pages:
-            rows = [_company_career_page_row(page) for page in career_pages]
-            for chunk in _chunks(rows, BATCH_SIZE):
-                statement = pg_insert(company_career_pages_table).values(chunk)
-                update_columns = _upsert_update_columns(statement, company_career_pages_table)
-                connection.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=["company_slug", "normalized_url"],
-                        set_=update_columns,
-                    )
-                )
-            discovered_rows = [_discovered_url_row_from_career_page(page) for page in career_pages]
-            for chunk in _chunks(discovered_rows, BATCH_SIZE):
-                statement = pg_insert(discovered_urls_table).values(chunk)
-                update_columns = _upsert_update_columns(statement, discovered_urls_table)
-                connection.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=["company_slug", "url_key"],
-                        set_=update_columns,
-                    )
-                )
-        if statuses:
-            upsert_career_page_discovery_statuses_connection(connection, statuses)
-
-
-def drop_legacy_career_surfaces_table(engine: Engine) -> None:
-    create_schema(engine)
-    if "career_surfaces" not in inspect(engine).get_table_names():
-        return
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE IF EXISTS career_surfaces"))
-
-
-def truncate_database(engine: Engine) -> None:
-    create_schema(engine)
-    table_names = ", ".join(f'"{table.name}"' for table in reversed(metadata.sorted_tables))
-    if not table_names:
-        return
-    with engine.begin() as connection:
-        connection.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
-
-
-def _company_profile_statement(*, require_yc_profile: bool = False):
-    profile_columns = (
-        yc_company_profiles_table.c.yc_company_id,
-        yc_company_profiles_table.c.yc_url,
-        yc_company_profiles_table.c.one_liner,
-        yc_company_profiles_table.c.batch,
-        yc_company_profiles_table.c.status,
-        yc_company_profiles_table.c.stage,
-        yc_company_profiles_table.c.team_size,
-        yc_company_profiles_table.c.is_hiring,
-        yc_company_profiles_table.c.all_locations,
-        yc_company_profiles_table.c.regions,
-        yc_company_profiles_table.c.industry,
-        yc_company_profiles_table.c.subindustry,
-        yc_company_profiles_table.c.industries,
-        yc_company_profiles_table.c.tags,
-        yc_company_profiles_table.c.prototype_score,
-        yc_company_profiles_table.c.prototype_angle,
-        yc_company_profiles_table.c.raw_json,
-    )
-    statement = select(companies_table, *profile_columns)
-    join = companies_table.c.id == yc_company_profiles_table.c.company_id
-    return (
-        statement.join(yc_company_profiles_table, join)
-        if require_yc_profile
-        else statement.outerjoin(yc_company_profiles_table, join)
-    )
 
 
 def fetch_company_rows(engine: Engine) -> list[dict[str, Any]]:
     create_schema(engine)
     with engine.connect() as connection:
-        rows = connection.execute(_company_profile_statement()).mappings().all()
-    return [dict(row) for row in rows]
+        rows = connection.execute(_company_statement().order_by(companies_table.c.slug)).mappings()
+        return [_project_company_row(dict(row)) for row in rows]
 
 
 def fetch_company_row(engine: Engine, slug: str) -> dict[str, Any] | None:
@@ -1114,273 +867,16 @@ def fetch_company_row(engine: Engine, slug: str) -> dict[str, Any] | None:
     with engine.connect() as connection:
         row = (
             connection.execute(
-                _company_profile_statement().where(companies_table.c.slug == slug.lower())
+                _company_statement().where(companies_table.c.slug == slug.strip().lower())
             )
             .mappings()
             .first()
         )
-    return dict(row) if row else None
-
-
-def fetch_companies_for_discovery(
-    engine: Engine,
-    *,
-    limit: int | None = None,
-    company_slugs: list[str] | None = None,
-    only_pending: bool = False,
-    hiring_only: bool = False,
-    source_provider: str | None = None,
-) -> list[dict[str, Any]]:
-    """Select discovery candidates, applying completed-status exclusion before LIMIT."""
-    create_schema(engine)
-    statement = _company_profile_statement()
-    if company_slugs:
-        statement = statement.where(companies_table.c.slug.in_(company_slugs))
-    if only_pending:
-        completed = select(career_page_discovery_statuses_table.c.id).where(
-            career_page_discovery_statuses_table.c.company_slug == companies_table.c.slug,
-            career_page_discovery_statuses_table.c.status == "completed",
-        )
-        statement = statement.where(~completed.exists())
-    if hiring_only:
-        statement = statement.where(yc_company_profiles_table.c.is_hiring.is_(True))
-    if source_provider:
-        source_exists = select(company_sources_table.c.id).where(
-            company_sources_table.c.company_id == companies_table.c.id,
-            company_sources_table.c.provider == source_provider.lower(),
-        )
-        statement = statement.where(source_exists.exists())
-    statement = statement.order_by(companies_table.c.slug)
-    if limit is not None:
-        statement = statement.limit(limit)
-    with engine.connect() as connection:
-        rows = connection.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def fetch_career_page_discovery_event_rows(
-    engine: Engine,
-    *,
-    company_slugs: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    create_schema(engine)
-    statement = select(career_page_discovery_events_table).order_by(
-        career_page_discovery_events_table.c.company_slug,
-        career_page_discovery_events_table.c.confidence.desc(),
-        career_page_discovery_events_table.c.normalized_url,
-    )
-    if company_slugs:
-        statement = statement.where(
-            career_page_discovery_events_table.c.company_slug.in_(company_slugs)
-        )
-    with engine.connect() as connection:
-        rows = connection.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def fetch_company_career_page_rows(
-    engine: Engine,
-    *,
-    company_slugs: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    create_schema(engine)
-    statement = select(company_career_pages_table).order_by(
-        company_career_pages_table.c.company_slug,
-        company_career_pages_table.c.confidence.desc(),
-        company_career_pages_table.c.normalized_url,
-    )
-    if company_slugs:
-        statement = statement.where(company_career_pages_table.c.company_slug.in_(company_slugs))
-    with engine.connect() as connection:
-        rows = connection.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def fetch_discovered_url_rows(
-    engine: Engine,
-    *,
-    company_slugs: list[str] | None = None,
-    limit: int | None = None,
-    only_unclassified: bool = False,
-    retry_fetch_errors: bool = False,
-    max_fetch_attempts: int = 3,
-) -> list[dict[str, Any]]:
-    """Return active URL work after its mode-specific eligibility predicate.
-
-    Retry eligibility is intentionally explicit: only classifications that recorded a
-    retryable fetch policy are considered, and the attempt budget is enforced in SQL.
-    """
-    create_schema(engine)
-    statement = select(discovered_urls_table).where(discovered_urls_table.c.is_active.is_(True))
-    if company_slugs:
-        statement = statement.where(discovered_urls_table.c.company_slug.in_(company_slugs))
-    if retry_fetch_errors:
-        fetch_data = page_classifications_table.c.evidence["fetch"]
-        retryable = fetch_data["retryable"].astext == "true"
-        attempts = cast(fetch_data["attempt_count"].astext, Integer)
-        eligible = select(page_classifications_table.c.id).where(
-            page_classifications_table.c.discovered_url_id == discovered_urls_table.c.id,
-            page_classifications_table.c.page_kind == "fetch_error",
-            retryable,
-            attempts < max(1, max_fetch_attempts),
-        )
-        attempt_count = (
-            select(attempts)
-            .where(page_classifications_table.c.discovered_url_id == discovered_urls_table.c.id)
-            .order_by(page_classifications_table.c.classified_at.desc())
-            .limit(1)
-            .scalar_subquery()
-            .label("fetch_attempt_count")
-        )
-        statement = statement.add_columns(attempt_count).where(eligible.exists())
-    elif only_unclassified:
-        classified = select(page_classifications_table.c.id).where(
-            page_classifications_table.c.discovered_url_id == discovered_urls_table.c.id
-        )
-        statement = statement.where(~classified.exists())
-    else:
-        statement = statement.add_columns(literal(0).label("fetch_attempt_count"))
-    statement = statement.order_by(
-        discovered_urls_table.c.fetch_priority.desc(),
-        discovered_urls_table.c.confidence.desc(),
-        discovered_urls_table.c.company_slug,
-        discovered_urls_table.c.normalized_url,
-    )
-    if limit is not None:
-        statement = statement.limit(limit)
-    with engine.connect() as connection:
-        rows = connection.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def fetch_source_document_rows(
-    engine: Engine,
-    *,
-    source_type: str | None = None,
-    source_keys: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    create_schema(engine)
-    with engine.connect() as connection:
-        return fetch_source_document_rows_connection(
-            connection,
-            source_type=source_type,
-            source_keys=source_keys,
-        )
-
-
-def fetch_source_document_rows_connection(
-    connection: Any,
-    *,
-    source_type: str | None = None,
-    source_keys: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """Read source documents through an existing transaction."""
-    statement = select(source_documents_table)
-    if source_type:
-        statement = statement.where(source_documents_table.c.source_type == source_type)
-    if source_keys:
-        statement = statement.where(source_documents_table.c.source_key.in_(source_keys))
-    statement = statement.order_by(
-        source_documents_table.c.company_slug, source_documents_table.c.id
-    )
-    rows = connection.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def fetch_page_classification_rows(
-    engine: Engine,
-    *,
-    company_slugs: list[str] | None = None,
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    create_schema(engine)
-    statement = select(page_classifications_table).order_by(
-        page_classifications_table.c.classified_at.desc(),
-        page_classifications_table.c.company_slug,
-        page_classifications_table.c.url,
-    )
-    if company_slugs:
-        statement = statement.where(page_classifications_table.c.company_slug.in_(company_slugs))
-    if limit is not None:
-        statement = statement.limit(limit)
-    with engine.connect() as connection:
-        rows = connection.execute(statement).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def fetch_completed_career_discovery_slugs(
-    engine: Engine,
-    *,
-    company_slugs: list[str] | None = None,
-) -> set[str]:
-    create_schema(engine)
-    statement = select(career_page_discovery_statuses_table.c.company_slug).where(
-        career_page_discovery_statuses_table.c.status == "completed"
-    )
-    if company_slugs:
-        statement = statement.where(
-            career_page_discovery_statuses_table.c.company_slug.in_(company_slugs)
-        )
-    with engine.connect() as connection:
-        return set(connection.scalars(statement).all())
-
-
-def fetch_yc_job_rows(engine: Engine) -> list[dict[str, Any]]:
-    create_schema(engine)
-    with engine.connect() as connection:
-        rows = connection.execute(select(yc_job_postings_table)).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def _upsert_rows(
-    engine: Engine,
-    table: Table,
-    rows: list[dict[str, Any]],
-    *,
-    index_elements: list[str],
-) -> None:
-    with engine.begin() as connection:
-        _upsert_rows_connection(connection, table, rows, index_elements=index_elements)
-
-
-def _upsert_rows_connection(
-    connection: Any,
-    table: Table,
-    rows: list[dict[str, Any]],
-    *,
-    index_elements: list[str],
-) -> None:
-    for chunk in _chunks(rows, BATCH_SIZE):
-        statement = pg_insert(table).values(chunk)
-        update_columns = _upsert_update_columns(statement, table)
-        connection.execute(
-            statement.on_conflict_do_update(
-                index_elements=index_elements,
-                set_=update_columns,
-            )
-        )
-
-
-def _reset_companies_id_sequence(connection: Any) -> None:
-    connection.execute(
-        text(
-            "SELECT setval(pg_get_serial_sequence('companies', 'id'), "
-            "COALESCE((SELECT MAX(id) FROM companies), 1), "
-            "(SELECT MAX(id) IS NOT NULL FROM companies))"
-        )
-    )
-
-
-def _upsert_update_columns(statement: Any, table: Table) -> dict[str, Any]:
-    return {
-        column.name: getattr(statement.excluded, column.name)
-        for column in table.columns
-        if column.name not in {"id", "created_at"} and column.computed is None
-    }
+    return _project_company_row(dict(row)) if row else None
 
 
 def normalize_company_name(value: str) -> str:
-    return " ".join(value.lower().split())
+    return " ".join(value.casefold().split())
 
 
 def primary_domain_for_website(website: str | None) -> str | None:
@@ -1395,12 +891,7 @@ def primary_domain_for_website(website: str | None) -> str | None:
 
 
 def sanitized_yc_company_website(company: dict[str, Any]) -> str | None:
-    """Return a website suitable for the source-neutral company row.
-
-    YC's raw profile payload sometimes puts a directory listing, social profile, app-store page,
-    or even multiple URLs in ``website``. Keep that evidence in the YC profile JSON, but do not
-    promote it to the neutral employer identity.
-    """
+    """Return a safe canonical company website while preserving raw evidence in source metadata."""
     raw_website = company.get("website")
     if not isinstance(raw_website, str):
         return None
@@ -1454,17 +945,8 @@ def sanitized_yc_company_website(company: dict[str, Any]) -> str | None:
     return website if is_allowed_brand_root else None
 
 
-def sanitized_yc_company_payloads(
-    companies: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Copy YC payloads with neutral websites deconflicted across the batch.
-
-    A domain claimed by multiple YC identities is not safe identity evidence. If
-    exactly one claimant has a deterministic brand-shaped domain, retain that
-    claimant and clear the others; otherwise clear every competing claim. Raw YC
-    profile payloads are written from the original list and remain unchanged.
-    """
-
+def sanitized_yc_company_payloads(companies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sanitize websites and remove ambiguous duplicate domain claims within a batch."""
     sanitized = [
         {**company, "website": sanitized_yc_company_website(company)} for company in companies
     ]
@@ -1485,134 +967,67 @@ def sanitized_yc_company_payloads(
         survivor = compatible[0] if len(compatible) == 1 else None
         for index in indexes:
             if index != survivor:
+                claimed_website = sanitized[index]["website"]
+                conflicting_claimants = [
+                    {
+                        "external_id": str(
+                            sanitized[other].get("id")
+                            or sanitized[other].get("objectID")
+                            or ""
+                        ),
+                        "name": str(sanitized[other].get("name") or ""),
+                    }
+                    for other in indexes
+                    if other != index
+                ]
                 sanitized[index]["website"] = None
                 sanitized[index]["_website_domain_conflict"] = True
+                sanitized[index]["_identity_conflict_evidence"] = {
+                    "kind": "website_domain_conflict",
+                    "claimed_website": claimed_website,
+                    "claimed_domain": domain,
+                    "conflicting_incoming_companies": conflicting_claimants,
+                }
     return sanitized
 
 
-def _company_name_matches_domain(name: str, domain: str) -> bool:
-    tokens = re.findall(r"[a-z0-9]+", normalize_company_name(name))
-    legal_suffixes = {
-        "incorporated",
-        "corporation",
-        "limited",
-        "corp",
-        "llc",
-        "ltd",
-        "inc",
-    }
-    if len(tokens) > 1 and tokens[-1] in legal_suffixes:
-        tokens.pop()
-    normalized = "".join(tokens)
-    label = domain.split(".", 1)[0].lower()
-    if not normalized or not label:
-        return False
-    if label == normalized:
-        return True
-    return any(
-        label == f"{prefix}{normalized}"
-        for prefix in ("get", "go", "hey", "join", "my", "ridewith", "team", "try", "use")
-    )
-
-
-def _yc_company_id(company: dict[str, Any]) -> int:
-    yc_company_id = _to_int(company.get("id")) or _to_int(company.get("objectID"))
-    if yc_company_id is None:
-        raise ValueError("YC company requires id or objectID")
-    return yc_company_id
-
-
-def _matching_neutral_company_id(connection: Any, company: dict[str, Any]) -> int | None:
-    """Return one safe non-YC identity match, never a best-effort merge."""
-    domain = primary_domain_for_website(sanitized_yc_company_website(company))
-    normalized_name = normalize_company_name(str(company.get("name") or "").strip())
-    if not domain or not normalized_name:
-        return None
-    domain_matches = list(
-        connection.execute(
-            select(companies_table).where(companies_table.c.primary_domain == domain)
-        ).mappings()
-    )
-    if len(domain_matches) != 1:
-        return None
-    candidate = domain_matches[0]
-    if candidate["normalized_name"] != normalized_name:
-        return None
-    existing_profile = connection.scalar(
-        select(yc_company_profiles_table.c.company_id).where(
-            yc_company_profiles_table.c.company_id == candidate["id"]
+def _company_statement():
+    yc_source = company_sources_table.alias("yc_source")
+    return (
+        select(
+            companies_table,
+            yc_source.c.external_id.label("yc_external_id"),
+            yc_source.c.source_url.label("yc_source_url"),
+            yc_source.c.metadata.label("yc_metadata"),
+        )
+        .select_from(companies_table)
+        .outerjoin(
+            yc_source,
+            (yc_source.c.company_id == companies_table.c.id) & (yc_source.c.provider == "yc"),
         )
     )
-    existing_yc_source = connection.scalar(
-        select(company_sources_table.c.id).where(
-            company_sources_table.c.company_id == candidate["id"],
-            company_sources_table.c.provider == "yc",
-        )
-    )
-    if existing_profile is not None or existing_yc_source is not None:
-        return None
-    return int(candidate["id"])
 
 
-def _available_company_slug(
-    connection: Any,
-    *,
-    requested_slug: str,
-    yc_company_id: int,
-) -> str:
-    base = requested_slug.strip().lower() or f"yc-{yc_company_id}"
-    for candidate in (base, f"{base}-yc-{yc_company_id}"):
-        owner = connection.scalar(
-            select(companies_table.c.id).where(companies_table.c.slug == candidate)
-        )
-        if owner is None:
-            return candidate
-    suffix = 2
-    while True:
-        candidate = f"{base}-yc-{yc_company_id}-{suffix}"
-        owner = connection.scalar(
-            select(companies_table.c.id).where(companies_table.c.slug == candidate)
-        )
-        if owner is None:
-            return candidate
-        suffix += 1
-
-
-def _company_row(
-    company: dict[str, Any],
-    *,
-    slug: str,
-    now: datetime,
-    local_company_id: int | None = None,
-) -> dict[str, Any]:
-    name = str(company.get("name") or "").strip()
-    website = sanitized_yc_company_website(company)
-    row: dict[str, Any] = {
-        "name": name,
-        "normalized_name": normalize_company_name(name),
-        "slug": slug,
-        "website": website,
-        "primary_domain": primary_domain_for_website(website),
-        "created_at": now,
-        "updated_at": now,
-    }
-    if local_company_id is not None:
-        row["id"] = local_company_id
+def _project_company_row(row: dict[str, Any]) -> dict[str, Any]:
+    source_metadata = dict(row.pop("yc_metadata", None) or {})
+    raw_payload = source_metadata.pop("raw_payload", None)
+    external_id = row.pop("yc_external_id", None)
+    source_url = row.pop("yc_source_url", None)
+    if external_id is not None:
+        row.update(source_metadata)
+        row["yc_company_id"] = _to_int(external_id)
+        row["yc_url"] = source_url
+        row["raw_json"] = raw_payload or {}
     return row
 
 
-def _yc_company_profile_row(
+def _yc_source_metadata(
     company: dict[str, Any],
     *,
-    local_company_id: int,
-    yc_company_id: int,
-    now: datetime,
+    identity_conflict_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    slug = str(company.get("slug") or "").lower()
-    return {
-        "company_id": local_company_id,
-        "yc_company_id": yc_company_id,
-        "yc_url": f"https://www.ycombinator.com/companies/{slug}",
+    metadata = {
+        "slug": str(company.get("slug") or "").strip().lower(),
         "one_liner": company.get("one_liner"),
         "batch": company.get("batch"),
         "status": company.get("status"),
@@ -1627,235 +1042,155 @@ def _yc_company_profile_row(
         "tags": _as_list(company.get("tags")),
         "prototype_score": _to_int(company.get("prototype_score")),
         "prototype_angle": company.get("prototype_angle"),
-        "raw_json": _json_safe(company),
-        "created_at": now,
-        "updated_at": now,
+        "raw_payload": _json_safe(company),
+    }
+    if identity_conflict_evidence:
+        metadata["identity_conflict_evidence"] = _json_safe(identity_conflict_evidence)
+    return metadata
+
+
+def _yc_company_id(company: dict[str, Any]) -> int:
+    yc_company_id = _to_int(company.get("id")) or _to_int(company.get("objectID"))
+    if yc_company_id is None:
+        raise ValueError("YC company requires id or objectID")
+    return yc_company_id
+
+
+def _matching_neutral_company_id(connection: Any, company: dict[str, Any]) -> int | None:
+    domain = primary_domain_for_website(sanitized_yc_company_website(company))
+    normalized_name = normalize_company_name(str(company.get("name") or "").strip())
+    if not domain or not normalized_name:
+        return None
+    candidates = list(
+        connection.execute(
+            select(companies_table).where(
+                companies_table.c.primary_domain == domain,
+                companies_table.c.normalized_name == normalized_name,
+            )
+        ).mappings()
+    )
+    if len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    has_yc_source = connection.scalar(
+        select(company_sources_table.c.id).where(
+            company_sources_table.c.company_id == candidate["id"],
+            company_sources_table.c.provider == "yc",
+        )
+    )
+    return None if has_yc_source is not None else int(candidate["id"])
+
+
+def _isolate_conflicting_neutral_website(
+    connection: Any,
+    company: dict[str, Any],
+    *,
+    exclude_company_id: int | None = None,
+) -> None:
+    domain = primary_domain_for_website(sanitized_yc_company_website(company))
+    if not domain:
+        return
+    statement = select(companies_table.c.id, companies_table.c.name).where(
+        companies_table.c.primary_domain == domain
+    )
+    if exclude_company_id is not None:
+        statement = statement.where(companies_table.c.id != exclude_company_id)
+    existing = list(connection.execute(statement).mappings())
+    if not existing:
+        return
+
+    claimed_website = sanitized_yc_company_website(company)
+    company["website"] = None
+    company["_website_domain_conflict"] = True
+    company["_identity_conflict_evidence"] = {
+        "kind": "website_domain_conflict",
+        "claimed_website": claimed_website,
+        "claimed_domain": domain,
+        "conflicting_companies": [
+            {"company_id": int(row["id"]), "name": str(row["name"])} for row in existing
+        ],
     }
 
 
-def _job_row(job: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    relative_url = job.get("url") or ""
-    return {
-        "id": _to_int(job.get("id")),
-        "company_id": _to_int(job.get("company_id")),
-        "company_slug": str(job.get("company_slug") or "").lower(),
-        "company_name": job.get("company_name") or job.get("companyName") or "",
-        "company_yc_url": job.get("company_yc_url")
-        or urljoin("https://www.ycombinator.com", job.get("companyUrl") or ""),
-        "title": job.get("title") or "",
-        "url": relative_url,
-        "absolute_url": urljoin("https://www.ycombinator.com", relative_url),
-        "apply_url": job.get("applyUrl"),
-        "location": job.get("location"),
-        "type": job.get("type"),
-        "role": job.get("role"),
-        "role_specific_type": job.get("roleSpecificType"),
-        "pretty_role": job.get("prettyRole"),
-        "salary_range": job.get("salaryRange"),
-        "equity_range": job.get("equityRange"),
-        "min_experience": job.get("minExperience"),
-        "min_school_year": job.get("minSchoolYear"),
-        "visa": job.get("visa"),
-        "skills": _as_list(job.get("skills")),
-        "is_incomplete": bool(job.get("isIncomplete")),
-        "created_at_text": job.get("createdAt"),
-        "last_active_text": job.get("lastActive"),
-        "raw_json": _json_safe(job),
-        "created_at": now,
+def _available_company_slug(
+    connection: Any,
+    *,
+    requested_slug: str,
+    source_suffix: str,
+) -> str:
+    base = requested_slug.strip().lower() or source_suffix
+    for candidate in (base, f"{base}-{source_suffix}"):
+        if (
+            connection.scalar(
+                select(companies_table.c.id).where(companies_table.c.slug == candidate)
+            )
+            is None
+        ):
+            return candidate
+    suffix = 2
+    while True:
+        candidate = f"{base}-{source_suffix}-{suffix}"
+        if (
+            connection.scalar(
+                select(companies_table.c.id).where(companies_table.c.slug == candidate)
+            )
+            is None
+        ):
+            return candidate
+        suffix += 1
+
+
+def _company_row(
+    company: dict[str, Any],
+    *,
+    slug: str,
+    now: datetime,
+    local_company_id: int | None = None,
+    company_metadata: dict[str, Any] | None = None,
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    name = str(company.get("name") or "").strip()
+    if not name:
+        raise ValueError("Company name is required")
+    website = sanitized_yc_company_website(company)
+    values: dict[str, Any] = {
+        "name": name,
+        "normalized_name": normalize_company_name(name),
+        "slug": slug,
+        "website": website,
+        "primary_domain": primary_domain_for_website(website),
+        "identity_state": "verified",
+        "metadata": company_metadata or {},
+        "created_at": created_at or now,
         "updated_at": now,
     }
+    if local_company_id is not None:
+        values["id"] = local_company_id
+    return values
 
 
-def _career_page_discovery_event_row(event: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    checked_at = _to_datetime(event.get("checked_at")) or now
-    return {
-        "company_id": _to_int(event.get("company_id")),
-        "company_slug": str(event.get("company_slug") or "").lower(),
-        "company_name": event.get("company_name") or "",
-        "website": event.get("website"),
-        "url": event.get("url") or event.get("normalized_url") or "",
-        "normalized_url": event.get("normalized_url") or event.get("url") or "",
-        "page_type": event.get("page_type") or "unknown",
-        "discovery_source": event.get("discovery_source") or "unknown",
-        "confidence": float(event.get("confidence") or 0),
-        "http_status": _to_int(event.get("http_status")),
-        "evidence": event.get("evidence"),
-        "checked_at": checked_at,
-        "raw_json": _json_safe(event),
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-def _company_career_page_row(page: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    checked_at = _to_datetime(page.get("checked_at")) or now
-    return {
-        "company_id": _to_int(page.get("company_id")),
-        "company_slug": str(page.get("company_slug") or "").lower(),
-        "company_name": page.get("company_name") or "",
-        "website": page.get("website"),
-        "career_page_url": page.get("career_page_url") or page.get("url") or "",
-        "normalized_url": page.get("normalized_url") or page.get("career_page_url") or "",
-        "page_type": page.get("page_type") or "unknown",
-        "discovery_source": page.get("discovery_source") or "unknown",
-        "confidence": float(page.get("confidence") or 0),
-        "http_status": _to_int(page.get("http_status")),
-        "evidence": page.get("evidence"),
-        "is_primary": bool(page.get("is_primary")),
-        "observed_source_count": _to_int(page.get("observed_source_count")) or 1,
-        "checked_at": checked_at,
-        "raw_json": _json_safe(page),
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-def _discovered_url_row_from_career_page(page: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    checked_at = _to_datetime(page.get("checked_at")) or now
-    normalized_url = page.get("normalized_url") or page.get("career_page_url") or ""
-    raw_json = _json_safe(page.get("raw_json") or {})
-    discovery_sources = raw_json.get("discovery_sources")
-    if not isinstance(discovery_sources, list) or not discovery_sources:
-        discovery_sources = [page.get("discovery_source") or "unknown"]
-    evidence = page.get("evidence")
-    evidence_samples = [evidence] if evidence else []
-    return {
-        "company_id": _to_int(page.get("company_id")),
-        "company_slug": str(page.get("company_slug") or "").lower(),
-        "company_name": page.get("company_name") or "",
-        "website": page.get("website"),
-        "url": page.get("career_page_url") or normalized_url,
-        "normalized_url": normalized_url,
-        "url_key": _url_dedupe_key(normalized_url),
-        "url_kind": page.get("page_type") or "unknown",
-        "discovery_sources": _as_list(discovery_sources),
-        "evidence_samples": evidence_samples,
-        "source_event_count": _to_int(raw_json.get("event_count"))
-        or _to_int(page.get("observed_source_count"))
-        or 1,
-        "confidence": float(page.get("confidence") or 0),
-        "fetch_priority": (1.0 if page.get("is_primary") else 0.0)
-        + float(page.get("confidence") or 0),
-        "http_status": _to_int(page.get("http_status")),
-        "is_primary": bool(page.get("is_primary")),
-        "is_active": True,
-        "first_seen_at": checked_at,
-        "last_seen_at": checked_at,
-        "raw_json": _json_safe(page),
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-def _career_page_discovery_status_row(status: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    checked_at = _to_datetime(status.get("checked_at")) or now
-    return {
-        "company_id": _to_int(status.get("company_id")),
-        "company_slug": str(status.get("company_slug") or "").lower(),
-        "company_name": status.get("company_name") or "",
-        "website": status.get("website"),
-        "status": status.get("status") or "completed",
-        "discovery_event_count": _to_int(status.get("discovery_event_count")) or 0,
-        "career_page_count": _to_int(status.get("career_page_count")) or 0,
-        "error": status.get("error"),
-        "checked_at": checked_at,
-        "raw_json": _json_safe(status),
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-def _source_document_row(document: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    observed_at = _to_datetime(document.get("observed_at")) or now
-    return {
-        "discovered_url_id": _to_int(document.get("discovered_url_id")),
-        "company_id": _to_int(document.get("company_id")),
-        "company_slug": str(document.get("company_slug") or "").lower(),
-        "company_name": document.get("company_name") or "",
-        "source_type": document.get("source_type") or "unknown",
-        "source_key": document.get("source_key") or document.get("content_hash") or "",
-        "url": document.get("url"),
-        "normalized_url": document.get("normalized_url") or document.get("url"),
-        "title": document.get("title"),
-        "raw_text": document.get("raw_text"),
-        "clean_text": document.get("clean_text"),
-        "content_hash": document.get("content_hash") or "",
-        "http_status": _to_int(document.get("http_status")),
-        "fetched_at": _to_datetime(document.get("fetched_at")),
-        "observed_at": observed_at,
-        "raw_json": _json_safe(document),
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-def _page_classification_row(classification: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    classified_at = _to_datetime(classification.get("classified_at")) or now
-    return {
-        "source_document_id": _to_int(classification.get("source_document_id")),
-        "discovered_url_id": _to_int(classification.get("discovered_url_id")),
-        "company_id": _to_int(classification.get("company_id")),
-        "company_slug": str(classification.get("company_slug") or "").lower(),
-        "company_name": classification.get("company_name") or "",
-        "url": classification.get("url") or classification.get("normalized_url") or "",
-        "normalized_url": classification.get("normalized_url") or classification.get("url") or "",
-        "page_kind": classification.get("page_kind") or "unknown",
-        "confidence": float(classification.get("confidence") or 0),
-        "parser_name": classification.get("parser_name") or "unknown",
-        "parser_version": classification.get("parser_version") or "unknown",
-        "http_status": _to_int(classification.get("http_status")),
-        "job_title": classification.get("job_title"),
-        "role_titles": _as_list(classification.get("role_titles")),
-        "job_count": _to_int(classification.get("job_count")) or 0,
-        "evidence": _json_safe(classification.get("evidence") or {}),
-        "classified_at": classified_at,
-        "raw_json": _json_safe(classification),
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-def _external_job_row(job: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    observed_at = _to_datetime(job.get("observed_at")) or now
-    return {
-        "company_id": _to_int(job.get("company_id")),
-        "company_slug": str(job.get("company_slug") or "").lower(),
-        "company_name": job.get("company_name") or "",
-        "source_document_id": _to_int(job.get("source_document_id")),
-        "source": job.get("source") or "unknown",
-        "source_job_id": job.get("source_job_id"),
-        "posting_url": job.get("posting_url") or job.get("url") or "",
-        "normalized_url": job.get("normalized_url")
-        or job.get("posting_url")
-        or job.get("url")
-        or "",
-        "apply_url": job.get("apply_url"),
-        "title": job.get("title") or "",
-        "description_text": job.get("description_text"),
-        "location": job.get("location"),
-        "employment_type": job.get("employment_type"),
-        "department": job.get("department"),
-        "seniority": job.get("seniority"),
-        "salary_range": job.get("salary_range"),
-        "equity_range": job.get("equity_range"),
-        "visa": job.get("visa"),
-        "remote_policy": job.get("remote_policy"),
-        "status": job.get("status") or "active",
-        "role_fit": job.get("role_fit") or "unknown",
-        "extraction_confidence": float(job.get("extraction_confidence") or 0),
-        "observed_at": observed_at,
-        "raw_json": _json_safe(job),
-        "created_at": now,
-        "updated_at": now,
-    }
+def _company_name_matches_domain(name: str, domain: str) -> bool:
+    tokens = re.findall(r"[a-z0-9]+", normalize_company_name(name))
+    if len(tokens) > 1 and tokens[-1] in {
+        "incorporated",
+        "corporation",
+        "limited",
+        "corp",
+        "llc",
+        "ltd",
+        "inc",
+    }:
+        tokens.pop()
+    normalized = "".join(tokens)
+    label = domain.split(".", 1)[0].lower()
+    if not normalized or not label:
+        return False
+    if label == normalized:
+        return True
+    return any(
+        label == f"{prefix}{normalized}"
+        for prefix in ("get", "go", "hey", "join", "my", "ridewith", "team", "try", "use")
+    )
 
 
 def _to_int(value: Any) -> int | None:
@@ -1865,17 +1200,6 @@ def _to_int(value: Any) -> int | None:
         return int(float(value))
     except (TypeError, ValueError):
         return None
-
-
-def _to_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value:
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    return None
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -1890,11 +1214,3 @@ def _as_list(value: Any) -> list[Any]:
 
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
-
-
-def _url_dedupe_key(url: str) -> str:
-    return canonical_url_key(url) or url
-
-
-def _chunks(rows: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-    return [rows[index : index + size] for index in range(0, len(rows), size)]
