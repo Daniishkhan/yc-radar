@@ -139,6 +139,10 @@ def test_recurring_pipeline_and_freshness_timers_are_installed_safely() -> None:
     assert "python scripts/generate_weekly_targets.py" in refresh
     assert "--no-verify-hiring" in refresh
     assert "--no-llm" in refresh
+    outreach_stage = refresh.split(
+        "if ! run_stage company-outreach-queue", maxsplit=1
+    )[1].split("run_stage application-url-validation", maxsplit=1)[0]
+    assert "--limit 100" in outreach_stage
     assert "application_queue.json" in refresh
     assert "verification_queue.json" in refresh
     assert "company_outreach_queue" not in refresh.split(

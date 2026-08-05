@@ -72,6 +72,7 @@ if ! run_stage company-outreach-queue \
   python scripts/generate_weekly_targets.py \
   --no-verify-hiring \
   --no-llm \
+  --limit 100 \
   --output-dir "${CONTAINER_RUN_DIR}"; then
   exit "${exit_code}"
 fi
