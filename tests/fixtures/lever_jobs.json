@@ -1,0 +1,51 @@
+[
+  {
+    "id": "832ce96e-28f9-4f03-95e1-8a4e6ec667f0",
+    "createdAt": 1782907200000,
+    "text": "Senior Backend Engineer",
+    "categories": {
+      "location": "Remote - Americas",
+      "allLocations": ["Remote - Americas", "Toronto, Canada"],
+      "commitment": "Full-time",
+      "department": "Engineering",
+      "team": "Platform",
+      "level": "Senior"
+    },
+    "country": "CA",
+    "description": "<p>Build distributed API systems.</p>",
+    "descriptionPlain": "Build distributed API systems.",
+    "lists": [
+      {
+        "text": "Requirements",
+        "content": "<li>Design reliable Python services.</li>"
+      }
+    ],
+    "additional": "<p>Candidates must be based in the Americas.</p>",
+    "additionalPlain": "Candidates must be based in the Americas.",
+    "hostedUrl": "https://jobs.lever.co/acme/832ce96e-28f9-4f03-95e1-8a4e6ec667f0",
+    "applyUrl": "https://jobs.lever.co/acme/832ce96e-28f9-4f03-95e1-8a4e6ec667f0/apply",
+    "workplaceType": "remote",
+    "salaryRange": {
+      "currency": "CAD",
+      "interval": "year",
+      "min": 180000,
+      "max": 220000
+    }
+  },
+  {
+    "id": "c24931b8-6812-4d10-a12f-8bc9f6b52ac1",
+    "text": "Staff Software Engineer",
+    "categories": {
+      "location": "Berlin, Germany",
+      "allLocations": ["Berlin, Germany"],
+      "commitment": "Full-time",
+      "department": "Engineering"
+    },
+    "country": "DE",
+    "description": "<p>Build the core product.</p>",
+    "descriptionPlain": "Build the core product.",
+    "hostedUrl": "https://jobs.lever.co/acme/c24931b8-6812-4d10-a12f-8bc9f6b52ac1",
+    "applyUrl": "https://jobs.lever.co/acme/c24931b8-6812-4d10-a12f-8bc9f6b52ac1/apply",
+    "workplaceType": "hybrid"
+  }
+]

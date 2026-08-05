@@ -10,16 +10,18 @@ from yc_radar.services.job_source_registry import (
     JobSourceProviderRegistry,
     JobSourceRegistry,
     UnknownJobSourceProvider,
+    default_job_source_providers,
 )
 
 
 def test_provider_registry_detects_supported_sources_without_yc_context() -> None:
-    registry = JobSourceProviderRegistry([GreenhouseAdapter(), AshbyAdapter()])
+    registry = default_job_source_providers()
 
     greenhouse = registry.detect("https://job-boards.greenhouse.io/acme/jobs/42")
     ashby = registry.detect("https://jobs.ashbyhq.com/other/jobs/42")
+    lever = registry.detect("https://jobs.lever.co/third/jobs/42")
 
-    assert registry.providers == ("ashby", "greenhouse")
+    assert registry.providers == ("ashby", "greenhouse", "lever")
     assert greenhouse is not None
     assert greenhouse.provider == "greenhouse"
     assert greenhouse.external_id == "acme"
@@ -28,6 +30,10 @@ def test_provider_registry_detects_supported_sources_without_yc_context() -> Non
     assert ashby.provider == "ashby"
     assert ashby.external_id == "other"
     assert ashby.canonical_url == "https://jobs.ashbyhq.com/other"
+    assert lever is not None
+    assert lever.provider == "lever"
+    assert lever.external_id == "third"
+    assert lever.canonical_url == "https://jobs.lever.co/third"
 
 
 def test_provider_registry_rejects_unknown_provider_and_url() -> None:
@@ -35,7 +41,7 @@ def test_provider_registry_rejects_unknown_provider_and_url() -> None:
 
     assert registry.detect("https://jobs.example.com/acme") is None
     with pytest.raises(UnknownJobSourceProvider, match="unsupported"):
-        registry.adapter_for("lever")
+        registry.adapter_for("workable")
 
 
 def test_provider_registry_refuses_duplicate_provider_registration() -> None:

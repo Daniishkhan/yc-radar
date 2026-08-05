@@ -77,3 +77,73 @@ def test_deployment_refuses_active_jobs_and_untested_revisions() -> None:
     assert "DeploymentDocumentName" not in ssm_helper
     assert '"DocumentName": "AWS-RunShellScript"' in ssm_helper
     assert "radar-deploy --revision '${revision}'" in ssm_helper
+
+
+def test_recurring_pipeline_and_freshness_timers_are_installed_safely() -> None:
+    bootstrap = (REPO_ROOT / "deploy/aws/bootstrap-host.sh").read_text(encoding="utf-8")
+    host_deploy = (REPO_ROOT / "deploy/aws/deploy-host.sh").read_text(encoding="utf-8")
+    refresh = (REPO_ROOT / "deploy/aws/run-pipeline-refresh.sh").read_text(
+        encoding="utf-8"
+    )
+    freshness = (REPO_ROOT / "deploy/aws/check-pipeline-freshness.sh").read_text(
+        encoding="utf-8"
+    )
+    refresh_service = (
+        REPO_ROOT / "deploy/systemd/radar-pipeline-refresh.service"
+    ).read_text(encoding="utf-8")
+    refresh_timer = (
+        REPO_ROOT / "deploy/systemd/radar-pipeline-refresh.timer"
+    ).read_text(encoding="utf-8")
+    freshness_service = (
+        REPO_ROOT / "deploy/systemd/radar-pipeline-freshness.service"
+    ).read_text(encoding="utf-8")
+    freshness_timer = (
+        REPO_ROOT / "deploy/systemd/radar-pipeline-freshness.timer"
+    ).read_text(encoding="utf-8")
+    production_compose = (REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8")
+
+    for install_script in (bootstrap, host_deploy):
+        assert "run-pipeline-refresh.sh" in install_script
+        assert "check-pipeline-freshness.sh" in install_script
+        assert "radar-pipeline-refresh.service" in install_script
+        assert "radar-pipeline-refresh.timer" in install_script
+        assert "radar-pipeline-freshness.service" in install_script
+        assert "radar-pipeline-freshness.timer" in install_script
+
+    assert "'THEIRSTACK_API_KEY='" in bootstrap
+    assert "THEIRSTACK_API_KEY: ${THEIRSTACK_API_KEY:-}" in production_compose
+
+    migrations = host_deploy.index('"${compose[@]}" run --rm app alembic upgrade head')
+    timer_start = host_deploy.index("systemctl enable --now")
+    assert migrations < timer_start
+    assert "'radar-pipeline-refresh.service'" in host_deploy
+    assert "'radar-pipeline-freshness.service'" in host_deploy
+
+    assert "python scripts/sync_job_sources.py" in refresh
+    assert "--delay-seconds 2" in refresh
+    assert "python scripts/generate_job_opportunities.py" in refresh
+    assert "--limit 200000" in refresh
+    assert "--queue-limit 500" in refresh
+    assert "python scripts/generate_weekly_targets.py" in refresh
+    assert "--no-verify-hiring" in refresh
+    assert "--no-llm" in refresh
+    assert "application_queue.json" in refresh
+    assert "verification_queue.json" in refresh
+    assert "company_outreach_queue" not in refresh.split(
+        "run_stage application-url-validation", maxsplit=1
+    )[1].split("run_stage application-pool-metrics", maxsplit=1)[0]
+    assert "python scripts/validate_application_urls.py" in refresh
+    assert "python scripts/report_application_pool.py" in refresh
+    assert "application_pool_metrics.json" in refresh
+    assert "import_theirstack_jobs.py" not in refresh
+
+    assert "python scripts/check_pipeline_freshness.py" in freshness
+    assert "--max-age-hours 24" in freshness
+    assert "pipeline_freshness.json" in freshness
+
+    assert "ExecStart=/usr/local/sbin/radar-run-pipeline-refresh" in refresh_service
+    assert "OnCalendar=*-*-* 02:30:00 UTC" in refresh_timer
+    assert "Persistent=true" in refresh_timer
+    assert "ExecStart=/usr/local/sbin/radar-check-pipeline-freshness" in freshness_service
+    assert "OnCalendar=hourly" in freshness_timer
+    assert "Persistent=true" in freshness_timer

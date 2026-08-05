@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the YC Radar source and queue refresh daily
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+RandomizedDelaySec=30min
+Persistent=true
+Unit=radar-pipeline-refresh.service
+
+[Install]
+WantedBy=timers.target

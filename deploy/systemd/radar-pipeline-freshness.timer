@@ -1,0 +1,11 @@
+[Unit]
+Description=Check YC Radar complete-snapshot freshness hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+Unit=radar-pipeline-freshness.service
+
+[Install]
+WantedBy=timers.target

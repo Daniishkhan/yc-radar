@@ -188,6 +188,7 @@ create_runtime_environment() {
       "POSTGRES_PASSWORD=${postgres_password}" \
       'OPENAI_API_KEY=' \
       'FIRECRAWL_API_KEY=' \
+      'THEIRSTACK_API_KEY=' \
       > "${CONFIG_DIR}/runtime.env"
   fi
 
@@ -206,13 +207,32 @@ install_worker_services() {
   install -m 0755 "${APP_DIR}/deploy/aws/run-job.sh" /usr/local/sbin/radar-run-job
   install -m 0755 "${APP_DIR}/deploy/aws/jobctl.sh" /usr/local/sbin/radar-jobctl
   install -m 0755 \
+    "${APP_DIR}/deploy/aws/run-pipeline-refresh.sh" \
+    /usr/local/sbin/radar-run-pipeline-refresh
+  install -m 0755 \
+    "${APP_DIR}/deploy/aws/check-pipeline-freshness.sh" \
+    /usr/local/sbin/radar-check-pipeline-freshness
+  install -m 0755 \
     "${APP_DIR}/deploy/aws/configure-tailscale-exit-node.sh" \
     /usr/local/sbin/radar-configure-tailscale-exit-node
   install -m 0644 "${APP_DIR}/deploy/systemd/radar-deploy.service" /etc/systemd/system/radar-deploy.service
   install -m 0644 "${APP_DIR}/deploy/systemd/radar-job@.service" /etc/systemd/system/radar-job@.service
+  install -m 0644 \
+    "${APP_DIR}/deploy/systemd/radar-pipeline-refresh.service" \
+    /etc/systemd/system/radar-pipeline-refresh.service
+  install -m 0644 \
+    "${APP_DIR}/deploy/systemd/radar-pipeline-refresh.timer" \
+    /etc/systemd/system/radar-pipeline-refresh.timer
+  install -m 0644 \
+    "${APP_DIR}/deploy/systemd/radar-pipeline-freshness.service" \
+    /etc/systemd/system/radar-pipeline-freshness.service
+  install -m 0644 \
+    "${APP_DIR}/deploy/systemd/radar-pipeline-freshness.timer" \
+    /etc/systemd/system/radar-pipeline-freshness.timer
   /usr/local/sbin/radar-configure-tailscale-exit-node
   systemctl daemon-reload
   systemctl enable radar-deploy.service
+  systemctl enable radar-pipeline-refresh.timer radar-pipeline-freshness.timer
 }
 
 install_aws_cli

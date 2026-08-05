@@ -10,7 +10,8 @@ The stack provides:
 - an instance role limited to SSM, Common Crawl Athena/S3 resources, and the state bucket;
 - a retained encrypted EBS volume for Docker, Postgres, caches, and run artifacts;
 - an optional Tailscale exit node with stable public egress;
-- deployment and detached-job helpers.
+- deployment and detached-job helpers;
+- a daily public-source/queue refresh and an hourly complete-snapshot freshness check.
 
 The schema and YC seed data are rebuildable from the Alembic migration head and checked-in
 snapshots. Discovered source mappings and staging provenance must be backed up or rediscovered.
@@ -67,14 +68,49 @@ revision=$(git rev-parse HEAD)
 
 Pushes to `main` also deploy after CI passes by connecting through Tailscale SSH.
 
+Successful deploys enable `radar-pipeline-refresh.timer` and
+`radar-pipeline-freshness.timer`. The refresh runs daily at 02:30 UTC, synchronizes public
+Greenhouse, Ashby, and Lever sources sequentially, regenerates the three queues, validates the two
+job queues, and writes metrics under `data/local/runs/current/`. It does not run paid TheirStack
+fetches, Firecrawl, an LLM, or application submission. Inspect the schedule and last results with:
+
+```bash
+sudo systemctl list-timers 'radar-pipeline-*'
+sudo systemctl status radar-pipeline-refresh.service radar-pipeline-freshness.service
+sudo journalctl -u radar-pipeline-refresh.service -n 200 --no-pager
+```
+
+The repository's clean migration baseline is intentionally incompatible with legacy production
+revision `0005_job_structured_evidence`. Preserve that database and create a side-by-side target
+instead of running normal Alembic against it:
+
+```bash
+cd /srv/radar/app
+sudo docker compose --project-directory /srv/radar/app \
+  --env-file /srv/radar/config/runtime.env \
+  -f /srv/radar/app/compose.prod.yml \
+  run --rm app python scripts/migrate_legacy_database.py \
+    --target-database yc_radar_v2 \
+    --manifest /app/data/local/runs/migration/legacy-to-v2.json \
+    --yes \
+    --allow-source-outage
+```
+
+This command briefly disconnects the source database so PostgreSQL can take an exact physical
+clone. It never rewrites or drops the source. Inspect the manifest and target counts before
+changing `POSTGRES_DB` in `runtime.env`; keep the old database and a verified dump as rollback
+points.
+
 Because the schema is intentionally rebuildable, reset a replaceable worker database from a shell
 when a clean database is required:
 
 ```bash
-cd /srv/radar/repo
-sudo docker compose --env-file /srv/radar/config/runtime.env -f compose.prod.yml \
+cd /srv/radar/app
+sudo docker compose --project-directory /srv/radar/app \
+  --env-file /srv/radar/config/runtime.env -f compose.prod.yml \
   run --rm app python scripts/reset_database.py --yes --rebuild-schema
-sudo docker compose --env-file /srv/radar/config/runtime.env -f compose.prod.yml \
+sudo docker compose --project-directory /srv/radar/app \
+  --env-file /srv/radar/config/runtime.env -f compose.prod.yml \
   run --rm app python scripts/load_snapshots.py
 ```
 

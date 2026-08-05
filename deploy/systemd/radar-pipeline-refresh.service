@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh YC Radar public sources and regenerate application queues
+Wants=network-online.target
+After=network-online.target docker.service radar-deploy.service
+Requires=docker.service radar-deploy.service
+RequiresMountsFor=/srv/radar
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/radar-run-pipeline-refresh
+TimeoutStartSec=infinity
+TimeoutStopSec=5min
+KillSignal=SIGTERM
+KillMode=mixed
+Nice=5
+OOMScoreAdjust=200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radar-pipeline-refresh

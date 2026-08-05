@@ -55,7 +55,9 @@ active_jobs=$(systemctl list-units \
   --type=service \
   --state=activating,running \
   --no-legend \
-  'radar-job@*.service' || true)
+  'radar-job@*.service' \
+  'radar-pipeline-refresh.service' \
+  'radar-pipeline-freshness.service' || true)
 if [[ -n ${active_jobs} ]]; then
   echo "A managed Radar job is active; wait for it or stop it before deploying" >&2
   printf '%s\n' "${active_jobs}" >&2
@@ -93,10 +95,28 @@ install -m 0755 "${APP_DIR}/deploy/aws/deploy-host.sh" /usr/local/sbin/radar-dep
 install -m 0755 "${APP_DIR}/deploy/aws/run-job.sh" /usr/local/sbin/radar-run-job
 install -m 0755 "${APP_DIR}/deploy/aws/jobctl.sh" /usr/local/sbin/radar-jobctl
 install -m 0755 \
+  "${APP_DIR}/deploy/aws/run-pipeline-refresh.sh" \
+  /usr/local/sbin/radar-run-pipeline-refresh
+install -m 0755 \
+  "${APP_DIR}/deploy/aws/check-pipeline-freshness.sh" \
+  /usr/local/sbin/radar-check-pipeline-freshness
+install -m 0755 \
   "${APP_DIR}/deploy/aws/configure-tailscale-exit-node.sh" \
   /usr/local/sbin/radar-configure-tailscale-exit-node
 install -m 0644 "${APP_DIR}/deploy/systemd/radar-deploy.service" /etc/systemd/system/radar-deploy.service
 install -m 0644 "${APP_DIR}/deploy/systemd/radar-job@.service" /etc/systemd/system/radar-job@.service
+install -m 0644 \
+  "${APP_DIR}/deploy/systemd/radar-pipeline-refresh.service" \
+  /etc/systemd/system/radar-pipeline-refresh.service
+install -m 0644 \
+  "${APP_DIR}/deploy/systemd/radar-pipeline-refresh.timer" \
+  /etc/systemd/system/radar-pipeline-refresh.timer
+install -m 0644 \
+  "${APP_DIR}/deploy/systemd/radar-pipeline-freshness.service" \
+  /etc/systemd/system/radar-pipeline-freshness.service
+install -m 0644 \
+  "${APP_DIR}/deploy/systemd/radar-pipeline-freshness.timer" \
+  /etc/systemd/system/radar-pipeline-freshness.timer
 /usr/local/sbin/radar-configure-tailscale-exit-node
 systemctl daemon-reload
 
@@ -107,6 +127,9 @@ compose=(docker compose --project-directory "${APP_DIR}" --env-file "${RUNTIME_E
 "${compose[@]}" build --pull app
 "${compose[@]}" up -d postgres
 "${compose[@]}" run --rm app alembic upgrade head
+systemctl enable --now \
+  radar-pipeline-refresh.timer \
+  radar-pipeline-freshness.timer
 
 python3 - "${DEPLOY_STATE}" "${revision}" <<'PY'
 from datetime import UTC, datetime

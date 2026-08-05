@@ -1,0 +1,70 @@
+{
+  "data": [
+    {
+      "id": 7001,
+      "job_title": "Senior Backend Engineer",
+      "date_posted": "2026-08-01",
+      "discovered_at": "2026-08-01T10:00:00Z",
+      "description": "Work remotely from anywhere. Build production APIs in Python and PostgreSQL.",
+      "employment_statuses": ["full_time"],
+      "final_url": "https://job-boards.greenhouse.io/acmecloud/jobs/7001",
+      "url": "https://acme.example/careers/7001",
+      "source_url": "https://www.linkedin.com/jobs/view/7001",
+      "remote": true,
+      "hybrid": false,
+      "seniority": "senior",
+      "technology_slugs": ["python", "postgresql", "aws"],
+      "keyword_slugs": ["distributed-systems"],
+      "locations": [],
+      "countries": [],
+      "has_blurred_data": false,
+      "company_object": {
+        "id": "ts-acme",
+        "name": "Acme Cloud",
+        "domain": "acme.example",
+        "linkedin_url": "https://www.linkedin.com/company/acme-cloud",
+        "country": "United States",
+        "country_code": "US",
+        "yc_batch": "S24"
+      }
+    },
+    {
+      "id": 7002,
+      "job_title": "Staff Full-Stack Engineer",
+      "date_posted": "2026-07-31",
+      "description": "Remote role. Ship TypeScript and React products end to end.",
+      "employment_statuses": ["full_time"],
+      "final_url": "https://jobs.ashbyhq.com/unknownlabs/7002",
+      "url": "https://jobs.ashbyhq.com/unknownlabs/7002/application",
+      "remote": true,
+      "hybrid": false,
+      "seniority": "staff",
+      "technology_slugs": ["typescript", "react", "nodejs"],
+      "locations": [
+        {
+          "id": 2643743,
+          "display_name": "London, England, United Kingdom",
+          "name": "London",
+          "state": "England",
+          "country_name": "United Kingdom",
+          "country_code": "GB"
+        }
+      ],
+      "countries": ["United Kingdom"],
+      "has_blurred_data": false,
+      "company_object": {
+        "id": "ts-unknown-labs",
+        "name": "Unknown Labs",
+        "domain": null,
+        "country": "United Kingdom",
+        "country_code": "GB"
+      }
+    }
+  ],
+  "metadata": {
+    "total_results": 2,
+    "total_companies": 2,
+    "truncated_results": 0,
+    "truncated_companies": 0
+  }
+}

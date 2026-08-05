@@ -26,7 +26,7 @@ schema is a bounded work area with `runs`, `raw_observations`, `url_work_items`,
 are `load`, `work`, `status`, `requeue`, and `promote`; the Python interface lives in
 `services/staging.py`. Work advances through `fetch -> parse -> enrich -> promote`. Promotion is
 allowed only after a provider adapter returns a valid complete snapshot. Recurring refreshes of
-registered Greenhouse and Ashby sources use `scripts/sync_job_sources.py`, not staging.
+registered Greenhouse, Ashby, and Lever sources use `scripts/sync_job_sources.py`, not staging.
 
 ## Non-Negotiable Rules
 

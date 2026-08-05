@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from yc_radar.adapters.ashby import AshbyAdapter
 from yc_radar.adapters.base import JobSourceAdapter
 from yc_radar.adapters.greenhouse import GreenhouseAdapter
+from yc_radar.adapters.lever import LeverAdapter
 from yc_radar.services.database import companies_table
 from yc_radar.services.job_repository import JobRepository
 
@@ -94,7 +95,7 @@ class JobSourceProviderRegistry:
 
 
 def default_job_source_providers() -> JobSourceProviderRegistry:
-    return JobSourceProviderRegistry([GreenhouseAdapter(), AshbyAdapter()])
+    return JobSourceProviderRegistry([GreenhouseAdapter(), AshbyAdapter(), LeverAdapter()])
 
 
 class JobSourceRegistry:

@@ -1,0 +1,14 @@
+[Unit]
+Description=Fail when YC Radar has no recent complete source synchronization
+Wants=network-online.target
+After=network-online.target docker.service radar-deploy.service
+Requires=docker.service radar-deploy.service
+RequiresMountsFor=/srv/radar
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/radar-check-pipeline-freshness
+TimeoutStartSec=10min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radar-pipeline-freshness

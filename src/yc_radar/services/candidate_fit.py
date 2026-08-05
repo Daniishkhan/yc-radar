@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -63,6 +64,25 @@ ROLE_STATUS_SCORE_ADJUSTMENTS = {
     "exclude": -30,
 }
 
+# Observation-mode jobs are useful current leads, but their source cannot infer absence and does
+# not carry the confidence of a complete provider snapshot. Keep their score material enough to
+# enter the review pool while capping it below every strong lifecycle-managed opportunity.
+OBSERVATION_OPPORTUNITY_SCORE_CAP = 64
+OBSERVATION_FRESHNESS_DAYS = 45
+_OBSERVATION_ROLE_SCORES = {
+    "strong": 36,
+    "possible": 22,
+}
+_OBSERVATION_REMOTE_SCORE_ADJUSTMENTS = {
+    "pakistan_explicit": 18,
+    "global_explicit": 16,
+    "regional_unconfirmed": 2,
+    "remote_unclear": 0,
+    "restricted_remote": -14,
+    "onsite_explicit": -18,
+    "no_remote_evidence": -4,
+}
+
 SENIOR_TERMS = ("senior", "sr", "staff", "principal", "lead")
 BACKEND_ROLE_TERMS = (
     "backend",
@@ -85,6 +105,9 @@ BACKEND_ROLE_TERMS = (
     "pipelines",
     "integration",
     "integrations",
+    "devops",
+    "site reliability",
+    "sre",
     "python",
     "node",
     "fastapi",
@@ -138,6 +161,7 @@ EXCLUDED_ROLE_TERMS = (
     "human resources",
     "people partner",
     "account manager",
+    "freelance",
 )
 ENGINEERING_DOMAIN_MODIFIER_TERMS = (
     "marketing",
@@ -222,6 +246,9 @@ ENGINEERING_LEADERSHIP_TITLE_PATTERNS = (
     r"\bhead\s+of\s+(?:backend|infrastructure|platform|software)"
     r"(?:\s+engineering)?\b",
     r"\b(?:engineer|engineering)\s+team\s+lead\b",
+    r"\b(?:director|head|manager)\b.{0,40}\b(?:ai|backend|data|front[ -]?end|"
+    r"full[ -]?stack|infrastructure|machine learning|platform|software)\s+"
+    r"(?:engineer|engineering)\b",
 )
 BUSINESS_DEVELOPMENT_TITLE_PATTERNS = (
     r"^\s*(?:(?:founding|global|lead|principal|regional|senior|sr\.?|strategic|"
@@ -429,17 +456,29 @@ _GENERIC_REMOTE_LOCATION_PATTERNS = (
     r"remote (?:eligible|first|optional|position|role|work)",
     r"(?:distributed|remote) first",
 )
+_GLOBAL_ANYWHERE_CLAIM_PATTERN = (
+    r"(?:anywhere\s+in\s+(?:the\s+)?world\b|"
+    r"anywhere\b(?![\s,;:()\-–—/|]*(?:in|within|across|where|except|excluding|"
+    r"other\s+than|but\s+not|for\s+(?:up\s+to\s+)?\d|"
+    r"\d{1,3}\s+(?:days?|weeks?))\b))"
+)
 _GLOBAL_REMOTE_CLAIM_PATTERNS = (
-    r"\b(?:this|the)\s+(?:job|role|position|opportunity)\s+(?:is|will\s+be|can\s+be|may\s+be)\s+(?:fully\s+)?remote(?:ly)?\s+(?:from\s+)?(?:anywhere|worldwide|world wide|globally)\b",
-    r"\bwork\s+remotely\s+from\s+(?:anywhere|worldwide|world wide|any\s+country)\b",
-    r"\bwork(?:ing)?\s+from\s+anywhere(?:\s+in\s+(?:the\s+)?world)?\b",
+    rf"\b(?:this|the)\s+(?:job|role|position|opportunity)\s+"
+    rf"(?:is|will\s+be|can\s+be|may\s+be)\s+(?:fully\s+)?remote(?:ly)?\s+"
+    rf"(?:from\s+)?(?:{_GLOBAL_ANYWHERE_CLAIM_PATTERN}|worldwide|world wide|globally)\b",
+    rf"\bwork\s+remotely\s+from\s+"
+    rf"(?:{_GLOBAL_ANYWHERE_CLAIM_PATTERN}|worldwide|world wide|any\s+country)\b",
+    rf"\bwork(?:ing)?\s+from\s+{_GLOBAL_ANYWHERE_CLAIM_PATTERN}",
     r"\bwork(?:ing)?\s+from\s+any\s+(?:country|location)\b",
     r"\b(?:job|role|position|work)\s+(?:can|may)\s+be\s+performed\s+from\s+any\s+(?:country|location|place)\b",
     r"\bwork\s+(?:from\s+)?wherever\s+you\s+(?:are|live)\b",
-    r"\b(?:based|located)\s+anywhere(?:\s+in\s+(?:the\s+)?world)?\b",
-    r"\bopen\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:anywhere|worldwide|globally)\b",
+    rf"\b(?:based|located)\s+{_GLOBAL_ANYWHERE_CLAIM_PATTERN}",
+    rf"\bopen\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?"
+    rf"(?:{_GLOBAL_ANYWHERE_CLAIM_PATTERN}|worldwide|globally)\b",
     r"\bopen\s+to\s+(?:candidates?|applicants?|employees?)\s+(?:based\s+)?(?:in|from)\s+any\s+country\b",
-    r"\b(?:hire|hiring|employ)\s+(?:people|employees?|candidates?|talent)?\s*(?:from|in)\s+(?:anywhere|any\s+country|the\s+world|worldwide|globally)\b",
+    rf"\b(?:hire|hiring|employ)\s+(?:people|employees?|candidates?|talent)?\s*"
+    rf"(?:from|in)\s+(?:{_GLOBAL_ANYWHERE_CLAIM_PATTERN}|any\s+country|"
+    rf"the\s+world|worldwide|globally)\b",
     r"\b(?:eligible|supported)\s+(?:countries|locations|regions)\b.{0,80}\b(?:worldwide|anywhere|all\s+countries)\b",
     r"\blocation[- ](?:agnostic|independent)\b",
     r"\bno\s+(?:geographic|geographical|location|country)\s+restrictions\b",
@@ -519,6 +558,11 @@ _GLOBAL_SCOPE_LIMITATION_PATTERNS = (
     r"\b(?:countries|locations)\s+where\s+we\s+(?:have|operate|can\s+hire|can\s+employ)\b",
     r"\bwhere\s+we\s+have\s+(?:an?\s+)?(?:entity|payroll|office)\b",
     r"\b(?:located|based|work(?:ing)?)\s+anywhere\s+(?:that|where)\s+(?:our|the|an?)?\s*(?:eor|employer\s+of\s+record|payroll|entity)\b.{0,80}\b(?:supports?|allows?|operates?)\b",
+    r"\bwork(?:ing)?\s+from\s+anywhere\s+where\s+[a-z0-9&.' -]{1,60}\s+operates?\b",
+)
+_NON_ROLE_GLOBAL_REMOTE_PATTERNS = (
+    r"\bwork(?:ing)?\s+from\s+anywhere\b[\s\S]{0,160}\b(?:up\s+to\s+)?"
+    r"\d{1,3}\s+(?:days?|weeks?)\s+(?:per|a)\s+year\b",
 )
 _PAKISTAN_EXCLUSION_PATTERNS = (
     r"\b(?:except|excluding|excludes?|excluded|other\s+than|but\s+not)\b.{0,60}\bpakistan\b",
@@ -566,6 +610,20 @@ _TIMEZONE_CONSTRAINT_PATTERNS = (
     r"\b(?:utc|gmt)\s*[+-]\s*\d{1,2}(?::\d{2})?\b",
     r"\b(?:u\.?s\.?|european|japan|australia|apac)\s+(?:business\s+)?(?:hours|time\s+zones?)\b",
     r"\b(?:time\s+zones?|hours)\s+(?:between|within|overlapping)\b.{0,60}\b(?:utc|gmt)\b",
+    r"\b(?:eastern|central|mountain|pacific)\s+"
+    r"(?:(?:standard|daylight)\s+)?(?:business\s+)?(?:time|hours)\b",
+)
+_US_STATE_TITLE_PATTERNS = (
+    r"\b(?:alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|"
+    r"florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|"
+    r"maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|"
+    r"nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|"
+    r"north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|"
+    r"south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|"
+    r"wisconsin|wyoming)\b",
+    r"\bremote(?:\s+in)?\s+(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|ia|ks|"
+    r"ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|"
+    r"sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b",
 )
 
 
@@ -626,9 +684,15 @@ def _has_any_title_term(text: str, terms: tuple[str, ...]) -> bool:
     return False
 
 
-def classify_role_text(title: str, context: str = "") -> RoleClassification:
+def classify_role_text(
+    title: str,
+    context: str = "",
+    *,
+    seniority: str | None = None,
+) -> RoleClassification:
     title_text = title.lower()
     combined = f"{title} {context}".lower()
+    normalized_seniority = re.sub(r"[^a-z]+", "_", (seniority or "").casefold()).strip("_")
     is_full_stack = _has_any_signal(combined, FULL_STACK_TERMS)
     is_full_stack_title = _has_any_signal(title_text, FULL_STACK_TERMS)
     has_backend_signal = _has_any_signal(combined, BACKEND_ROLE_TERMS)
@@ -642,7 +706,10 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
             title_text,
         )
     )
-    has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS)
+    has_senior_signal = _has_any_signal(title_text, SENIOR_TERMS) or normalized_seniority in {
+        "senior",
+        "staff",
+    }
     is_founding = _has_any_signal(title_text, FOUNDING_TERMS)
     has_frontend_only_title = _has_any_signal(title_text, FRONTEND_ONLY_TITLE_TERMS)
     has_ai_engineering_title = bool(
@@ -737,6 +804,11 @@ def classify_role_text(title: str, context: str = "") -> RoleClassification:
     if is_founding and has_backend_signal:
         return RoleClassification("possible", ["Founding role has backend-heavy signals"])
     if is_founding or is_full_stack or has_software_signal:
+        if has_software_signal and normalized_seniority == "mid_level":
+            return RoleClassification(
+                "possible",
+                ["Provider-classified mid-level software engineering role"],
+            )
         return RoleClassification("weak", ["Engineering role exists, but target-lane fit is unclear"])
     return RoleClassification("weak", ["No clear target software engineering role signal"])
 
@@ -764,6 +836,21 @@ def _job_context(job: dict[str, Any]) -> str:
     if isinstance(skills, list):
         chunks.extend(str(skill) for skill in skills)
     return " ".join(chunks)
+
+
+def job_seniority(job: dict[str, Any]) -> str | None:
+    """Return provider-reported seniority without inferring it from free text."""
+    direct = str(job.get("seniority") or "").strip()
+    if direct:
+        return direct
+    evidence = job.get("structured_evidence")
+    if not isinstance(evidence, dict):
+        return None
+    provider_metadata = evidence.get("provider_metadata")
+    if not isinstance(provider_metadata, dict):
+        return None
+    value = str(provider_metadata.get("seniority") or "").strip()
+    return value or None
 
 
 def _best_status(classifications: list[tuple[str, RoleClassification]]) -> str:
@@ -997,14 +1084,22 @@ def _cluster_matching_job_provenance(
     classifications: list[tuple[str, RoleClassification, dict[str, Any] | None]],
 ) -> list[dict[str, Any]]:
     matching_jobs: list[dict[str, Any]] = []
+    role_status_by_job_id: dict[int, str] = {}
     for _, classification, job in classifications:
         if job is None or classification.status not in {"strong", "possible"}:
             continue
         matching_jobs.append(job)
+        role_status_by_job_id[id(job)] = classification.status
 
     clusters: list[dict[str, Any]] = []
     for jobs, identity_anchors in _cluster_jobs(matching_jobs):
-        variants = [_job_provenance(job) for job in jobs]
+        variants = [
+            _job_provenance(
+                job,
+                role_match_status=role_status_by_job_id.get(id(job)),
+            )
+            for job in jobs
+        ]
         representative = min(
             variants,
             key=lambda item: (
@@ -1046,7 +1141,15 @@ def role_focus_record(
             role_inputs.append((title, title, None))
 
     classifications = [
-        (title, classify_role_text(title, context), inventory_job)
+        (
+            title,
+            classify_role_text(
+                title,
+                context,
+                seniority=job_seniority(inventory_job) if inventory_job is not None else None,
+            ),
+            inventory_job,
+        )
         for title, context, inventory_job in role_inputs
     ]
     matching_titles = [
@@ -1226,7 +1329,11 @@ def role_focus_record(
     return result
 
 
-def _job_provenance(job: dict[str, Any]) -> dict[str, Any]:
+def _job_provenance(
+    job: dict[str, Any],
+    *,
+    role_match_status: str | None = None,
+) -> dict[str, Any]:
     def iso(value: Any) -> Any:
         return value.isoformat() if hasattr(value, "isoformat") else value
 
@@ -1242,8 +1349,10 @@ def _job_provenance(job: dict[str, Any]) -> dict[str, Any]:
         "source_external_id": job.get("source_external_id"),
         "source_url": job.get("source_url"),
         "posting_url": job.get("posting_url"),
+        "apply_url": job.get("apply_url"),
         "location": job.get("location"),
         "department": job.get("department"),
+        "role_match_status": role_match_status,
         "remote_eligibility": remote.status,
         "remote_reasons": remote.reasons,
         "remote_evidence": remote.evidence,
@@ -1253,6 +1362,9 @@ def _job_provenance(job: dict[str, Any]) -> dict[str, Any]:
         "status_confidence": job.get("status_confidence"),
         "source_published_at": iso(job.get("source_published_at")),
         "source_updated_at": iso(job.get("source_updated_at")),
+        "observed_at": iso(job.get("observed_at")),
+        "first_seen_at": iso(job.get("first_seen_at")),
+        "last_seen_at": iso(job.get("last_seen_at")),
     }
 
 
@@ -1265,6 +1377,7 @@ class _StructuredRemoteEvidence:
     primary_location_label: str = ""
     location_labels: tuple[str, ...] = ()
     eligibility_text: str = ""
+    posting_location_unverified: bool = False
 
 
 def _stringify_evidence_value(value: Any) -> str:
@@ -1295,6 +1408,7 @@ def _structured_remote_evidence(job: dict[str, Any]) -> _StructuredRemoteEvidenc
     workplace = raw.get("workplace")
     workplace = workplace if isinstance(workplace, dict) else {}
     workplace_type = _normalise_remote_location(str(workplace.get("type") or ""))
+    scope_kind = str(workplace.get("scope_kind") or "").strip().casefold()
     is_remote = workplace.get("is_remote")
     remote = workplace_type == "remote" or is_remote is True
     onsite = workplace_type in {"hybrid", "on site", "onsite"} or is_remote is False
@@ -1345,6 +1459,7 @@ def _structured_remote_evidence(job: dict[str, Any]) -> _StructuredRemoteEvidenc
         primary_location_label=primary_label,
         location_labels=tuple(_dedupe_preserve_order(labels)),
         eligibility_text=" ".join(eligibility_parts),
+        posting_location_unverified=scope_kind == "posting_location_unverified",
     )
 
 
@@ -1416,8 +1531,12 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
         title_raw, _REGIONAL_UNCONFIRMED_PATTERNS
     )
     global_title_remote_scope = _title_global_remote_scope_match(title_raw)
+    pakistan_title_remote_scope = _title_remote_region_match(
+        title_raw,
+        (r"\bpakistan\b",),
+    )
 
-    global_match = _first_pattern_match(descriptive_evidence, _GLOBAL_REMOTE_CLAIM_PATTERNS)
+    global_match = _role_global_remote_claim(descriptive_evidence)
     role_remote_match = _first_pattern_match(
         descriptive_evidence, _ROLE_REMOTE_CLAIM_PATTERNS
     )
@@ -1462,9 +1581,12 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("restriction", global_limitation),
         )
 
-    restricted_title_scope = _title_region_only_match(
-        title_raw, _RESTRICTED_REGION_PATTERNS
-    ) or restricted_title_remote_scope
+    restricted_title_scope = (
+        _title_region_only_match(title_raw, _RESTRICTED_REGION_PATTERNS)
+        or restricted_title_remote_scope
+        or _title_location_qualifier_match(title_raw, _RESTRICTED_REGION_PATTERNS)
+        or _first_pattern_match(title_raw, _US_STATE_TITLE_PATTERNS)
+    )
     if restricted_title_scope and remote_signal:
         return _remote_result(
             "restricted_remote",
@@ -1517,35 +1639,36 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     )
     location_only_country_evidence = ""
     if country_values:
-        if remote_signal and any(
-            _matches_any_pattern(value, _RESTRICTED_REGION_PATTERNS)
-            for value in country_values
-        ):
-            return _remote_result(
-                "restricted_remote",
-                "Structured posting location restricts the role outside Pakistan",
-                country_evidence,
-            )
-        if remote_signal and any(
-            _matches_any_pattern(value, _REGIONAL_UNCONFIRMED_PATTERNS)
-            for value in country_values
-        ):
-            return _remote_result(
-                "regional_unconfirmed",
-                "A broad posting region is named, but applicant eligibility is unconfirmed",
-                country_evidence,
-            )
         location_only_country_evidence = country_evidence
-        has_unconfirmed_pakistan_or_global_location = any(
-            re.search(r"\bpakistan\b", value) or _is_global_scope_value(value)
-            for value in country_values
-        )
-        if remote_signal and not has_unconfirmed_pakistan_or_global_location:
-            return _remote_result(
-                "restricted_remote",
-                "Structured posting location restricts the remote role outside Pakistan",
-                country_evidence,
+        if not structured.posting_location_unverified:
+            if remote_signal and any(
+                _matches_any_pattern(value, _RESTRICTED_REGION_PATTERNS)
+                for value in country_values
+            ):
+                return _remote_result(
+                    "restricted_remote",
+                    "Structured posting location restricts the role outside Pakistan",
+                    country_evidence,
+                )
+            if remote_signal and any(
+                _matches_any_pattern(value, _REGIONAL_UNCONFIRMED_PATTERNS)
+                for value in country_values
+            ):
+                return _remote_result(
+                    "regional_unconfirmed",
+                    "A broad posting region is named, but applicant eligibility is unconfirmed",
+                    country_evidence,
+                )
+            has_unconfirmed_pakistan_or_global_location = any(
+                re.search(r"\bpakistan\b", value) or _is_global_scope_value(value)
+                for value in country_values
             )
+            if remote_signal and not has_unconfirmed_pakistan_or_global_location:
+                return _remote_result(
+                    "restricted_remote",
+                    "Structured posting location restricts the remote role outside Pakistan",
+                    country_evidence,
+                )
 
     scope_with_remote = location_scope
     if (
@@ -1557,6 +1680,7 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
 
     if (
         not global_primary_location
+        and not structured.posting_location_unverified
         and _structured_remote_location_is_restricted(scope_with_remote)
     ):
         return _remote_result(
@@ -1614,6 +1738,7 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     if remote_signal and (
         re.search(r"\bpakistan\b", location_scope)
         or pakistan_match
+        or pakistan_title_remote_scope
         or (legal_work_countries and legal_work_countries[1])
     ):
         return _remote_result(
@@ -1621,6 +1746,7 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             "Remote eligibility explicitly names Pakistan",
             _evidence("location", location_raw) if "pakistan" in location else "",
             _evidence("eligibility", pakistan_match or ""),
+            _evidence("title eligibility", pakistan_title_remote_scope or ""),
             _evidence("legal work countries", legal_work_countries[0])
             if legal_work_countries and legal_work_countries[1]
             else "",
@@ -1645,13 +1771,25 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
     regional_location_match = _first_pattern_match(
         scope_with_remote, _REGIONAL_UNCONFIRMED_PATTERNS
     )
-    if remote_signal and (regional_location_match or regional_description_match or timezone_match):
+    location_timezone_match = _first_pattern_match(
+        scope_with_remote, _TIMEZONE_CONSTRAINT_PATTERNS
+    )
+    if remote_signal and (
+        regional_location_match
+        or regional_description_match
+        or timezone_match
+        or location_timezone_match
+    ):
         return _remote_result(
             "regional_unconfirmed",
             "Regional or timezone eligibility is present, but Pakistan is not explicit",
             _evidence(
                 "regional signal",
-                regional_location_match or regional_description_match or timezone_match or "",
+                regional_location_match
+                or regional_description_match
+                or timezone_match
+                or location_timezone_match
+                or "",
             ),
         )
 
@@ -1736,6 +1874,26 @@ def _title_region_only_match(title: str, region_patterns: tuple[str, ...]) -> st
     return None
 
 
+def _title_location_qualifier_match(
+    title: str,
+    region_patterns: tuple[str, ...],
+) -> str | None:
+    """Match delimited title geography without treating product domains as restrictions."""
+    for region in region_patterns:
+        match = _first_pattern_match(
+            title,
+            (
+                rf"(?:^|[-–—,/|:()\[\]])\s*(?:the\s+)?(?:{region})"
+                rf"(?=\s*(?:$|[-–—,/|:()\[\]]))",
+                rf"\b(?:engineer|developer)\b\s+(?:the\s+)?(?:{region})"
+                rf"(?=\s*(?:$|[-–—,/|:()\[\]]))",
+            ),
+        )
+        if match:
+            return match
+    return None
+
+
 def _title_remote_region_match(
     title: str, region_patterns: tuple[str, ...]
 ) -> str | None:
@@ -1746,7 +1904,7 @@ def _title_remote_region_match(
             title,
             (
                 rf"(?:{region})[-–—,/|:()\[\]\s]*remote\b",
-                rf"\bremote[-–—,/|:()\[\]\s]*(?:the\s+)?(?:{region})"
+                rf"\bremote[-–—,/|:()\[\]\s]*(?:in\s+)?(?:the\s+)?(?:{region})"
                 rf"(?:\s*[)\]])?",
             ),
         )
@@ -1791,6 +1949,13 @@ def _title_work_arrangement_remote_match(title: str) -> str | None:
 
 def _has_global_remote_claim(text: str) -> bool:
     return _first_pattern_match(text, _GLOBAL_REMOTE_CLAIM_PATTERNS) is not None
+
+
+def _role_global_remote_claim(text: str) -> str | None:
+    role_text = text
+    for pattern in _NON_ROLE_GLOBAL_REMOTE_PATTERNS:
+        role_text = re.sub(pattern, " ", role_text, flags=re.IGNORECASE)
+    return _first_pattern_match(role_text, _GLOBAL_REMOTE_CLAIM_PATTERNS)
 
 
 def _is_global_scope_value(value: str) -> bool:
@@ -1932,11 +2097,153 @@ def _generic_location_restriction_match(text: str) -> str | None:
     return match
 
 
-def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
+def _observation_matching_clusters(
+    target: dict[str, Any],
+) -> list[list[dict[str, Any]]]:
+    clusters: list[list[dict[str, Any]]] = []
+    for cluster in target.get("matching_jobs") or []:
+        if not isinstance(cluster, dict):
+            continue
+        posting_variants = cluster.get("posting_variants")
+        candidates = posting_variants if isinstance(posting_variants, list) else [cluster]
+        observation_variants: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or candidate.get("lifecycle_managed") is True:
+                continue
+            confidence = str(candidate.get("status_confidence") or "").casefold()
+            if confidence == "observation" or confidence.endswith("_observation"):
+                observation_variants.append(candidate)
+        if observation_variants:
+            clusters.append(observation_variants)
+    return clusters
+
+
+def _has_usable_job_url(job: dict[str, Any]) -> bool:
+    values = [job.get("apply_url"), job.get("posting_url")]
+    structured = job.get("structured_evidence")
+    application = structured.get("application") if isinstance(structured, dict) else None
+    if isinstance(application, dict):
+        values.extend((application.get("apply_url"), application.get("posting_url")))
+    return any(_normalise_job_url(value) is not None for value in values)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _has_recent_observation(job: dict[str, Any], *, now: datetime) -> bool:
+    source_timestamps = [
+        parsed
+        for key in ("source_published_at", "source_updated_at")
+        if (parsed := _parse_datetime(job.get(key))) is not None
+    ]
+    fallback_timestamps = [
+        parsed
+        for key in ("observed_at", "last_seen_at", "first_seen_at")
+        if (parsed := _parse_datetime(job.get(key))) is not None
+    ]
+    timestamps = source_timestamps or fallback_timestamps
+    if not timestamps:
+        return False
+    latest = max(timestamps)
+    normalized_now = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+    return normalized_now - timedelta(days=OBSERVATION_FRESHNESS_DAYS) <= latest <= (
+        normalized_now + timedelta(days=1)
+    )
+
+
+def _score_observation_variant(
+    job: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[int, list[str]]:
+    role_status = str(job.get("role_match_status") or "possible")
+    score = _OBSERVATION_ROLE_SCORES.get(role_status, 0)
+    reasons = ["Matching role evidence lacks a complete provider snapshot"]
+    if role_status == "strong":
+        reasons.append("Observation-mode evidence has a strong role match")
+    else:
+        reasons.append("Observation-mode evidence has a possible role match")
+
+    remote_status = str(job.get("remote_eligibility") or "no_remote_evidence")
+    score += _OBSERVATION_REMOTE_SCORE_ADJUSTMENTS.get(remote_status, 0)
+    remote_reasons = {
+        "pakistan_explicit": "Observation explicitly includes Pakistan",
+        "global_explicit": "Observation is explicitly worldwide remote",
+        "regional_unconfirmed": (
+            "Observation names a region or timezone, but Pakistan is unconfirmed"
+        ),
+        "remote_unclear": "Observation is remote with unclear country eligibility",
+        "restricted_remote": "Observation appears geographically restricted",
+        "onsite_explicit": "Observation explicitly requires onsite or hybrid work",
+        "no_remote_evidence": "Observation has no role-specific remote evidence",
+    }
+    reasons.append(remote_reasons.get(remote_status, "Observation has unknown remote evidence"))
+
+    if _has_usable_job_url(job):
+        score += 6
+        reasons.append("Observation includes a usable job or application URL")
+    if _has_recent_observation(job, now=now):
+        score += 4
+        reasons.append(
+            f"Observation was published, updated, or seen within "
+            f"{OBSERVATION_FRESHNESS_DAYS} days"
+        )
+    return score, reasons
+
+
+def _observation_opportunity_score(
+    target: dict[str, Any],
+    *,
+    now: datetime,
+) -> tuple[int, list[str]] | None:
+    clusters = _observation_matching_clusters(target)
+    if not clusters:
+        return None
+    scored_clusters = [
+        max(
+            (_score_observation_variant(job, now=now) for job in variants),
+            key=lambda item: item[0],
+        )
+        for variants in clusters
+    ]
+    best_score, best_reasons = max(scored_clusters, key=lambda item: item[0])
+    evidence_bonus = min(len(clusters), 3) * 2
+    score = min(best_score + evidence_bonus, OBSERVATION_OPPORTUNITY_SCORE_CAP)
+    if len(clusters) > 1:
+        best_reasons.append(
+            f"{len(clusters)} matching observation-mode postings add corroborating evidence"
+        )
+    return score, best_reasons
+
+
+def current_opportunity_score(
+    target: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> tuple[int, list[str]]:
     matching_titles = list(target.get("matching_job_titles") or [])
     active_count = int(target.get("managed_active_job_count") or 0)
     managed_matching_count = int(target.get("managed_matching_job_count") or 0)
     if not managed_matching_count:
+        observation_score = _observation_opportunity_score(
+            target,
+            now=now or datetime.now(UTC),
+        )
+        if observation_score is not None:
+            return observation_score
         if active_count:
             return -12, ["Has active jobs, but none match the target engineering lanes"]
         role_status = str(target.get("role_match_status") or "weak")
@@ -1988,9 +2295,13 @@ def current_opportunity_score(target: dict[str, Any]) -> tuple[int, list[str]]:
     return score, reasons
 
 
-def apply_current_opportunity_score(target: dict[str, Any]) -> None:
+def apply_current_opportunity_score(
+    target: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> None:
     base_score = int(target.get("company_fit_score", target.get("fit_score") or 0))
-    opportunity_score, reasons = current_opportunity_score(target)
+    opportunity_score, reasons = current_opportunity_score(target, now=now)
     target["company_fit_score"] = base_score
     target["opportunity_score"] = opportunity_score
     target["opportunity_score_reasons"] = reasons

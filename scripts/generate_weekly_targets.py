@@ -31,7 +31,10 @@ from yc_radar.services.hiring_verifier import (
     verification_cache_key,
     verify_company_hiring,
 )
-from yc_radar.services.job_repository import JobRepository
+from yc_radar.services.job_repository import (
+    DEFAULT_OBSERVATION_MAX_AGE_DAYS,
+    JobRepository,
+)
 
 CSV_FIELDS = [
     "rank",
@@ -191,25 +194,28 @@ def main() -> None:
     generated_at = datetime.now(UTC).isoformat()
     json_path = output_dir / "weekly_targets.json"
     csv_path = output_dir / "weekly_targets.csv"
-    write_json(
-        json_path,
-        {
-            "schema_version": 3,
-            "generated_at": generated_at,
-            "candidate_pool_size": candidate_pool_size,
-            "target_count": len(targets),
-            "firecrawl": {
-                "enabled": bool(verify_hiring and settings.firecrawl_api_key),
-                "max_pages_per_company": max(1, args.max_pages_per_company),
-                "concurrency": min(max(1, args.firecrawl_concurrency), 2),
-                "new_pages_used": new_firecrawl_pages,
-                "cached_verifications": cached_verifications,
-                "cache_path": str(verification_cache_path),
-            },
-            "targets": targets,
+    outreach_json_path = output_dir / "company_outreach_queue.json"
+    outreach_csv_path = output_dir / "company_outreach_queue.csv"
+    payload = {
+        "schema_version": 4,
+        "queue_kind": "company_outreach",
+        "generated_at": generated_at,
+        "candidate_pool_size": candidate_pool_size,
+        "target_count": len(targets),
+        "firecrawl": {
+            "enabled": bool(verify_hiring and settings.firecrawl_api_key),
+            "max_pages_per_company": max(1, args.max_pages_per_company),
+            "concurrency": min(max(1, args.firecrawl_concurrency), 2),
+            "new_pages_used": new_firecrawl_pages,
+            "cached_verifications": cached_verifications,
+            "cache_path": str(verification_cache_path),
         },
-    )
+        "targets": targets,
+    }
+    write_json(json_path, payload)
     write_csv(csv_path, targets)
+    write_json(outreach_json_path, payload)
+    write_csv(outreach_csv_path, targets)
 
     print(
         f"Loaded {len(companies)} companies and "
@@ -218,6 +224,10 @@ def main() -> None:
     print(f"Ranked candidate pool: {candidate_pool_size} companies.")
     print(f"Wrote {len(targets)} weekly targets: {json_path}")
     print(f"Wrote CSV: {csv_path}")
+    print(
+        "Wrote the distinct company outreach queue: "
+        f"{outreach_json_path} and {outreach_csv_path}"
+    )
     if verify_hiring and not settings.firecrawl_api_key:
         print(
             "Firecrawl verification requested but FIRECRAWL_API_KEY is not set; hiring is unknown."
@@ -230,7 +240,9 @@ def main() -> None:
 def load_jobs_by_slug(database_url: str) -> dict[str, list[dict[str, Any]]]:
     engine = engine_from_url(database_url)
     jobs_by_slug: dict[str, list[dict[str, Any]]] = {}
-    for job in JobRepository(engine).list_jobs():
+    for job in JobRepository(engine).list_jobs(
+        observation_max_age_days=DEFAULT_OBSERVATION_MAX_AGE_DAYS
+    ):
         jobs_by_slug.setdefault(str(job["company_slug"]), []).append(job)
     engine.dispose()
     return jobs_by_slug

@@ -17,9 +17,9 @@ company -> company source -> sync run -> canonical jobs
                          local CSV/JSON shortlist
 ```
 
-The company is the root identity. YC is one optional directory source; Greenhouse and Ashby are
-job-board sources. A future paid vendor is another source or evidence producer, not a replacement
-company/job model.
+The company is the root identity. YC is one optional directory source; Greenhouse, Ashby, and
+Lever are job-board sources. A paid vendor is another source or evidence producer, not a
+replacement company/job model.
 
 ## Canonical Data Model
 

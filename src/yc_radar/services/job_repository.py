@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, and_, case, insert, literal, select, update
+from sqlalchemy import Select, and_, case, func, insert, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Engine
 
@@ -14,6 +14,8 @@ from yc_radar.services.database import (
     jobs_table,
     sync_runs_table,
 )
+
+DEFAULT_OBSERVATION_MAX_AGE_DAYS = 45
 
 
 class JobRepository:
@@ -227,9 +229,16 @@ class JobRepository:
         company_slug: str | None = None,
         source_kind: str | None = None,
         origin_kind: str | None = None,
+        observation_max_age_days: int | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return the sole, source-neutral inventory used by ranking and exports."""
+        """Return the sole, source-neutral inventory used by ranking and exports.
+
+        When ``observation_max_age_days`` is set, only observation-mode rows are subject to
+        freshness filtering. Complete snapshots remain authoritative regardless of ``last_seen_at``.
+        """
+        if observation_max_age_days is not None and observation_max_age_days < 0:
+            raise ValueError("observation_max_age_days must be non-negative or None")
         latest_status = (
             select(sync_runs_table.c.status)
             .where(sync_runs_table.c.company_source_id == company_sources_table.c.id)
@@ -327,6 +336,14 @@ class JobRepository:
             statement = statement.where(company_sources_table.c.source_kind == source_kind)
         if origin_kind:
             statement = statement.where(origin_expression == origin_kind)
+        if observation_max_age_days is not None:
+            observation_cutoff = func.now() - timedelta(days=observation_max_age_days)
+            statement = statement.where(
+                or_(
+                    company_sources_table.c.sync_mode != "observation",
+                    jobs_table.c.last_seen_at >= observation_cutoff,
+                )
+            )
         if limit is not None:
             statement = statement.limit(limit)
         with self.engine.connect() as connection:

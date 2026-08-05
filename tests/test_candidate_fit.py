@@ -1,11 +1,15 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from yc_radar.domain.models import Company
 from yc_radar.services.candidate_fit import (
     DEFAULT_CANDIDATE_PROFILE,
+    OBSERVATION_OPPORTUNITY_SCORE_CAP,
     classify_remote_eligibility,
     classify_role_family,
     classify_role_text,
+    current_opportunity_score,
     rank_companies,
     rerank_verified_targets,
     role_focus_record,
@@ -23,6 +27,13 @@ def test_role_classifier_strong_for_senior_backend_and_infra_software_roles() ->
         ).status
         == "strong"
     )
+
+
+def test_role_classifier_uses_structured_provider_seniority_for_generic_titles() -> None:
+    assert classify_role_text("Software Engineer").status == "weak"
+    assert classify_role_text("Software Engineer", seniority="senior").status == "strong"
+    assert classify_role_text("Software Engineer", seniority="mid_level").status == "possible"
+    assert classify_role_text("Site Reliability Engineer", seniority="senior").status == "strong"
 
 
 def test_role_classifier_possible_for_backend_heavy_full_stack_and_founding_roles() -> None:
@@ -81,6 +92,8 @@ def test_role_classifier_excludes_junior_and_management_titles() -> None:
         "Software Engineer - Graduate",
         "Software Engineering Director",
         "Director, Software Engineering",
+        "Manager Data Engineer (Ref. 2026-1425) - Manager",
+        "Backend Engineer (Freelance)",
     ):
         assert classify_role_text(title, "Build backend APIs").status == "exclude", title
 
@@ -492,6 +505,30 @@ def test_remote_eligibility_distinguishes_global_pakistan_and_restricted_roles()
         ).status
         == "global_explicit"
     )
+
+
+def test_unverified_vendor_posting_country_is_not_treated_as_legal_eligibility() -> None:
+    base = {
+        "title": "Software Engineer",
+        "location": "London, United Kingdom",
+        "structured_evidence": {
+            "workplace": {
+                "type": "remote",
+                "is_remote": True,
+                "scope_kind": "posting_location_unverified",
+            },
+            "countries": ["United Kingdom"],
+        },
+    }
+
+    ambiguous = classify_remote_eligibility(base)
+    explicit_global = classify_remote_eligibility(
+        {**base, "description_text": "Work remotely from anywhere in the world."}
+    )
+
+    assert ambiguous.status == "remote_unclear"
+    assert "structured posting countries: United Kingdom" in ambiguous.evidence
+    assert explicit_global.status == "global_explicit"
     assert (
         classify_remote_eligibility(
             {
@@ -736,6 +773,48 @@ def test_remote_global_text_requires_role_eligibility_not_company_history() -> N
     )
 
 
+def test_global_remote_benefits_and_operating_limits_are_not_worldwide_eligibility() -> None:
+    for description in (
+        "Employees may work from anywhere for up to 8 weeks per year.",
+        "You have the possibility to work from anywhere 20 days per year.",
+        "Employees may work from anywhere</li>\n<li>for up to 8 weeks per year.",
+    ):
+        result = classify_remote_eligibility(
+            {"location": "Remote", "description_text": description}
+        )
+        assert result.status == "remote_unclear", description
+
+    limited = classify_remote_eligibility(
+        {
+            "location": "Remote",
+            "description_text": "Work from anywhere where Cint operates.",
+        }
+    )
+    assert limited.status == "restricted_remote"
+
+    timezone_limited = classify_remote_eligibility(
+        {
+            "location": "Remote",
+            "description_text": (
+                "We work from anywhere with clients across the country. Team members must be "
+                "available during Eastern Time hours."
+            ),
+        }
+    )
+    assert timezone_limited.status == "regional_unconfirmed"
+
+    explicit_role_claim_survives_policy_noise = classify_remote_eligibility(
+        {
+            "location": "Remote",
+            "description_text": (
+                "Employees may work from anywhere for up to 8 weeks per year. "
+                "This role may be performed from any country."
+            ),
+        }
+    )
+    assert explicit_role_claim_survives_policy_noise.status == "global_explicit"
+
+
 def test_title_region_only_overrides_global_remote_location() -> None:
     restricted = classify_remote_eligibility(
         {
@@ -765,6 +844,9 @@ def test_remote_region_in_title_restricts_global_location() -> None:
         "Remote (US) Software Engineer",
         "Software Engineer (US) - Remote",
         "Software Engineer (Remote, Europe)",
+        "Software Engineer (Remote Michigan)",
+        "Full Stack Engineer (Remote in CA)",
+        "Backend Engineer India/US",
     ):
         result = classify_remote_eligibility(
             {"title": title, "location": "Global - Remote"}
@@ -780,6 +862,16 @@ def test_remote_region_in_title_restricts_global_location() -> None:
     )
     assert regional.status == "regional_unconfirmed"
     assert regional.evidence == ["title restriction: APAC Remote"]
+
+    for title, expected in (
+        ("Remote in Pakistan", "pakistan_explicit"),
+        ("Remote in APAC", "regional_unconfirmed"),
+        ("Remote in Europe", "restricted_remote"),
+        ("Remote in India", "restricted_remote"),
+    ):
+        for location in ("Global - Remote", "Remote"):
+            result = classify_remote_eligibility({"title": title, "location": location})
+            assert result.status == expected, (title, location)
 
 
 def test_global_remote_scope_in_title_is_role_eligibility_evidence() -> None:
@@ -1379,6 +1471,138 @@ def test_unmanaged_jobs_remain_visible_without_lifecycle_snapshot_scoring() -> N
     assert target["opportunity_score_reasons"] == [
         "Matching role evidence lacks a complete provider snapshot"
     ]
+
+
+def test_fresh_global_observation_gets_capped_non_lifecycle_opportunity_score() -> None:
+    now = datetime(2026, 8, 5, 12, tzinfo=UTC)
+    company = Company(name="Observed Global Co", slug="observed-global-co")
+    target = role_focus_record(
+        company,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "location": "Remote - Worldwide",
+                "apply_url": "https://jobs.example/apply/backend-1",
+                "provider": "theirstack",
+                "external_job_id": "backend-1",
+                "lifecycle_managed": False,
+                "status_confidence": "observation",
+                "source_published_at": now - timedelta(days=2),
+                "observed_at": now,
+            }
+        ],
+    )
+
+    score, reasons = current_opportunity_score(target, now=now)
+
+    assert target["managed_active_job_count"] == 0
+    assert target["managed_matching_job_count"] == 0
+    assert target["managed_best_remote_eligibility"] == "no_remote_evidence"
+    assert score == OBSERVATION_OPPORTUNITY_SCORE_CAP
+    assert reasons == [
+        "Matching role evidence lacks a complete provider snapshot",
+        "Observation-mode evidence has a strong role match",
+        "Observation is explicitly worldwide remote",
+        "Observation includes a usable job or application URL",
+        "Observation was published, updated, or seen within 45 days",
+    ]
+
+
+def test_observation_score_rewards_fresh_urls_and_penalizes_ineligible_locations() -> None:
+    now = datetime(2026, 8, 5, 12, tzinfo=UTC)
+    company = Company(name="Observation Comparison Co", slug="observation-comparison-co")
+
+    def score_for(
+        location: str,
+        *,
+        posting_url: str | None,
+        observed_at: datetime,
+    ) -> int:
+        target = role_focus_record(
+            company,
+            jobs=[
+                {
+                    "title": "Senior Backend Engineer",
+                    "location": location,
+                    "posting_url": posting_url,
+                    "provider": "theirstack",
+                    "external_job_id": location,
+                    "lifecycle_managed": False,
+                    "status_confidence": "observation",
+                    "observed_at": observed_at,
+                }
+            ],
+        )
+        return current_opportunity_score(target, now=now)[0]
+
+    fresh_global_with_url = score_for(
+        "Remote - Worldwide",
+        posting_url="https://jobs.example/backend-global",
+        observed_at=now - timedelta(days=2),
+    )
+    stale_global_without_url = score_for(
+        "Remote - Worldwide",
+        posting_url=None,
+        observed_at=now - timedelta(days=90),
+    )
+    restricted = score_for(
+        "Remote - United States",
+        posting_url="https://jobs.example/backend-us",
+        observed_at=now - timedelta(days=2),
+    )
+    onsite = score_for(
+        "Onsite - New York",
+        posting_url="https://jobs.example/backend-onsite",
+        observed_at=now - timedelta(days=2),
+    )
+
+    assert fresh_global_with_url == OBSERVATION_OPPORTUNITY_SCORE_CAP
+    assert stale_global_without_url == 54
+    assert restricted == 34
+    assert onsite == 30
+    assert fresh_global_with_url > stale_global_without_url > restricted > onsite
+
+
+def test_equivalent_managed_opportunity_keeps_higher_confidence_score() -> None:
+    now = datetime(2026, 8, 5, 12, tzinfo=UTC)
+    company = Company(name="Confidence Comparison Co", slug="confidence-comparison-co")
+    common_job = {
+        "title": "Senior Backend Engineer",
+        "location": "Remote - Worldwide",
+        "posting_url": "https://jobs.example/backend-global",
+        "provider": "greenhouse",
+        "external_job_id": "backend-global",
+        "source_published_at": now - timedelta(days=2),
+        "observed_at": now,
+    }
+    observed_target = role_focus_record(
+        company,
+        jobs=[
+            common_job
+            | {
+                "lifecycle_managed": False,
+                "status_confidence": "observation",
+            }
+        ],
+    )
+    managed_target = role_focus_record(
+        company,
+        jobs=[
+            common_job
+            | {
+                "lifecycle_managed": True,
+                "status_confidence": "complete_snapshot",
+            }
+        ],
+    )
+
+    observed_score, observed_reasons = current_opportunity_score(observed_target, now=now)
+    managed_score, managed_reasons = current_opportunity_score(managed_target, now=now)
+
+    assert observed_score == OBSERVATION_OPPORTUNITY_SCORE_CAP
+    assert managed_score > observed_score
+    assert "Matching role evidence lacks a complete provider snapshot" in observed_reasons
+    assert "Backed by a lifecycle-managed complete source snapshot" in managed_reasons
 
 
 def test_lifecycle_managed_variant_controls_cluster_and_snapshot_remote_scoring() -> None:

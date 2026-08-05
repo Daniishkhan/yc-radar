@@ -1,5 +1,5 @@
 import importlib.util
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot
@@ -16,6 +16,81 @@ SPEC = importlib.util.spec_from_file_location("generate_weekly_targets", SCRIPT_
 assert SPEC and SPEC.loader
 generate_weekly_targets = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(generate_weekly_targets)
+
+
+def test_weekly_loader_excludes_stale_observations_but_keeps_managed_jobs(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime.now(UTC)
+    company = CompanyRegistry(engine).register_provisional_company(
+        name="Freshness Company",
+        requested_slug="freshness-company",
+        now=now,
+    )
+    repository = JobRepository(engine)
+    managed_source, _, _ = repository.register_source(
+        company_id=company.company_id,
+        provider="greenhouse",
+        source_kind="ats_board",
+        external_id="freshness-managed",
+        source_url="https://job-boards.greenhouse.io/freshness-managed",
+        sync_mode="complete_snapshot",
+        now=now,
+    )
+    observed_source, _, _ = repository.register_source(
+        company_id=company.company_id,
+        provider="vendor",
+        source_kind="job_aggregator",
+        external_id="freshness-observed",
+        source_url="https://vendor.example/companies/freshness-observed",
+        sync_mode="observation",
+        now=now,
+    )
+
+    def job(external_id: str) -> NormalizedJob:
+        return NormalizedJob(
+            external_job_id=external_id,
+            title="Senior Backend Engineer",
+            posting_url=f"https://jobs.example/{external_id}",
+            content_hash=f"hash:{external_id}",
+            raw_payload={"id": external_id},
+        )
+
+    managed_seen_at = now - timedelta(days=120)
+    JobSyncService(engine, clock=lambda: managed_seen_at).sync_snapshot(
+        company_source_id=managed_source["id"],
+        run_key="managed-old",
+        snapshot=SourceSnapshot(
+            provider="greenhouse",
+            external_source_id="freshness-managed",
+            adapter_version="test",
+            is_complete=True,
+            jobs=[job("managed-old")],
+            http_status=200,
+        ),
+    )
+    stale_seen_at = now - timedelta(days=60)
+    JobSyncService(engine, clock=lambda: stale_seen_at).sync_observations(
+        company_source_id=observed_source["id"],
+        run_key="observed-stale",
+        jobs=[job("observed-stale")],
+    )
+    fresh_seen_at = now - timedelta(days=2)
+    JobSyncService(engine, clock=lambda: fresh_seen_at).sync_observations(
+        company_source_id=observed_source["id"],
+        run_key="observed-fresh",
+        jobs=[job("observed-fresh")],
+    )
+
+    assert {
+        row["external_job_id"]
+        for row in repository.list_jobs(observation_max_age_days=None)
+    } == {"managed-old", "observed-stale", "observed-fresh"}
+    jobs_by_slug = generate_weekly_targets.load_jobs_by_slug(postgres_database_url)
+    assert {
+        row["external_job_id"] for row in jobs_by_slug["freshness-company"]
+    } == {"managed-old", "observed-fresh"}
 
 
 def test_weekly_ranking_includes_website_less_company_with_strong_managed_job(

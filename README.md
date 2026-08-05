@@ -1,8 +1,8 @@
 # YC Radar
 
 YC Radar is a local, script-first hiring pipeline. It maintains neutral company identities,
-attaches public job sources such as YC, Greenhouse, and Ashby, synchronizes normalized openings,
-and produces an engineering shortlist.
+attaches public job sources such as YC, Greenhouse, Ashby, and Lever, synchronizes normalized
+openings, and produces an engineering shortlist.
 
 Postgres is the source of truth. The product interface is a set of scripts plus local CSV/JSON
 outputs; the repository does not run an API or web application.
@@ -47,7 +47,7 @@ uv run python scripts/register_job_source.py \
   --source-url https://job-boards.greenhouse.io/example
 ```
 
-Synchronize registered Greenhouse and Ashby boards:
+Synchronize registered Greenhouse, Ashby, and Lever boards:
 
 ```bash
 uv run python scripts/sync_job_sources.py --delay-seconds 2
@@ -141,6 +141,64 @@ uv run python scripts/scout_greenhouse_sources.py \
 Ambiguous identity evidence never causes a silent company merge. A verified board may instead be
 attached to an isolated provisional company until stronger evidence is available.
 
+## TheirStack Job Discovery
+
+TheirStack is a bounded vendor-search evidence source. Put its token in the ignored `.env` file as
+`THEIRSTACK_API_KEY`; do not pass the token on the command line or copy it into run artifacts.
+Imported jobs are observation-confidence source assertions: they may add or refresh jobs, but they
+are not a complete company snapshot and cannot infer absence or close a job. Ranking and normal
+exports treat an observation as fresh for 45 days from its last-seen timestamp; this read-time
+window does not rewrite or close the stored job. Adjust exports with
+`--observation-max-age-days DAYS`, or use `--no-observation-age-filter` only when deliberately
+inspecting older observations.
+
+The operator flow is deliberately split so a retry cannot silently spend credits again. Inspect
+each subcommand's `--help` for its query, run, and credit flags:
+
+```bash
+theirstack_manifest="data/local/runs/theirstack/$(date +%F)/manifest.json"
+
+uv run python scripts/import_theirstack_jobs.py preview \
+  --manifest "${theirstack_manifest}" \
+  --pages-per-stratum 4
+
+theirstack_budget="$(jq -r '.credit_budget' "${theirstack_manifest}")"
+uv run python scripts/import_theirstack_jobs.py fetch \
+  --manifest "${theirstack_manifest}" \
+  --max-credits "${theirstack_budget}" \
+  --yes-spend-credits
+
+uv run python scripts/import_theirstack_jobs.py apply \
+  --manifest "${theirstack_manifest}"
+
+uv run python scripts/import_theirstack_jobs.py status \
+  --manifest "${theirstack_manifest}"
+```
+
+- `preview` checks the query with blurred, non-credit-consuming results.
+- `fetch` is the paid step and refuses to run without an explicit paid-use guard and bounded credit
+  limit.
+- `apply` replays the cached full response into per-company observation sources without calling the
+  vendor again.
+- `status` reports cached query, credit, normalization, identity, and apply progress without making
+  a paid request.
+
+The default preview is a global remote search rather than a Pakistan country gate. It samples
+backend, software, full-stack, production AI, data, frontend, platform, founding, and
+description-explicit worldwide lanes. Vendor `remote: true` remains discovery evidence, not proof
+that an applicant in every country is eligible. Local selection requires a stable vendor company
+ID, keeps one employer per slot before relaxing diversity, and rejects mixed temporary/volunteer,
+freelance, management, junior, QA, and other out-of-lane records. Add prior paid IDs with
+`--exclude-job-ids-file PATH`; a repeated paid request otherwise consumes credits again.
+
+Responses, query manifests, and checkpoints stay under ignored `data/local/cache/theirstack/` and
+`data/local/runs/`; they never contain the API token. When a result provides a native Greenhouse or
+Ashby URL, route that URL inventory through `scripts/stage_ingest.py`. A successful native adapter
+snapshot can then provide lifecycle-managed confidence, while the original TheirStack assertion is
+preserved independently. Staging refuses to attach a shared provider board when one source run
+attributes it to multiple local companies; reconcile that identity explicitly instead of choosing
+the newest observation.
+
 ## Results
 
 Export normalized active jobs:
@@ -148,6 +206,67 @@ Export normalized active jobs:
 ```bash
 uv run python scripts/generate_job_opportunities.py --limit 100
 ```
+
+The same command writes three separate artifacts instead of treating every lead as ready to
+apply:
+
+- `application_queue.{json,csv}` contains fresh target roles with explicit Pakistan or worldwide
+  remote evidence and a public job URL.
+- `verification_queue.{json,csv}` contains target roles whose geographic eligibility still needs
+  manual confirmation.
+- `application_pool_summary.json` records queue size, provider contribution, freshness, and
+  exclusion reasons.
+
+Generate the full ranked queues rather than a small inspection sample with:
+
+```bash
+uv run python scripts/generate_job_opportunities.py \
+  --output-dir data/local/runs/current \
+  --limit 200000 \
+  --queue-limit 500
+```
+
+`generate_weekly_targets.py` separately writes `company_outreach_queue.{json,csv}`. Company
+outreach is never interpreted as an application queue and neither command submits applications.
+Validate the selected public URLs sequentially, then report queue and dead-link metrics:
+
+```bash
+uv run python scripts/validate_application_urls.py \
+  --queue application_queue=data/local/runs/current/application_queue.json \
+  --queue verification_queue=data/local/runs/current/verification_queue.json \
+  --output data/local/runs/current/application_url_validations.json \
+  --delay-seconds 1
+
+uv run python scripts/report_application_pool.py \
+  --run-dir data/local/runs/current \
+  --url-validations data/local/runs/current/application_url_validations.json \
+  --output data/local/runs/current/application_pool_metrics.json
+```
+
+URL validation uses public `GET` requests only, rejects non-public network targets, follows a
+bounded number of redirects, honors `Retry-After`, and caches results. Check complete-snapshot
+freshness independently of observation feeds with:
+
+```bash
+uv run python scripts/check_pipeline_freshness.py \
+  --max-age-hours 24 \
+  --output data/local/runs/current/pipeline_freshness.json
+```
+
+Export only locally classified worldwide-remote IC engineering candidates from TheirStack:
+
+```bash
+uv run python scripts/generate_job_opportunities.py \
+  --provider theirstack \
+  --remote-status global_explicit \
+  --role-status strong \
+  --role-status possible \
+  --limit 200 \
+  --output-dir data/local/runs/theirstack/global-review
+```
+
+This is a review queue, not work-authorization proof. Keep `remote_unclear` visible in a separate
+research export when native job pages may contain better evidence.
 
 Generate the deterministic shortlist without paid verification or LLM refinement:
 

@@ -21,7 +21,11 @@ from sqlalchemy.engine import Engine
 
 from yc_radar.adapters.base import JobSourceAdapter
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot, SyncResult
-from yc_radar.services.candidate_fit import classify_remote_eligibility, classify_role_text
+from yc_radar.services.candidate_fit import (
+    classify_remote_eligibility,
+    classify_role_text,
+    job_seniority,
+)
 from yc_radar.services.company_registry import CompanyRegistry
 from yc_radar.services.http_cache import DiskHttpCache
 from yc_radar.services.job_source_registry import (
@@ -1055,6 +1059,37 @@ class StagingRepository:
             raise ValueError(f"unknown ingest run: source={source!r} run_key={run_key!r}")
         return int(value)
 
+    def observation_company_ids(self, lease: WorkLease) -> tuple[int, ...]:
+        """Return distinct local company candidates asserted for this run and URL.
+
+        URL work is globally deduplicated, so a source run can attach several raw observations
+        to one item. Selecting only the newest observation would silently choose an employer
+        when an aggregator attributed the same provider board to multiple company records.
+        """
+        with self.engine.connect() as connection:
+            raw_values = connection.scalars(
+                text(
+                    """
+                    SELECT DISTINCT payload->>'company_id'
+                    FROM ingest.raw_observations
+                    WHERE run_id = :run_id
+                      AND url_work_item_id = :work_item_id
+                      AND NULLIF(payload->>'company_id', '') IS NOT NULL
+                    ORDER BY payload->>'company_id'
+                    """
+                ),
+                {"run_id": lease.run_id, "work_item_id": lease.id},
+            ).all()
+        company_ids: set[int] = set()
+        for raw_value in raw_values:
+            try:
+                company_id = _optional_int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if company_id is not None:
+                company_ids.add(company_id)
+        return tuple(sorted(company_ids))
+
     def status(self, *, run_id: int | None = None) -> dict[str, Any]:
         with self.engine.connect() as connection:
             run_rows = [
@@ -1455,6 +1490,7 @@ class SourceEnrichHandler:
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
+        self.repository = StagingRepository(engine)
 
     def __call__(self, lease: WorkLease) -> StageSuccess:
         source = lease.result.get("source")
@@ -1467,6 +1503,16 @@ class SourceEnrichHandler:
         provider = str(source.get("provider") or "")
         external_source_id = str(source.get("external_source_id") or "")
         canonical_url = str(source.get("canonical_url") or "")
+        company_ids = self.repository.observation_company_ids(lease)
+        if len(company_ids) > 1:
+            raise WorkItemError(
+                "ambiguous_company_identity",
+                (
+                    "source run attributed one provider board to "
+                    f"{len(company_ids)} distinct company records"
+                ),
+                retryable=False,
+            )
         with self.engine.connect() as connection:
             existing = connection.execute(
                 text(
@@ -1490,7 +1536,11 @@ class SourceEnrichHandler:
                 },
             )
 
-        proposed_company_id = _optional_int(lease.observation_payload.get("company_id"))
+        proposed_company_id = (
+            company_ids[0]
+            if company_ids
+            else _optional_int(lease.observation_payload.get("company_id"))
+        )
         proposed_name = str(lease.observation_payload.get("company_name") or "").strip()
         return StageSuccess(
             next_stage="promote",
@@ -1657,6 +1707,16 @@ class SnapshotPromoter:
             raise WorkItemError(
                 "incomplete_source_evidence",
                 "provider, external source ID, and canonical URL are required",
+                retryable=False,
+            )
+        company_ids = self.repository.observation_company_ids(lease)
+        if len(company_ids) > 1:
+            raise WorkItemError(
+                "ambiguous_company_identity",
+                (
+                    "promotion refused because one provider board was attributed to "
+                    f"{len(company_ids)} distinct company records"
+                ),
                 retryable=False,
             )
         adapter = self.providers.adapter_for(provider)
@@ -1970,7 +2030,11 @@ class FunnelReporter:
                 str(job.get(field) or "")
                 for field in ("location", "description_text", "department", "employment_type")
             )
-            role = classify_role_text(str(job.get("title") or ""), context)
+            role = classify_role_text(
+                str(job.get("title") or ""),
+                context,
+                seniority=job_seniority(job),
+            )
             if role.status in {"strong", "possible"}:
                 engineering_jobs.append(job)
         remote = {"pakistan_explicit": 0, "global_explicit": 0, "remote_unclear": 0}

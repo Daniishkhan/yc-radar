@@ -33,3 +33,11 @@ def test_blank_database_url_uses_postgres_default() -> None:
     assert settings.database_url == (
         "postgresql+psycopg://yc_radar:yc_radar@localhost:5433/yc_radar"
     )
+
+
+def test_theirstack_api_key_is_optional_and_reads_environment_alias(monkeypatch) -> None:
+    monkeypatch.delenv("THEIRSTACK_API_KEY", raising=False)
+    assert Settings(_env_file=None).theirstack_api_key is None
+
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-theirstack-key")
+    assert Settings(_env_file=None).theirstack_api_key == "test-theirstack-key"

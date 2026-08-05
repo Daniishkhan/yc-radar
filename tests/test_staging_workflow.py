@@ -762,6 +762,155 @@ def test_complete_promotion_populates_typed_candidates_and_partial_scan_never_cl
     assert candidate_status == "quarantined"
 
 
+def test_enrich_quarantines_shared_board_with_multiple_company_candidates(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    first_company_id = CompanyRegistry(engine).register_company(
+        name="First Candidate",
+        website="https://first-candidate.example",
+    ).company_id
+    second_company_id = CompanyRegistry(engine).register_company(
+        name="Second Candidate",
+        website="https://second-candidate.example",
+    ).company_id
+    JobSourceRegistry(engine).register_url(
+        company_id=first_company_id,
+        source_url="https://job-boards.greenhouse.io/shared-board",
+    )
+    repository = StagingRepository(engine)
+    loaded = repository.load(
+        source="aggregator",
+        run_key="ambiguous-enrich",
+        observations=[
+            Observation(
+                url="https://job-boards.greenhouse.io/shared-board",
+                observation_key="first",
+                payload={"company_id": first_company_id},
+            ),
+            Observation(
+                url="https://job-boards.greenhouse.io/shared-board",
+                observation_key="second",
+                payload={"company_id": second_company_id},
+            ),
+        ],
+    )
+    _advance_to_enrich(repository, loaded.run_id, external_source_id="shared-board")
+
+    result = asyncio.run(
+        StagingWorker(repository).work(
+            stage="enrich",
+            handler=SourceEnrichHandler(engine),
+            limit=1,
+            lease_seconds=60,
+            lease_owner="enricher",
+            run_id=loaded.run_id,
+        )
+    )
+
+    assert result.quarantined == 1
+    with engine.connect() as connection:
+        work = connection.execute(
+            text("SELECT stage, state, last_error FROM ingest.url_work_items")
+        ).mappings().one()
+        assert connection.scalar(text("SELECT count(*) FROM company_sources")) == 1
+    assert work["stage"] == "enrich"
+    assert work["state"] == "quarantined"
+    assert work["last_error"]["kind"] == "ambiguous_company_identity"
+
+
+def test_promoter_rechecks_company_ambiguity_before_fetching_snapshot(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    first_company_id = CompanyRegistry(engine).register_company(
+        name="First Candidate",
+        website="https://first-candidate.example",
+    ).company_id
+    second_company_id = CompanyRegistry(engine).register_company(
+        name="Second Candidate",
+        website="https://second-candidate.example",
+    ).company_id
+    existing_source_id = JobSourceRegistry(engine).register_url(
+        company_id=first_company_id,
+        source_url="https://job-boards.greenhouse.io/shared-board",
+    ).company_source_id
+    repository = StagingRepository(engine)
+    loaded = repository.load(
+        source="aggregator",
+        run_key="ambiguous-promote",
+        observations=[
+            Observation(
+                url="https://job-boards.greenhouse.io/shared-board",
+                observation_key="first",
+                payload={"company_id": first_company_id},
+            ),
+            Observation(
+                url="https://job-boards.greenhouse.io/shared-board",
+                observation_key="second",
+                payload={"company_id": second_company_id},
+            ),
+        ],
+    )
+    _advance_to_enrich(repository, loaded.run_id, external_source_id="shared-board")
+    enrich_lease = repository.claim(
+        stage="enrich",
+        limit=1,
+        lease_seconds=60,
+        lease_owner="legacy-enricher",
+        run_id=loaded.run_id,
+    )[0]
+    repository.complete(
+        enrich_lease,
+        StageSuccess(
+            next_stage="promote",
+            result={
+                "company_source_id": existing_source_id,
+                "proposed_company_id": second_company_id,
+                "source": _source_evidence("shared-board"),
+            },
+        ),
+    )
+    snapshot = SourceSnapshot(
+        provider="greenhouse",
+        external_source_id="shared-board",
+        adapter_version="test-1",
+        is_complete=True,
+        jobs=[
+            NormalizedJob(
+                external_job_id="job-1",
+                title="Backend Engineer",
+                content_hash="a" * 64,
+            )
+        ],
+        http_status=200,
+    )
+    adapter = SnapshotAdapter(snapshot)
+
+    result = asyncio.run(
+        SnapshotPromoter(
+            repository,
+            providers=JobSourceProviderRegistry([adapter]),
+        ).promote(
+            limit=1,
+            lease_seconds=60,
+            lease_owner="promoter",
+            run_id=loaded.run_id,
+        )
+    )
+
+    assert result.quarantined == 1
+    assert adapter.fetches == 0
+    with engine.connect() as connection:
+        work = connection.execute(
+            text("SELECT stage, state, last_error FROM ingest.url_work_items")
+        ).mappings().one()
+        assert connection.scalar(text("SELECT count(*) FROM company_sources")) == 1
+    assert work["stage"] == "promote"
+    assert work["state"] == "quarantined"
+    assert work["last_error"]["kind"] == "ambiguous_company_identity"
+
+
 def test_invalid_complete_snapshot_quarantines_candidates_and_finalizes_sync_run(
     postgres_database_url: str,
     tmp_path: Path,
@@ -892,6 +1041,48 @@ def test_complete_snapshot_can_create_a_provisional_company_from_consistent_prov
         ).one()
     assert tuple(company) == ("Provider Named Company", "provisional")
     assert tuple(source) == ("greenhouse", "named-board")
+
+
+def _source_evidence(external_source_id: str) -> dict[str, str]:
+    url = f"https://job-boards.greenhouse.io/{external_source_id}"
+    return {
+        "provider": "greenhouse",
+        "source_kind": "ats_board",
+        "external_source_id": external_source_id,
+        "canonical_url": url,
+        "detected_from_url": url,
+        "original_observed_url": url,
+    }
+
+
+def _advance_to_enrich(
+    repository: StagingRepository,
+    run_id: int,
+    *,
+    external_source_id: str,
+) -> None:
+    fetch_lease = repository.claim(
+        stage="fetch",
+        limit=1,
+        lease_seconds=60,
+        lease_owner="fetcher",
+        run_id=run_id,
+    )[0]
+    repository.complete(fetch_lease, StageSuccess(next_stage="parse"))
+    parse_lease = repository.claim(
+        stage="parse",
+        limit=1,
+        lease_seconds=60,
+        lease_owner="parser",
+        run_id=run_id,
+    )[0]
+    repository.complete(
+        parse_lease,
+        StageSuccess(
+            next_stage="enrich",
+            result={"source": _source_evidence(external_source_id)},
+        ),
+    )
 
 
 def _advance_to_promote(repository: StagingRepository, run_id: int, cache_path: Path) -> None:

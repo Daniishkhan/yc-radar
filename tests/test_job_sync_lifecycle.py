@@ -356,6 +356,65 @@ def test_observation_sync_upserts_seen_jobs_without_applying_absence_lifecycle(
     assert all(job["status_confidence"] == "observation" for job in inventory)
 
 
+def test_list_jobs_filters_only_stale_observation_rows(
+    postgres_database_url: str,
+) -> None:
+    engine = engine_from_url(postgres_database_url)
+    now = datetime.now(UTC)
+    company_id = add_company(engine, name="Freshness Co", slug="freshness", now=now)
+    repository = JobRepository(engine)
+    managed_source = add_source(
+        repository,
+        company_id=company_id,
+        external_id="managed-freshness",
+        now=now,
+    )
+    observation_source = add_source(
+        repository,
+        company_id=company_id,
+        provider="ashby",
+        external_id="observed-freshness",
+        sync_mode="observation",
+        now=now,
+    )
+
+    managed_seen_at = now - timedelta(days=90)
+    JobSyncService(engine, clock=lambda: managed_seen_at).sync_snapshot(
+        company_source_id=managed_source["id"],
+        run_key="managed-old",
+        snapshot=snapshot(
+            normalized_job("managed-old"),
+            external_id="managed-freshness",
+        ),
+    )
+    stale_seen_at = now - timedelta(days=46)
+    JobSyncService(engine, clock=lambda: stale_seen_at).sync_observations(
+        company_source_id=observation_source["id"],
+        run_key="observed-stale",
+        jobs=[normalized_job("observed-stale")],
+    )
+    fresh_seen_at = now - timedelta(days=44)
+    JobSyncService(engine, clock=lambda: fresh_seen_at).sync_observations(
+        company_source_id=observation_source["id"],
+        run_key="observed-fresh",
+        jobs=[normalized_job("observed-fresh")],
+    )
+
+    all_ids = {
+        job["external_job_id"]
+        for job in repository.list_jobs(observation_max_age_days=None)
+    }
+    fresh_ids = {
+        job["external_job_id"]
+        for job in repository.list_jobs(observation_max_age_days=45)
+    }
+
+    assert all_ids == {"managed-old", "observed-stale", "observed-fresh"}
+    assert fresh_ids == {"managed-old", "observed-fresh"}
+    with pytest.raises(ValueError, match="must be non-negative or None"):
+        repository.list_jobs(observation_max_age_days=-1)
+
+
 def test_observation_sync_rejects_non_observation_sources(
     postgres_database_url: str,
 ) -> None:
