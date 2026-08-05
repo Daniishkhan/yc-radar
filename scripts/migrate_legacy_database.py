@@ -461,7 +461,9 @@ def _copy_legacy_data(
                            THEN 'verified'
                            ELSE 'provisional'
                        END,
-                       jsonb_build_object('migrated_from', :legacy_revision),
+                       jsonb_build_object(
+                           'migrated_from', CAST(:legacy_revision AS text)
+                       ),
                        company.created_at, company.updated_at
                 FROM {schema}.companies AS company
                 ORDER BY company.id
@@ -498,11 +500,11 @@ def _copy_legacy_data(
                                'prototype_score', profile.prototype_score,
                                'prototype_angle', profile.prototype_angle,
                                'raw_payload', profile.raw_json,
-                               'migrated_from', :legacy_revision
+                               'migrated_from', CAST(:legacy_revision AS text)
                            ))
                        ELSE jsonb_build_object(
                            'legacy_raw_json', source.raw_json,
-                           'migrated_from', :legacy_revision
+                           'migrated_from', CAST(:legacy_revision AS text)
                        ) END,
                        source.created_at, source.updated_at
                 FROM {schema}.company_sources AS source
@@ -529,7 +531,7 @@ def _copy_legacy_data(
                            'legacy_raw_json', source.raw_json,
                            'legacy_last_synced_at', source.last_synced_at,
                            'legacy_last_sync_status', source.last_sync_status,
-                           'migrated_from', :legacy_revision,
+                           'migrated_from', CAST(:legacy_revision AS text),
                            'legacy_career_source_id', source.id
                        )),
                        source.created_at, source.updated_at
@@ -568,7 +570,7 @@ def _copy_legacy_data(
                            'http_status', run.http_status,
                            'errors', run.errors,
                            'request_metadata', run.request_metadata,
-                           'migrated_from', :legacy_revision
+                           'migrated_from', CAST(:legacy_revision AS text)
                        )),
                        run.started_at, run.completed_at
                 FROM {schema}.source_sync_runs AS run

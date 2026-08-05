@@ -198,6 +198,12 @@ def test_copy_sql_uses_latest_seen_observation_not_current_content_version() -> 
     assert "version.source_sync_run_id," not in source
 
 
+def test_copy_sql_casts_revision_parameters_used_inside_jsonb_builders() -> None:
+    source = inspect.getsource(migrate_legacy_database._copy_legacy_data)
+    assert source.count("CAST(:legacy_revision AS text)") == 5
+    assert source.count(":legacy_revision") == 5
+
+
 def test_failed_migration_drops_only_the_new_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
