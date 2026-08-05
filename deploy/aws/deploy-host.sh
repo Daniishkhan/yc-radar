@@ -6,6 +6,7 @@ readonly RADAR_ROOT=/srv/radar
 readonly APP_DIR=${RADAR_ROOT}/app
 readonly RUNTIME_ENV=${RADAR_ROOT}/config/runtime.env
 readonly DEPLOY_STATE=${RADAR_ROOT}/state/deployment.json
+readonly WORKLOAD_LOCK=/run/lock/radar-workload.lock
 
 fetch=true
 expected_revision=
@@ -48,6 +49,12 @@ source "${WORKER_ENV}"
 exec 9>/run/lock/radar-deploy.lock
 if ! flock -n 9; then
   echo "Another deployment is already running" >&2
+  exit 1
+fi
+
+exec 8>"${WORKLOAD_LOCK}"
+if ! flock -n 8; then
+  echo "Another Radar workload is active; refusing to deploy" >&2
   exit 1
 fi
 

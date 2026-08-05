@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from yc_radar.domain.models import Company
+from yc_radar.services.artifact_generation import atomic_write_json
 from yc_radar.services.candidate_fit import profile_text
 from yc_radar.services.source_providers import is_company_ats_url
 
@@ -457,13 +458,12 @@ def load_hiring_cache(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def save_hiring_cache(path: Path, cache: dict[str, dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
         "updated_at": datetime.now(UTC).isoformat(),
         "items": cache,
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(path, payload, indent=2, sort_keys=True)
 
 
 def _dedupe_preserve_order(values: list[str] | Any) -> list[str]:

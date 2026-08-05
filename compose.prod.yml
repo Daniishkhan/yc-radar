@@ -18,6 +18,7 @@ services:
 
   app:
     image: yc-radar:latest
+    mem_limit: 4608m
     build:
       context: .
     init: true

@@ -6,6 +6,7 @@ readonly RADAR_ROOT=/srv/radar
 readonly APP_DIR=${RADAR_ROOT}/app
 readonly RUNTIME_ENV=${RADAR_ROOT}/config/runtime.env
 readonly JOB_DIR=${RADAR_ROOT}/state/jobs
+readonly WORKLOAD_LOCK=/run/lock/radar-workload.lock
 
 name=${1:-}
 if [[ ! ${name} =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
@@ -33,6 +34,12 @@ source "${WORKER_ENV}"
 exec 9>"/run/lock/radar-job-${name}.lock"
 if ! flock -n 9; then
   echo "Job ${name} is already running" >&2
+  exit 1
+fi
+
+exec 8>"${WORKLOAD_LOCK}"
+if ! flock -n 8; then
+  echo "Another Radar workload is active; refusing to start job ${name}" >&2
   exit 1
 fi
 

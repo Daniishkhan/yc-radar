@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from yc_radar.core.config import get_settings
+from yc_radar.services.artifact_generation import (
+    ArtifactGenerationLocked,
+    artifact_generation_lock,
+    atomic_text_writer,
+    atomic_write_json,
+)
 from yc_radar.services.application_pool import build_application_pool
 from yc_radar.services.candidate_fit import (
     classify_remote_eligibility,
@@ -163,10 +168,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    settings = get_settings()
     changed_since = parse_timestamp(args.changed_since) if args.changed_since else None
     as_of = parse_timestamp(args.as_of) if args.as_of else datetime.now(UTC)
     output_dir = args.output_dir or args.default_output_root / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with artifact_generation_lock(output_dir=output_dir, local_dir=settings.local_dir):
+            generate_artifacts(
+                args=args,
+                output_dir=output_dir,
+                changed_since=changed_since,
+                as_of=as_of,
+            )
+    except ArtifactGenerationLocked as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def generate_artifacts(
+    *,
+    args: argparse.Namespace,
+    output_dir: Path,
+    changed_since: datetime | None,
+    as_of: datetime,
+) -> None:
     engine = engine_from_url()
     create_schema(engine)
     has_post_filters = bool(args.role_status or args.remote_status)
@@ -212,9 +237,12 @@ def main() -> None:
         fields=QUEUE_CSV_FIELDS,
     )
     summary_path = output_dir / "application_pool_summary.json"
-    summary_path.write_text(
-        json.dumps(pool["summary"], default=str, indent=2) + "\n",
-        encoding="utf-8",
+    atomic_write_json(
+        summary_path,
+        pool["summary"],
+        default=str,
+        indent=2,
+        trailing_newline=True,
     )
     print(f"Wrote {len(payload_rows)} job opportunities: {json_path}")
     print(f"Wrote CSV: {csv_path}")
@@ -298,11 +326,14 @@ def write_job_rows(
 ) -> tuple[Path, Path]:
     json_path = output_dir / f"{stem}.json"
     csv_path = output_dir / f"{stem}.csv"
-    json_path.write_text(
-        json.dumps({"jobs": list(rows)}, default=str, indent=2) + "\n",
-        encoding="utf-8",
+    atomic_write_json(
+        json_path,
+        {"jobs": list(rows)},
+        default=str,
+        indent=2,
+        trailing_newline=True,
     )
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+    with atomic_text_writer(csv_path, newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in rows:

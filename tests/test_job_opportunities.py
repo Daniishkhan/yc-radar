@@ -1,12 +1,66 @@
 import importlib.util
+import json
+from argparse import Namespace
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "generate_job_opportunities.py"
 SPEC = importlib.util.spec_from_file_location("generate_job_opportunities", SCRIPT_PATH)
 assert SPEC and SPEC.loader
 generate_job_opportunities = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(generate_job_opportunities)
+
+
+def test_main_holds_shared_artifact_lock_while_generating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "data" / "local" / "runs" / "current"
+    local_dir = tmp_path / "data" / "local"
+    events: list[object] = []
+
+    @contextmanager
+    def fake_lock(*, output_dir: Path, local_dir: Path):
+        events.append(("acquire", output_dir, local_dir))
+        try:
+            yield local_dir / ".queue-artifact-generation.lock"
+        finally:
+            events.append("release")
+
+    monkeypatch.setattr(
+        generate_job_opportunities,
+        "parse_args",
+        lambda: Namespace(
+            changed_since=None,
+            as_of="2026-08-05T00:00:00+00:00",
+            output_dir=output_dir,
+            default_output_root=local_dir / "runs",
+            date="2026-08-05",
+        ),
+    )
+    monkeypatch.setattr(
+        generate_job_opportunities,
+        "get_settings",
+        lambda: SimpleNamespace(local_dir=local_dir),
+    )
+    monkeypatch.setattr(generate_job_opportunities, "artifact_generation_lock", fake_lock)
+    monkeypatch.setattr(
+        generate_job_opportunities,
+        "generate_artifacts",
+        lambda **kwargs: events.append(("generate", kwargs["output_dir"])),
+    )
+
+    generate_job_opportunities.main()
+
+    assert events == [
+        ("acquire", output_dir, local_dir),
+        ("generate", output_dir),
+        "release",
+    ]
 
 
 def test_opportunity_row_is_public_provenance_and_backend_classified() -> None:
@@ -116,3 +170,34 @@ def test_role_and_remote_filters_are_repeatable_and_apply_before_limit() -> None
     assert args.role_status == ["strong", "possible"]
     assert args.remote_status == ["global_explicit"]
     assert filtered == [rows[2]]
+
+
+def test_job_row_artifacts_keep_existing_json_shape_and_publish_csv(tmp_path: Path) -> None:
+    rows = [
+        {
+            "company_name": "Example",
+            "role_match_reasons": ["Backend match"],
+            "last_changed_at": datetime(2026, 8, 5, tzinfo=UTC),
+        }
+    ]
+
+    json_path, csv_path = generate_job_opportunities.write_job_rows(
+        output_dir=tmp_path,
+        stem="job_opportunities",
+        rows=rows,
+        fields=["company_name", "role_match_reasons", "last_changed_at"],
+    )
+
+    assert json.loads(json_path.read_text(encoding="utf-8")) == {
+        "jobs": [
+            {
+                "company_name": "Example",
+                "role_match_reasons": ["Backend match"],
+                "last_changed_at": "2026-08-05 00:00:00+00:00",
+            }
+        ]
+    }
+    assert csv_path.read_text(encoding="utf-8").splitlines() == [
+        "company_name,role_match_reasons,last_changed_at",
+        "Example,Backend match,2026-08-05 00:00:00+00:00",
+    ]

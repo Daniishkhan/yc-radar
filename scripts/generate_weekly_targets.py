@@ -12,6 +12,12 @@ from typing import Any
 from yc_radar.agents.llm import OpenAIResponsesClient
 from yc_radar.core.config import get_settings
 from yc_radar.domain.models import Company
+from yc_radar.services.artifact_generation import (
+    ArtifactGenerationLocked,
+    artifact_generation_lock,
+    atomic_text_writer,
+    atomic_write_json,
+)
 from yc_radar.services.candidate_fit import (
     apply_current_opportunity_score,
     enrich_targets_with_llm,
@@ -147,7 +153,14 @@ def main() -> None:
     settings = get_settings()
     output_dir = args.output_dir or settings.runs_dir / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with artifact_generation_lock(output_dir=output_dir, local_dir=settings.local_dir):
+            generate_artifacts(args=args, settings=settings, output_dir=output_dir)
+    except ArtifactGenerationLocked as exc:
+        raise SystemExit(str(exc)) from exc
 
+
+def generate_artifacts(*, args: argparse.Namespace, settings: Any, output_dir: Path) -> None:
     profile = load_candidate_profile(args.profile_path)
     companies = CompanyRepository().list()
     jobs_by_slug = load_jobs_by_slug(settings.database_url)
@@ -373,11 +386,11 @@ def verify_one_company(
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(path, payload, indent=2, sort_keys=True)
 
 
 def write_csv(path: Path, targets: list[dict[str, Any]]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as file:
+    with atomic_text_writer(path, newline="") as file:
         writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for target in targets:

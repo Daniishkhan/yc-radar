@@ -112,6 +112,7 @@ def test_recurring_pipeline_and_freshness_timers_are_installed_safely() -> None:
 
     assert "'THEIRSTACK_API_KEY='" in bootstrap
     assert "THEIRSTACK_API_KEY: ${THEIRSTACK_API_KEY:-}" in production_compose
+    assert "mem_limit: 4608m" in production_compose
 
     migrations = host_deploy.index('"${compose[@]}" run --rm app alembic upgrade head')
     timer_start = host_deploy.index("systemctl enable --now")
@@ -147,3 +148,45 @@ def test_recurring_pipeline_and_freshness_timers_are_installed_safely() -> None:
     assert "ExecStart=/usr/local/sbin/radar-check-pipeline-freshness" in freshness_service
     assert "OnCalendar=hourly" in freshness_timer
     assert "Persistent=true" in freshness_timer
+
+
+def test_managed_workloads_share_a_nonblocking_host_lock() -> None:
+    host_deploy = (REPO_ROOT / "deploy/aws/deploy-host.sh").read_text(
+        encoding="utf-8"
+    )
+    run_job = (REPO_ROOT / "deploy/aws/run-job.sh").read_text(encoding="utf-8")
+    refresh = (REPO_ROOT / "deploy/aws/run-pipeline-refresh.sh").read_text(
+        encoding="utf-8"
+    )
+    freshness = (REPO_ROOT / "deploy/aws/check-pipeline-freshness.sh").read_text(
+        encoding="utf-8"
+    )
+
+    for script in (host_deploy, run_job, refresh, freshness):
+        assert "WORKLOAD_LOCK=/run/lock/radar-workload.lock" in script
+        assert "flock -n" in script
+
+    assert "radar-deploy.lock" in host_deploy
+    assert 'radar-job-${name}.lock' in run_job
+    assert "radar-pipeline-refresh.lock" in refresh
+    assert "Another Radar workload is active; refusing" in host_deploy
+    assert "Another Radar workload is active; refusing" in run_job
+    assert "Another Radar workload is active; refusing" in refresh
+    assert "Another Radar workload is active; skipping" in freshness
+    assert "exit 0" in freshness
+
+
+def test_recurring_pipeline_stops_after_queue_generation_failure() -> None:
+    refresh = (REPO_ROOT / "deploy/aws/run-pipeline-refresh.sh").read_text(
+        encoding="utf-8"
+    )
+
+    application_queue = refresh.index("if ! run_stage application-and-verification-queues")
+    application_abort = refresh.index('exit "${exit_code}"', application_queue)
+    outreach_queue = refresh.index("if ! run_stage company-outreach-queue")
+    outreach_abort = refresh.index('exit "${exit_code}"', outreach_queue)
+    validation = refresh.index("run_stage application-url-validation")
+    metrics = refresh.index("run_stage application-pool-metrics")
+
+    assert application_queue < application_abort < outreach_queue
+    assert outreach_queue < outreach_abort < validation < metrics

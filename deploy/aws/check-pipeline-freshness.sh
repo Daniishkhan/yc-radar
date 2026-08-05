@@ -5,6 +5,7 @@ readonly WORKER_ENV=/etc/radar/worker.env
 readonly RADAR_ROOT=/srv/radar
 readonly APP_DIR=${RADAR_ROOT}/app
 readonly RUNTIME_ENV=${RADAR_ROOT}/config/runtime.env
+readonly WORKLOAD_LOCK=/run/lock/radar-workload.lock
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "radar-check-pipeline-freshness must run as root" >&2
@@ -13,6 +14,12 @@ fi
 if [[ ! -f ${WORKER_ENV} || ! -f ${RUNTIME_ENV} || ! -d ${APP_DIR}/.git ]]; then
   echo "Worker is not bootstrapped; expected ${WORKER_ENV}, ${RUNTIME_ENV}, and ${APP_DIR}" >&2
   exit 1
+fi
+
+exec 9>"${WORKLOAD_LOCK}"
+if ! flock -n 9; then
+  echo "Another Radar workload is active; skipping the pipeline freshness check"
+  exit 0
 fi
 
 compose=(
