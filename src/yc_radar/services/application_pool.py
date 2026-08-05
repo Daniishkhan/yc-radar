@@ -4,6 +4,12 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict
+from urllib.parse import urlsplit
+
+from yc_radar.services.application_url_validation import (
+    UnsafePublicUrl,
+    normalize_public_http_url,
+)
 
 
 ApplicationLane = Literal["application", "verification", "excluded"]
@@ -13,6 +19,13 @@ VERIFICATION_REMOTE_STATUSES = frozenset(
     {"regional_unconfirmed", "remote_unclear"}
 )
 TARGET_ROLE_STATUSES = frozenset({"strong", "possible"})
+KNOWN_JOB_AGGREGATOR_HOSTS = frozenset(
+    {
+        "glassdoor.com",
+        "indeed.com",
+        "linkedin.com",
+    }
+)
 
 
 class ApplicationPool(TypedDict):
@@ -189,11 +202,33 @@ def freshness_band(age_days: int | None) -> str:
 
 
 def preferred_application_url(row: dict[str, Any]) -> str | None:
-    for field in ("apply_url", "posting_url"):
-        value = str(row.get(field) or "").strip()
-        if value.startswith(("https://", "http://")):
-            return value
-    return None
+    apply_url = _public_http_url(row.get("apply_url"))
+    posting_url = _public_http_url(row.get("posting_url"))
+    if (
+        apply_url
+        and posting_url
+        and _is_known_job_aggregator_url(apply_url)
+        and not _is_known_job_aggregator_url(posting_url)
+    ):
+        return posting_url
+    return apply_url or posting_url
+
+
+def _public_http_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    try:
+        normalize_public_http_url(text)
+    except UnsafePublicUrl:
+        return None
+    return text
+
+
+def _is_known_job_aggregator_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower().rstrip(".").removeprefix("www.")
+    return any(
+        host == suffix or host.endswith(f".{suffix}")
+        for suffix in KNOWN_JOB_AGGREGATOR_HOSTS
+    )
 
 
 def application_pool_summary(

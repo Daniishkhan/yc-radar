@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from yc_radar.services.application_pool import build_application_pool
+import pytest
+
+from yc_radar.services.application_pool import (
+    build_application_pool,
+    preferred_application_url,
+)
 
 
 AS_OF = datetime(2026, 8, 5, tzinfo=UTC)
@@ -108,3 +113,56 @@ def test_queue_limit_does_not_hide_exclusion_metrics() -> None:
     assert pool["summary"]["inventory_count"] == 2
     assert pool["summary"]["application_candidate_count"] == 2
     assert pool["summary"]["application_queue_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "posting_url",
+    [
+        "https://apply.workable.com/j/41DE30A096",
+        "https://jobs.ashbyhq.com/camunda/e58aa263-e06b-4e20-8b55-c88047ed8f58",
+        "https://aiconiclab.notion.site/Front-End-Engineer-16fef606faa5808ca9d1d214384a4ef5",
+    ],
+)
+def test_direct_posting_beats_known_aggregator_apply_url(posting_url: str) -> None:
+    row = job(
+        posting_url=posting_url,
+        apply_url="https://www.indeed.com/viewjob?jk=70f866242f1bb7c4",
+    )
+
+    assert preferred_application_url(row) == posting_url
+    pool = build_application_pool([row], as_of=AS_OF)
+    assert pool["application_queue"][0]["application_url"] == posting_url
+
+
+def test_ordinary_direct_apply_url_keeps_precedence() -> None:
+    row = job(
+        posting_url="https://jobs.ashbyhq.com/example/role",
+        apply_url="https://example.com/jobs/role/apply",
+    )
+
+    assert preferred_application_url(row) == "https://example.com/jobs/role/apply"
+
+
+def test_aggregator_override_requires_a_valid_non_aggregator_posting_url() -> None:
+    aggregator = "https://jobs.indeed.com/viewjob?jk=70f866242f1bb7c4"
+
+    assert preferred_application_url(job(posting_url="https://", apply_url=aggregator)) == (
+        aggregator
+    )
+    assert preferred_application_url(
+        job(
+            posting_url="https://jobs.linkedin.com/jobs/view/123",
+            apply_url=aggregator,
+        )
+    ) == aggregator
+
+
+def test_aggregator_host_matching_does_not_match_lookalike_domains() -> None:
+    lookalike_apply = "https://indeed.com.attacker.example/jobs/1"
+
+    assert preferred_application_url(
+        job(
+            posting_url="https://jobs.ashbyhq.com/example/role",
+            apply_url=lookalike_apply,
+        )
+    ) == lookalike_apply
