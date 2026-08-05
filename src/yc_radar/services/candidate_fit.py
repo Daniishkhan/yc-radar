@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -297,6 +298,10 @@ NON_OPENING_CONTEXT_PATTERNS = (
     r"\bnot\s+(?:a|an|the)\s+(?:job|opening|position|role)\s+(?:that\s+)?we(?:'re|\s+are)?\s+currently\s+hiring\s+for\b",
     r"\bwe(?:'re|\s+are)\s+not\s+currently\s+hiring\s+for\s+(?:a|the|this)\s+(?:job|opening|position|role)\b",
     r"\baccepting\s+(?:applications?|resumes?)\s+for\s+(?:a\s+)?(?:potential\s+)?future\s+(?:job|opening|opportunit(?:y|ies)|position|role)\b",
+)
+_NON_OPENING_CONTEXT_PATTERN = re.compile(
+    "|".join(f"(?:{pattern})" for pattern in NON_OPENING_CONTEXT_PATTERNS),
+    flags=re.IGNORECASE,
 )
 
 
@@ -760,7 +765,7 @@ def classify_role_text(
         return RoleClassification(
             "exclude", ["Physical IT implementation role is outside software lane"]
         )
-    if _first_pattern_match(combined, NON_OPENING_CONTEXT_PATTERNS):
+    if _NON_OPENING_CONTEXT_PATTERN.search(combined):
         return RoleClassification("exclude", ["Listing is not a current opening"])
     if _has_any_signal(title_text, DATA_ANALYST_TERMS):
         return RoleClassification("exclude", ["Data analyst role is outside the engineering lane"])
@@ -1554,8 +1559,10 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
         or role_remote_match
     )
 
-    us_specific_restriction = _first_required_us_eligibility_match(
-        descriptive_evidence
+    us_specific_restriction = (
+        _first_required_us_eligibility_match(descriptive_evidence)
+        if remote_signal
+        else None
     )
     if us_specific_restriction and remote_signal:
         return _remote_result(
@@ -1564,9 +1571,13 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("eligibility restriction", us_specific_restriction),
         )
 
-    pakistan_exclusion = _first_pattern_match(
-        " ".join((location_scope, countries, descriptive_evidence)),
-        _PAKISTAN_EXCLUSION_PATTERNS,
+    pakistan_exclusion = (
+        _first_pattern_match(
+            " ".join((location_scope, countries, descriptive_evidence)),
+            _PAKISTAN_EXCLUSION_PATTERNS,
+        )
+        if remote_signal
+        else None
     )
     if pakistan_exclusion and remote_signal:
         return _remote_result(
@@ -1575,9 +1586,13 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("restriction", pakistan_exclusion),
         )
 
-    global_limitation = _first_pattern_match(
-        " ".join((location_scope, descriptive_evidence)),
-        _GLOBAL_SCOPE_LIMITATION_PATTERNS,
+    global_limitation = (
+        _first_pattern_match(
+            " ".join((location_scope, descriptive_evidence)),
+            _GLOBAL_SCOPE_LIMITATION_PATTERNS,
+        )
+        if remote_signal
+        else None
     )
     if global_limitation and remote_signal:
         return _remote_result(
@@ -1609,7 +1624,9 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("title restriction", regional_title_scope),
         )
 
-    legal_work_countries = _legal_work_country_list(description_raw)
+    legal_work_countries = (
+        _legal_work_country_list(description_raw) if remote_signal else None
+    )
     if legal_work_countries and remote_signal and not legal_work_countries[1]:
         return _remote_result(
             "restricted_remote",
@@ -1694,10 +1711,14 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("location", location_raw or " | ".join(structured.location_labels)),
         )
 
-    restricted_region_match = _region_eligibility_match(
-        descriptive_evidence, _RESTRICTED_REGION_PATTERNS
+    restricted_region_match = (
+        _region_eligibility_match(descriptive_evidence, _RESTRICTED_REGION_PATTERNS)
+        if remote_signal
+        else None
     )
-    generic_restriction_match = _generic_location_restriction_match(descriptive_evidence)
+    generic_restriction_match = (
+        _generic_location_restriction_match(descriptive_evidence) if remote_signal else None
+    )
     if remote_signal and (restricted_region_match or generic_restriction_match):
         return _remote_result(
             "restricted_remote",
@@ -1708,11 +1729,15 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             ),
         )
 
-    regional_description_match = _region_eligibility_match(
-        descriptive_evidence, _REGIONAL_UNCONFIRMED_PATTERNS
+    regional_description_match = (
+        _region_eligibility_match(descriptive_evidence, _REGIONAL_UNCONFIRMED_PATTERNS)
+        if remote_signal
+        else None
     )
-    timezone_match = _first_pattern_match(
-        descriptive_evidence, _TIMEZONE_CONSTRAINT_PATTERNS
+    timezone_match = (
+        _first_pattern_match(descriptive_evidence, _TIMEZONE_CONSTRAINT_PATTERNS)
+        if remote_signal
+        else None
     )
     if global_primary_location and (regional_description_match or timezone_match):
         return _remote_result(
@@ -1737,8 +1762,10 @@ def classify_remote_eligibility(job: dict[str, Any]) -> RemoteEligibility:
             _evidence("remote signal", role_remote_match or global_match or ""),
         )
 
-    pakistan_match = _first_pattern_match(
-        descriptive_evidence, _PAKISTAN_ELIGIBILITY_PATTERNS
+    pakistan_match = (
+        _first_pattern_match(descriptive_evidence, _PAKISTAN_ELIGIBILITY_PATTERNS)
+        if remote_signal
+        else None
     )
     if remote_signal and (
         re.search(r"\bpakistan\b", location_scope)
@@ -1828,9 +1855,21 @@ def _normalise_remote_location(location: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", location.lower())).strip()
 
 
+@lru_cache(maxsize=None)
+def _compiled_regex(pattern: str) -> re.Pattern[str]:
+    """Compile each classifier expression once instead of relying on ``re``'s small cache.
+
+    Remote classification builds region-aware expressions dynamically.  The complete expression
+    set is larger than Python's shared 512-entry regex cache, so a single classification could
+    repeatedly evict and recompile expressions.  This private cache is bounded by the finite set
+    of classifier constants and region combinations used by this module.
+    """
+    return re.compile(pattern, flags=re.IGNORECASE)
+
+
 def _first_pattern_match(text: str, patterns: tuple[str, ...]) -> str | None:
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
+        match = _compiled_regex(pattern).search(text)
         if match:
             return re.sub(r"\s+", " ", match.group(0)).strip()
     return None
@@ -1838,7 +1877,7 @@ def _first_pattern_match(text: str, patterns: tuple[str, ...]) -> str | None:
 
 def _first_required_us_eligibility_match(text: str) -> str | None:
     for pattern in _US_SPECIFIC_ELIGIBILITY_RESTRICTION_PATTERNS:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+        for match in _compiled_regex(pattern).finditer(text):
             before_raw = text[max(0, match.start() - 140) : match.start()]
             before_boundaries = list(
                 _ELIGIBILITY_CLAUSE_BOUNDARY_PATTERN.finditer(before_raw)
@@ -1959,7 +1998,7 @@ def _has_global_remote_claim(text: str) -> bool:
 def _role_global_remote_claim(text: str) -> str | None:
     role_text = text
     for pattern in _NON_ROLE_GLOBAL_REMOTE_PATTERNS:
-        role_text = re.sub(pattern, " ", role_text, flags=re.IGNORECASE)
+        role_text = _compiled_regex(pattern).sub(" ", role_text)
     return _first_pattern_match(role_text, _GLOBAL_REMOTE_CLAIM_PATTERNS)
 
 
@@ -2015,6 +2054,11 @@ def _structured_remote_location_is_restricted(location: str) -> bool:
 
 def _region_eligibility_match(text: str, region_patterns: tuple[str, ...]) -> str | None:
     for region in region_patterns:
+        # Every expression below contains ``region`` verbatim as a regex subexpression.  If the
+        # region itself is absent, none of the ten contextual expressions can match.  This cheap
+        # guard avoids repeatedly scanning a full job description for every context template.
+        if _compiled_regex(region).search(text) is None:
+            continue
         patterns = (
             rf"\bremote(?:ly)?\s+(?:from|in|within|across)\s+(?:the\s+)?{region}",
             rf"\b(?:work|working)\s+remotely\s+(?:from|in|within)\s+(?:the\s+)?{region}",

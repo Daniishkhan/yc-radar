@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from yc_radar.domain.models import Company
+from yc_radar.services import candidate_fit
 from yc_radar.services.candidate_fit import (
     DEFAULT_CANDIDATE_PROFILE,
     OBSERVATION_OPPORTUNITY_SCORE_CAP,
@@ -315,6 +316,32 @@ def test_role_classifier_excludes_future_non_openings() -> None:
         result = classify_role_text("Senior Backend Engineer", description)
         assert result.status == "exclude", description
         assert result.reasons == ["Listing is not a current opening"]
+
+
+@pytest.mark.parametrize(
+    "context",
+    (
+        "Join our contractor pool and receive project invitations.",
+        "Join the freelance network. We send project invitations when they arise.",
+        "This is not a job that we're currently hiring for.",
+        "WE ARE NOT CURRENTLY HIRING FOR THIS POSITION.",
+        "Accepting applications for a potential future opportunity.",
+        "This is a current full-time opening on our backend team.",
+        "Contract role for a software engineer working on active customer projects.",
+        ("Build reliable systems with the team. " * 500)
+        + "Accepting resumes for a future role.",
+    ),
+)
+def test_combined_non_opening_pattern_preserves_legacy_matching(context: str) -> None:
+    legacy_match = candidate_fit._first_pattern_match(  # noqa: SLF001
+        context,
+        candidate_fit.NON_OPENING_CONTEXT_PATTERNS,
+    )
+    combined_match = candidate_fit._NON_OPENING_CONTEXT_PATTERN.search(  # noqa: SLF001
+        context
+    )
+
+    assert (combined_match is not None) is (legacy_match is not None)
 
 
 def test_role_classifier_includes_frontend_heavy_full_stack() -> None:
