@@ -675,6 +675,11 @@ def _has_any_signal(text: str, terms: tuple[str, ...]) -> bool:
     return any(_has_signal(text, term) for term in terms)
 
 
+def has_engineering_title_signal(title: str) -> bool:
+    """Return whether a title satisfies the role classifier's engineering-title gate."""
+    return _has_any_signal(title.lower(), ENGINEERING_TITLE_TERMS)
+
+
 def _has_any_title_term(text: str, terms: tuple[str, ...]) -> bool:
     """Match exclusion terms as complete title tokens instead of substrings."""
     for term in terms:
@@ -763,7 +768,7 @@ def classify_role_text(
         return RoleClassification(
             "exclude", ["Research-only ML role lacks backend/platform signal"]
         )
-    if not _has_any_signal(title_text, ENGINEERING_TITLE_TERMS):
+    if not has_engineering_title_signal(title_text):
         return RoleClassification("exclude", ["Title is not an engineering role"])
 
     if (

@@ -10,12 +10,32 @@ from yc_radar.services.candidate_fit import (
     classify_role_family,
     classify_role_text,
     current_opportunity_score,
+    has_engineering_title_signal,
     rank_companies,
     rerank_verified_targets,
     role_focus_record,
     score_company,
     target_record,
 )
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("Frontend Engineer", True),
+        ("Full Stack Developer", True),
+        ("Applied AI Engineer", True),
+        ("Site Reliability Engineer", True),
+        ("Product Designer", False),
+        ("Account Executive", False),
+        ("Customer Success Manager", False),
+    ],
+)
+def test_engineering_title_signal_uses_role_classifier_gate(
+    title: str,
+    expected: bool,
+) -> None:
+    assert has_engineering_title_signal(title) is expected
 
 
 def test_role_classifier_strong_for_senior_backend_and_infra_software_roles() -> None:

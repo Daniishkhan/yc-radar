@@ -183,12 +183,28 @@ def test_role_first_filtered_export_matches_classify_then_filter_semantics() -> 
             "posting_url": "https://example.com/backend",
         },
         {
+            "company_name": "Frontend",
+            "title": "Frontend Engineer",
+            "location": "Remote",
+            "description_text": "Join our remote frontend engineering team.",
+            "status": "active",
+            "posting_url": "https://example.com/frontend",
+        },
+        {
             "company_name": "Full Stack",
             "title": "Full Stack Engineer",
             "location": "Remote",
             "description_text": "Join our remote engineering team.",
             "status": "active",
             "posting_url": "https://example.com/full-stack",
+        },
+        {
+            "company_name": "AI",
+            "title": "Applied AI Engineer",
+            "location": "Remote",
+            "description_text": "Build AI systems with our remote team.",
+            "status": "active",
+            "posting_url": "https://example.com/ai",
         },
         {
             "company_name": "Sales",
@@ -213,14 +229,14 @@ def test_role_first_filtered_export_matches_classify_then_filter_semantics() -> 
         [generate_job_opportunities.opportunity_row(row) for row in source_rows],
         role_statuses=role_statuses,
         remote_statuses=remote_statuses,
-        limit=2,
+        limit=None,
     )
 
     optimized = generate_job_opportunities.classify_and_filter_opportunity_rows(
         source_rows,
         role_statuses=role_statuses,
         remote_statuses=remote_statuses,
-        limit=2,
+        limit=None,
     )
 
     assert optimized == old_semantics
@@ -229,16 +245,41 @@ def test_role_first_filtered_export_matches_classify_then_filter_semantics() -> 
 def test_role_filter_skips_remote_analysis_for_nonmatching_rows_and_classifies_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class RejectDescriptionAccess(dict[str, object]):
+        def get(self, key: str, default: object = None) -> object:
+            if key in {"description_text", "department", "location"}:
+                raise AssertionError(f"context accessed for rejected title: {key}")
+            return super().get(key, default)
+
     source_rows = [
+        RejectDescriptionAccess(
+            {
+                "company_name": "Sales",
+                "title": "Account Executive",
+                "description_text": "Sell enterprise software remotely.",
+            }
+        ),
+        RejectDescriptionAccess(
+            {
+                "company_name": "Design",
+                "title": "Product Designer",
+                "description_text": "Design products remotely.",
+            }
+        ),
         {
-            "company_name": "Sales",
-            "title": "Account Executive",
-            "description_text": "Sell enterprise software remotely.",
+            "company_name": "Frontend",
+            "title": "Frontend Engineer",
+            "description_text": "Build React interfaces for a remote team.",
         },
         {
-            "company_name": "Backend",
-            "title": "Senior Backend Engineer",
-            "description_text": "Build APIs for a remote team.",
+            "company_name": "Full Stack",
+            "title": "Full Stack Engineer",
+            "description_text": "Build end-to-end software for a remote team.",
+        },
+        {
+            "company_name": "AI",
+            "title": "Applied AI Engineer",
+            "description_text": "Build AI systems for a remote team.",
         },
     ]
     original_role_classifier = generate_job_opportunities.classify_role_text
@@ -270,12 +311,45 @@ def test_role_filter_skips_remote_analysis_for_nonmatching_rows_and_classifies_o
 
     rows = generate_job_opportunities.classify_and_filter_opportunity_rows(
         source_rows,
-        role_statuses=["strong"],
+        role_statuses=["possible"],
     )
 
-    assert classified_titles == ["Account Executive", "Senior Backend Engineer"]
-    assert remotely_analyzed_titles == ["Senior Backend Engineer"]
-    assert [row["company_name"] for row in rows] == ["Backend"]
+    assert classified_titles == [
+        "Frontend Engineer",
+        "Full Stack Engineer",
+        "Applied AI Engineer",
+    ]
+    assert remotely_analyzed_titles == classified_titles
+    assert [row["company_name"] for row in rows] == ["Frontend", "Full Stack", "AI"]
+
+
+def test_role_filter_including_exclude_preserves_non_engineering_rows() -> None:
+    source_rows = [
+        {
+            "company_name": "Design",
+            "title": "Product Designer",
+            "location": "Remote",
+            "description_text": "Design products for a remote team.",
+        },
+        {
+            "company_name": "Frontend",
+            "title": "Frontend Engineer",
+            "location": "Remote",
+            "description_text": "Build React interfaces for a remote team.",
+        },
+    ]
+    old_semantics = generate_job_opportunities.filter_opportunity_rows(
+        [generate_job_opportunities.opportunity_row(row) for row in source_rows],
+        role_statuses=["exclude"],
+    )
+
+    optimized = generate_job_opportunities.classify_and_filter_opportunity_rows(
+        source_rows,
+        role_statuses=["exclude"],
+    )
+
+    assert optimized == old_semantics
+    assert [row["company_name"] for row in optimized] == ["Design"]
 
 
 def test_job_row_artifacts_keep_existing_json_shape_and_publish_csv(tmp_path: Path) -> None:

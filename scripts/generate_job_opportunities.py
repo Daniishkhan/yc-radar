@@ -22,6 +22,7 @@ from yc_radar.services.candidate_fit import (
     RoleClassification,
     classify_remote_eligibility,
     classify_role_text,
+    has_engineering_title_signal,
     job_seniority,
 )
 from yc_radar.services.database import create_schema, engine_from_url
@@ -338,11 +339,16 @@ def classify_and_filter_opportunity_rows(
     """Apply role filters before the more expensive remote classification."""
     selected_roles = set(role_statuses)
     selected_remote = set(remote_statuses)
+    can_reject_non_engineering_titles = bool(selected_roles) and "exclude" not in selected_roles
     if limit == 0:
         return []
 
     filtered: list[dict[str, Any]] = []
     for source_row in rows:
+        if can_reject_non_engineering_titles and not has_engineering_title_signal(
+            str(source_row["title"])
+        ):
+            continue
         classification = classify_opportunity_role(source_row)
         if selected_roles and classification.status not in selected_roles:
             continue
