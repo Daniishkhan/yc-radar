@@ -19,6 +19,7 @@ from yc_radar.services.artifact_generation import (
 )
 from yc_radar.services.application_pool import build_application_pool
 from yc_radar.services.candidate_fit import (
+    RoleClassification,
     classify_remote_eligibility,
     classify_role_text,
     job_seniority,
@@ -205,13 +206,21 @@ def generate_artifacts(
         observation_max_age_days=args.observation_max_age_days,
         limit=None if has_post_filters else args.limit,
     )
-    payload_rows = [opportunity_row(row) for row in rows]
-    payload_rows = filter_opportunity_rows(
-        payload_rows,
-        role_statuses=args.role_status,
-        remote_statuses=args.remote_status,
-        limit=args.limit,
-    )
+    if args.role_status:
+        payload_rows = classify_and_filter_opportunity_rows(
+            rows,
+            role_statuses=args.role_status,
+            remote_statuses=args.remote_status,
+            limit=args.limit,
+        )
+    else:
+        payload_rows = [opportunity_row(row) for row in rows]
+        payload_rows = filter_opportunity_rows(
+            payload_rows,
+            role_statuses=args.role_status,
+            remote_statuses=args.remote_status,
+            limit=args.limit,
+        )
     json_path, csv_path = write_job_rows(
         output_dir=output_dir,
         stem="job_opportunities",
@@ -257,8 +266,8 @@ def generate_artifacts(
     print(f"Wrote application-pool metrics: {summary_path}")
 
 
-def opportunity_row(row: dict[str, Any]) -> dict[str, Any]:
-    classification = classify_role_text(
+def classify_opportunity_role(row: dict[str, Any]) -> RoleClassification:
+    return classify_role_text(
         str(row["title"]),
         " ".join(
             str(value)
@@ -267,6 +276,14 @@ def opportunity_row(row: dict[str, Any]) -> dict[str, Any]:
         ),
         seniority=job_seniority(row),
     )
+
+
+def opportunity_row(
+    row: dict[str, Any],
+    *,
+    role_classification: RoleClassification | None = None,
+) -> dict[str, Any]:
+    classification = role_classification or classify_opportunity_role(row)
     remote_eligibility = classify_remote_eligibility(row)
     return {
         field: row.get(field)
@@ -309,6 +326,33 @@ def filter_opportunity_rows(
         )
     ]
     return filtered if limit is None else filtered[:limit]
+
+
+def classify_and_filter_opportunity_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    role_statuses: Sequence[str],
+    remote_statuses: Sequence[str] = (),
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Apply role filters before the more expensive remote classification."""
+    selected_roles = set(role_statuses)
+    selected_remote = set(remote_statuses)
+    if limit == 0:
+        return []
+
+    filtered: list[dict[str, Any]] = []
+    for source_row in rows:
+        classification = classify_opportunity_role(source_row)
+        if selected_roles and classification.status not in selected_roles:
+            continue
+        row = opportunity_row(source_row, role_classification=classification)
+        if selected_remote and row["remote_eligibility_status"] not in selected_remote:
+            continue
+        filtered.append(row)
+        if limit is not None and limit > 0 and len(filtered) >= limit:
+            break
+    return filtered if limit is None or limit >= 0 else filtered[:limit]
 
 
 def csv_value(value: Any) -> str | int | float | bool | None:

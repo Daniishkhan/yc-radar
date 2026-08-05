@@ -61,6 +61,8 @@ run_stage source-sync \
 if ! run_stage application-and-verification-queues \
   python scripts/generate_job_opportunities.py \
   --output-dir "${CONTAINER_RUN_DIR}" \
+  --role-status strong \
+  --role-status possible \
   --limit 200000 \
   --queue-limit 500; then
   exit "${exit_code}"

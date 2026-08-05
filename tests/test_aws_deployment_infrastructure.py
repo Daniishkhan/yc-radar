@@ -1,4 +1,7 @@
+import re
 from pathlib import Path
+
+from yc_radar.services.application_pool import TARGET_ROLE_STATUSES
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +126,14 @@ def test_recurring_pipeline_and_freshness_timers_are_installed_safely() -> None:
     assert "python scripts/sync_job_sources.py" in refresh
     assert "--delay-seconds 2" in refresh
     assert "python scripts/generate_job_opportunities.py" in refresh
+    assert "--role-status strong" in refresh
+    assert "--role-status possible" in refresh
+    queue_stage = refresh.split(
+        "if ! run_stage application-and-verification-queues", maxsplit=1
+    )[1].split("if ! run_stage company-outreach-queue", maxsplit=1)[0]
+    assert set(re.findall(r"--role-status ([a-z_]+)", queue_stage)) == set(
+        TARGET_ROLE_STATUSES
+    )
     assert "--limit 200000" in refresh
     assert "--queue-limit 500" in refresh
     assert "python scripts/generate_weekly_targets.py" in refresh

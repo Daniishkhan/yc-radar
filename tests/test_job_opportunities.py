@@ -172,6 +172,112 @@ def test_role_and_remote_filters_are_repeatable_and_apply_before_limit() -> None
     assert filtered == [rows[2]]
 
 
+def test_role_first_filtered_export_matches_classify_then_filter_semantics() -> None:
+    source_rows = [
+        {
+            "company_name": "Backend",
+            "title": "Senior Backend Engineer",
+            "location": "Worldwide Remote",
+            "description_text": "Work remotely from anywhere in the world.",
+            "status": "active",
+            "posting_url": "https://example.com/backend",
+        },
+        {
+            "company_name": "Full Stack",
+            "title": "Full Stack Engineer",
+            "location": "Remote",
+            "description_text": "Join our remote engineering team.",
+            "status": "active",
+            "posting_url": "https://example.com/full-stack",
+        },
+        {
+            "company_name": "Sales",
+            "title": "Account Executive",
+            "location": "Worldwide Remote",
+            "description_text": "Work remotely from anywhere.",
+            "status": "active",
+            "posting_url": "https://example.com/sales",
+        },
+        {
+            "company_name": "Weak",
+            "title": "Software Engineer",
+            "location": "Remote",
+            "description_text": "Join our remote team.",
+            "status": "active",
+            "posting_url": "https://example.com/software",
+        },
+    ]
+    role_statuses = ["strong", "possible"]
+    remote_statuses = ["global_explicit", "remote_unclear"]
+    old_semantics = generate_job_opportunities.filter_opportunity_rows(
+        [generate_job_opportunities.opportunity_row(row) for row in source_rows],
+        role_statuses=role_statuses,
+        remote_statuses=remote_statuses,
+        limit=2,
+    )
+
+    optimized = generate_job_opportunities.classify_and_filter_opportunity_rows(
+        source_rows,
+        role_statuses=role_statuses,
+        remote_statuses=remote_statuses,
+        limit=2,
+    )
+
+    assert optimized == old_semantics
+
+
+def test_role_filter_skips_remote_analysis_for_nonmatching_rows_and_classifies_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_rows = [
+        {
+            "company_name": "Sales",
+            "title": "Account Executive",
+            "description_text": "Sell enterprise software remotely.",
+        },
+        {
+            "company_name": "Backend",
+            "title": "Senior Backend Engineer",
+            "description_text": "Build APIs for a remote team.",
+        },
+    ]
+    original_role_classifier = generate_job_opportunities.classify_role_text
+    classified_titles: list[str] = []
+    remotely_analyzed_titles: list[str] = []
+
+    def count_role_classification(title: str, context: str, **kwargs):
+        classified_titles.append(title)
+        return original_role_classifier(title, context, **kwargs)
+
+    def count_remote_classification(row: dict[str, object]):
+        remotely_analyzed_titles.append(str(row["title"]))
+        return SimpleNamespace(
+            status="remote_unclear",
+            reasons=["test"],
+            evidence=["test"],
+        )
+
+    monkeypatch.setattr(
+        generate_job_opportunities,
+        "classify_role_text",
+        count_role_classification,
+    )
+    monkeypatch.setattr(
+        generate_job_opportunities,
+        "classify_remote_eligibility",
+        count_remote_classification,
+    )
+
+    rows = generate_job_opportunities.classify_and_filter_opportunity_rows(
+        source_rows,
+        role_statuses=["strong"],
+    )
+
+    assert classified_titles == ["Account Executive", "Senior Backend Engineer"]
+    assert remotely_analyzed_titles == ["Senior Backend Engineer"]
+    assert [row["company_name"] for row in rows] == ["Backend"]
+
+
 def test_job_row_artifacts_keep_existing_json_shape_and_publish_csv(tmp_path: Path) -> None:
     rows = [
         {
