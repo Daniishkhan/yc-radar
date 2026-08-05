@@ -118,3 +118,17 @@ def test_empty_queue_metrics_are_explicit_instead_of_dividing_by_zero() -> None:
     assert queue["selected_url_coverage"] is None
     assert queue["url_validation"]["validation_coverage"] is None
     assert report["url_validation"]["dead_link_rate"] is None
+
+
+def test_outreach_company_count_accepts_target_name_and_slug_fields() -> None:
+    report = build_application_pool_metrics(
+        {
+            "company_outreach": [
+                {"id": 30960, "name": "Metorial", "slug": "metorial"},
+                {"id": 29425, "name": "Zep AI", "slug": "zep-ai"},
+            ]
+        },
+        generated_at=datetime(2026, 8, 5, 12, tzinfo=UTC),
+    )
+
+    assert report["queues"]["company_outreach_queue"]["company_count"] == 2

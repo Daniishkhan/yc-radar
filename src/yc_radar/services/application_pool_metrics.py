@@ -81,7 +81,16 @@ def _queue_metrics(
     companies = {
         identity
         for row in rows
-        if (identity := _first_text(row, "company_slug", "company_name")) is not None
+        if (
+            identity := _first_text(
+                row,
+                "company_slug",
+                "company_name",
+                "slug",
+                "name",
+            )
+        )
+        is not None
     }
     direct_url_count = sum(
         bool(_first_text(row, "application_url", "apply_url"))
