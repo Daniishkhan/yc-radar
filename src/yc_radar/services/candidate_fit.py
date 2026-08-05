@@ -1133,35 +1133,77 @@ def _cluster_matching_job_provenance(
     return clusters
 
 
+def _should_defer_role_context(title: str) -> bool:
+    return not has_engineering_title_signal(title)
+
+
 def role_focus_record(
     company: Company,
     *,
     jobs: list[dict[str, Any]] | None = None,
     verified_roles: list[str] | None = None,
 ) -> dict[str, Any]:
-    role_inputs: list[tuple[str, str, dict[str, Any] | None]] = []
     inventory_jobs = [dict(job) for job in jobs or []]
+    classifications: list[
+        tuple[str, RoleClassification | None, dict[str, Any] | None]
+    ] = []
     for job in inventory_jobs:
         title = str(job.get("title") or "").strip()
-        if title:
-            role_inputs.append((title, _job_context(job), job))
+        if not title:
+            continue
+        # A title without an engineering signal can only reach ``exclude`` in
+        # ``classify_role_text``. Defer its potentially large description until we know
+        # whether exclusion reasons are observable in the final record.
+        if _should_defer_role_context(title):
+            classifications.append((title, None, job))
+            continue
+        classifications.append(
+            (
+                title,
+                classify_role_text(
+                    title,
+                    _job_context(job),
+                    seniority=job_seniority(job),
+                ),
+                job,
+            )
+        )
     for role in verified_roles or []:
         title = str(role).strip()
         if title:
-            role_inputs.append((title, title, None))
+            classifications.append(
+                (title, classify_role_text(title, title), None)
+            )
 
-    classifications = [
-        (
-            title,
-            classify_role_text(
-                title,
-                context,
-                seniority=job_seniority(inventory_job) if inventory_job is not None else None,
-            ),
-            inventory_job,
+    has_matching_role = any(
+        classification is not None
+        and classification.status in {"strong", "possible"}
+        for _, classification, _ in classifications
+    )
+    resolved_classifications: list[
+        tuple[str, RoleClassification, dict[str, Any] | None]
+    ] = []
+    for title, classification, inventory_job in classifications:
+        if classification is None:
+            if has_matching_role:
+                # Excluded reasons are not emitted when a strong/possible reason exists,
+                # and excluded rows never enter matching provenance or remote analysis.
+                classification = RoleClassification(
+                    "exclude", ["Title is not an engineering role"]
+                )
+            else:
+                # Preserve the exact legacy reason list for companies with no match. Those
+                # reasons are user-visible and may depend on description context.
+                assert inventory_job is not None
+                classification = classify_role_text(
+                    title,
+                    _job_context(inventory_job),
+                    seniority=job_seniority(inventory_job),
+                )
+        resolved_classifications.append(
+            (title, classification, inventory_job)
         )
-        for title, context, inventory_job in role_inputs
-    ]
+    classifications = resolved_classifications
     matching_titles = [
         title
         for title, classification, _ in classifications

@@ -489,6 +489,106 @@ def test_ai_and_data_signals_boost_backend_relevance_without_becoming_primary_la
     assert role_focus["role_match_status"] == "strong"
 
 
+def test_role_focus_deferred_non_engineering_context_matches_eager_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    company = Company(name="Mixed Roles", slug="mixed-roles")
+    jobs = [
+        {
+            "title": "Senior Backend Engineer",
+            "location": "Remote - Worldwide",
+            "description_text": "Build distributed APIs.",
+            "provider": "greenhouse",
+            "external_job_id": "backend-1",
+            "lifecycle_managed": True,
+        },
+        {
+            "title": "Technical Evangelist",
+            "description_text": (
+                "Join our contractor network for project invitations when they arise. "
+                + "Community program details. " * 200
+            ),
+            "provider": "greenhouse",
+            "external_job_id": "evangelist-1",
+            "lifecycle_managed": True,
+        },
+        {
+            "title": "Sales Lead",
+            "description_text": "Own enterprise accounts. " * 200,
+            "provider": "greenhouse",
+            "external_job_id": "sales-1",
+            "lifecycle_managed": True,
+        },
+    ]
+
+    optimized = role_focus_record(company, jobs=jobs)
+    monkeypatch.setattr(candidate_fit, "_should_defer_role_context", lambda title: False)
+    eager = role_focus_record(company, jobs=jobs)
+
+    assert optimized == eager
+
+
+def test_role_focus_fully_classifies_deferred_context_when_reasons_are_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    company = Company(name="No Matching Roles", slug="no-matching-roles")
+    jobs = [
+        {
+            "title": "Technical Evangelist",
+            "description_text": (
+                "Join our contractor network for project invitations when they arise."
+            ),
+        },
+        {"title": "Sales Lead", "description_text": "Own enterprise accounts."},
+    ]
+
+    optimized = role_focus_record(company, jobs=jobs)
+    monkeypatch.setattr(candidate_fit, "_should_defer_role_context", lambda title: False)
+    eager = role_focus_record(company, jobs=jobs)
+
+    assert optimized == eager
+    assert optimized["role_match_reasons"][0] == "Listing is not a current opening"
+
+
+def test_role_focus_skips_large_non_engineering_context_after_a_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    company = Company(name="Classifier Fast Path", slug="classifier-fast-path")
+    original_classifier = candidate_fit.classify_role_text
+    classified_titles: list[str] = []
+
+    def tracking_classifier(
+        title: str,
+        context: str = "",
+        *,
+        seniority: str | None = None,
+    ) -> candidate_fit.RoleClassification:
+        classified_titles.append(title)
+        return original_classifier(title, context, seniority=seniority)
+
+    monkeypatch.setattr(candidate_fit, "classify_role_text", tracking_classifier)
+    target = role_focus_record(
+        company,
+        jobs=[
+            {
+                "title": "Senior Backend Engineer",
+                "description_text": "Build distributed APIs.",
+            },
+            {
+                "title": "Technical Evangelist",
+                "description_text": "Community program details. " * 1_000,
+            },
+            {
+                "title": "Sales Lead",
+                "description_text": "Own enterprise accounts. " * 1_000,
+            },
+        ],
+    )
+
+    assert target["role_match_status"] == "strong"
+    assert classified_titles == ["Senior Backend Engineer"]
+
+
 def test_target_record_uses_yc_is_hiring_and_live_unknown_defaults() -> None:
     company = Company(
         name="SmallCo",
