@@ -118,6 +118,20 @@ Manual source registration is a trusted operator override: it validates the prov
 not fetch a snapshot first. Automated scout and staging promotion require a complete provider
 snapshot before registration.
 
+Repair a confirmed source-identity mistake with the guarded operator command. It is a dry run
+unless `--yes` is supplied, requires the current company ID as a compare-and-swap guard, and
+refuses sources with running syncs. Stop or lock recurring workloads before applying it:
+
+```bash
+uv run python scripts/repair_company_source.py \
+  --provider greenhouse --external-id example \
+  --expected-company-id 123 --target-company-id 456 \
+  --reason "independent identity evidence confirms a different employer"
+
+# Add --yes only after reviewing the before/after counts. If a board represents multiple
+# employers rather than one company, replace --target-company-id with --disable-source.
+```
+
 Use staging for large URL inventories. Scope work with both source and run key; unscoped workers
 operate on the global queue. Keep network batches within their lease period and inspect `status`
 for delayed retries because `claimed: 0` can mean backoff rather than completion:

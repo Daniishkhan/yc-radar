@@ -55,7 +55,15 @@ class JobSyncService:
     ) -> StartedSyncRun | SyncResult:
         now = self._clock()
         with self.repository.engine.begin() as connection:
-            source = self.repository.get_source(connection, company_source_id)
+            # Serialize sync startup with explicit source repair. A repair takes the same row
+            # lock, so whichever transaction wins is observed completely by the other: either
+            # this run is recorded first and blocks the repair, or a disable commits first and
+            # this fresh read rejects the source.
+            source = self.repository.get_source(
+                connection,
+                company_source_id,
+                for_update=True,
+            )
             if source["provider"] != provider:
                 raise ValueError("adapter provider differs from company source provider")
             if source["status"] != "active":
@@ -156,7 +164,11 @@ class JobSyncService:
         """Upsert jobs seen by a non-authoritative source without applying absence semantics."""
         now = self._clock()
         with self.repository.engine.begin() as connection:
-            source = self.repository.get_source(connection, company_source_id)
+            source = self.repository.get_source(
+                connection,
+                company_source_id,
+                for_update=True,
+            )
             if source["status"] != "active":
                 raise ValueError("company source is disabled")
             if source["sync_mode"] != "observation":

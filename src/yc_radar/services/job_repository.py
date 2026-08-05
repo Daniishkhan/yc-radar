@@ -90,14 +90,19 @@ class JobRepository:
             ).scalar_one()
             return self.get_source(connection, int(source_id)), True, True
 
-    def get_source(self, connection: Connection, source_id: int) -> dict[str, Any]:
-        row = (
-            connection.execute(
-                select(company_sources_table).where(company_sources_table.c.id == source_id)
-            )
-            .mappings()
-            .one()
+    def get_source(
+        self,
+        connection: Connection,
+        source_id: int,
+        *,
+        for_update: bool = False,
+    ) -> dict[str, Any]:
+        statement = select(company_sources_table).where(
+            company_sources_table.c.id == source_id
         )
+        if for_update:
+            statement = statement.with_for_update()
+        row = connection.execute(statement).mappings().one()
         return dict(row)
 
     def get_source_by_external(

@@ -5,10 +5,10 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urljoin, urlparse
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from yc_radar.domain.job_sources import NormalizedJob, SourceSnapshot, SyncResult
@@ -20,6 +20,7 @@ from yc_radar.services.database import (
     normalize_company_name,
     primary_domain_for_website,
     sanitized_yc_company_website,
+    sync_runs_table,
 )
 from yc_radar.services.job_repository import JobRepository
 from yc_radar.services.job_sync_service import JobSyncService
@@ -37,6 +38,33 @@ class CompanyRegistrationResult:
     company_id: int
     company_created: bool
     matched_by: str
+
+
+@dataclass(frozen=True)
+class CompanySourceDependentCounts:
+    jobs: int
+    sync_runs: int
+
+
+@dataclass(frozen=True)
+class CompanySourceRepairState:
+    company_id: int | None
+    status: str
+    dependent_counts: CompanySourceDependentCounts
+
+
+@dataclass(frozen=True)
+class CompanySourceRepairResult:
+    action: Literal["reassign", "disable"]
+    applied: bool
+    company_source_id: int
+    provider: str
+    external_id: str
+    before: CompanySourceRepairState
+    after: CompanySourceRepairState
+    new_company_created: bool = False
+    new_company_name: str | None = None
+    new_company_slug: str | None = None
 
 
 class CompanyRegistry:
@@ -160,33 +188,269 @@ class CompanyRegistry:
             raise ValueError("company name is required")
         observed_at = now or datetime.now(UTC)
         with self.engine.begin() as connection:
-            slug = next_available_slug(
+            company_id, _ = _insert_provisional_company(
                 connection,
+                name=company_name,
                 requested_slug=requested_slug,
-                company_name=company_name,
-                domain=None,
-            )
-            company_id = int(
-                connection.execute(
-                    insert(companies_table)
-                    .values(
-                        name=company_name,
-                        normalized_name=normalize_company_name(company_name),
-                        slug=slug,
-                        website=None,
-                        primary_domain=None,
-                        identity_state="provisional",
-                        created_at=observed_at,
-                        updated_at=observed_at,
-                    )
-                    .returning(companies_table.c.id)
-                ).scalar_one()
+                now=observed_at,
             )
         return CompanyRegistrationResult(
             company_id=company_id,
             company_created=True,
             matched_by="provisional_company",
         )
+
+    def reassign_source_identity(
+        self,
+        *,
+        provider: str,
+        external_id: str,
+        expected_company_id: int,
+        reason: str,
+        target_company_id: int | None = None,
+        new_company_name: str | None = None,
+        new_company_slug: str | None = None,
+        apply: bool = False,
+        now: datetime | None = None,
+    ) -> CompanySourceRepairResult:
+        """Move one provider identity only after explicit, fail-closed operator checks.
+
+        Normal registration deliberately cannot move a provider identity. This exceptional path
+        requires the caller to name the source's current owner and either an existing target or a
+        new isolated provisional company. Jobs and sync runs remain attached to the unchanged
+        company-source ID.
+        """
+        normalized_provider, normalized_external_id, repair_reason = _repair_inputs(
+            provider=provider,
+            external_id=external_id,
+            expected_company_id=expected_company_id,
+            reason=reason,
+        )
+        proposed_name = (new_company_name or "").strip() or None
+        if (target_company_id is None) == (proposed_name is None):
+            raise ValueError(
+                "provide exactly one of target_company_id or new_company_name"
+            )
+        if target_company_id is not None and target_company_id <= 0:
+            raise ValueError("target_company_id must be greater than zero")
+        if new_company_slug and proposed_name is None:
+            raise ValueError("new_company_slug requires new_company_name")
+
+        if apply:
+            create_schema(self.engine)
+        observed_at = now or datetime.now(UTC)
+        with self.engine.begin() as connection:
+            source = _locked_source_for_repair(
+                connection,
+                provider=normalized_provider,
+                external_id=normalized_external_id,
+                expected_company_id=expected_company_id,
+            )
+            _reject_running_source_syncs(connection, int(source["id"]))
+
+            owner_ids = {expected_company_id}
+            if target_company_id is not None:
+                owner_ids.add(target_company_id)
+            owners = _locked_companies(connection, owner_ids)
+            if expected_company_id not in owners:
+                raise ValueError(f"unknown expected company_id: {expected_company_id}")
+            if target_company_id is not None and target_company_id not in owners:
+                raise ValueError(f"unknown target company_id: {target_company_id}")
+            if target_company_id == expected_company_id:
+                raise ValueError("target company already owns this source")
+
+            counts_before = _source_dependent_counts(connection, int(source["id"]))
+            target_name: str | None = None
+            target_slug: str | None = None
+            created = False
+            resolved_target_id = target_company_id
+            if target_company_id is not None:
+                target_name = str(owners[target_company_id]["name"])
+                target_slug = str(owners[target_company_id]["slug"])
+            else:
+                assert proposed_name is not None
+                target_name = proposed_name
+                target_slug = next_available_slug(
+                    connection,
+                    requested_slug=new_company_slug,
+                    company_name=proposed_name,
+                    domain=None,
+                )
+                if apply:
+                    resolved_target_id, target_slug = _insert_provisional_company(
+                        connection,
+                        name=proposed_name,
+                        requested_slug=new_company_slug,
+                        now=observed_at,
+                    )
+                    created = True
+
+            before = CompanySourceRepairState(
+                company_id=expected_company_id,
+                status=str(source["status"]),
+                dependent_counts=counts_before,
+            )
+            if not apply:
+                return CompanySourceRepairResult(
+                    action="reassign",
+                    applied=False,
+                    company_source_id=int(source["id"]),
+                    provider=normalized_provider,
+                    external_id=normalized_external_id,
+                    before=before,
+                    after=CompanySourceRepairState(
+                        company_id=resolved_target_id,
+                        status=str(source["status"]),
+                        dependent_counts=counts_before,
+                    ),
+                    new_company_created=False,
+                    new_company_name=target_name,
+                    new_company_slug=target_slug,
+                )
+
+            assert resolved_target_id is not None
+            metadata = _metadata_with_identity_repair(
+                source.get("metadata"),
+                action="reassign",
+                reason=repair_reason,
+                repaired_at=observed_at,
+                old_company_id=expected_company_id,
+                new_company_id=resolved_target_id,
+                old_status=str(source["status"]),
+                new_status=str(source["status"]),
+            )
+            changed = connection.execute(
+                update(company_sources_table)
+                .where(
+                    company_sources_table.c.id == source["id"],
+                    company_sources_table.c.company_id == expected_company_id,
+                )
+                .values(
+                    company_id=resolved_target_id,
+                    metadata=metadata,
+                    updated_at=observed_at,
+                )
+            )
+            if changed.rowcount != 1:
+                raise CompanyIdentityConflict("company source owner changed during repair")
+            counts_after = _source_dependent_counts(connection, int(source["id"]))
+            if counts_after != counts_before:
+                raise CompanyIdentityConflict(
+                    "company source dependents changed during identity repair"
+                )
+
+            return CompanySourceRepairResult(
+                action="reassign",
+                applied=True,
+                company_source_id=int(source["id"]),
+                provider=normalized_provider,
+                external_id=normalized_external_id,
+                before=before,
+                after=CompanySourceRepairState(
+                    company_id=resolved_target_id,
+                    status=str(source["status"]),
+                    dependent_counts=counts_after,
+                ),
+                new_company_created=created,
+                new_company_name=target_name,
+                new_company_slug=target_slug,
+            )
+
+    def disable_source_identity(
+        self,
+        *,
+        provider: str,
+        external_id: str,
+        expected_company_id: int,
+        reason: str,
+        apply: bool = False,
+        now: datetime | None = None,
+    ) -> CompanySourceRepairResult:
+        """Disable one incorrectly modeled source without deleting its jobs or run history."""
+        normalized_provider, normalized_external_id, repair_reason = _repair_inputs(
+            provider=provider,
+            external_id=external_id,
+            expected_company_id=expected_company_id,
+            reason=reason,
+        )
+        if apply:
+            create_schema(self.engine)
+        observed_at = now or datetime.now(UTC)
+        with self.engine.begin() as connection:
+            source = _locked_source_for_repair(
+                connection,
+                provider=normalized_provider,
+                external_id=normalized_external_id,
+                expected_company_id=expected_company_id,
+            )
+            _reject_running_source_syncs(connection, int(source["id"]))
+            owners = _locked_companies(connection, {expected_company_id})
+            if expected_company_id not in owners:
+                raise ValueError(f"unknown expected company_id: {expected_company_id}")
+            if source["status"] == "disabled":
+                raise ValueError("company source is already disabled")
+
+            counts_before = _source_dependent_counts(connection, int(source["id"]))
+            before = CompanySourceRepairState(
+                company_id=expected_company_id,
+                status=str(source["status"]),
+                dependent_counts=counts_before,
+            )
+            after = CompanySourceRepairState(
+                company_id=expected_company_id,
+                status="disabled",
+                dependent_counts=counts_before,
+            )
+            if not apply:
+                return CompanySourceRepairResult(
+                    action="disable",
+                    applied=False,
+                    company_source_id=int(source["id"]),
+                    provider=normalized_provider,
+                    external_id=normalized_external_id,
+                    before=before,
+                    after=after,
+                )
+
+            metadata = _metadata_with_identity_repair(
+                source.get("metadata"),
+                action="disable",
+                reason=repair_reason,
+                repaired_at=observed_at,
+                old_company_id=expected_company_id,
+                new_company_id=expected_company_id,
+                old_status=str(source["status"]),
+                new_status="disabled",
+            )
+            changed = connection.execute(
+                update(company_sources_table)
+                .where(
+                    company_sources_table.c.id == source["id"],
+                    company_sources_table.c.company_id == expected_company_id,
+                    company_sources_table.c.status == source["status"],
+                )
+                .values(status="disabled", metadata=metadata, updated_at=observed_at)
+            )
+            if changed.rowcount != 1:
+                raise CompanyIdentityConflict("company source changed during repair")
+            counts_after = _source_dependent_counts(connection, int(source["id"]))
+            if counts_after != counts_before:
+                raise CompanyIdentityConflict(
+                    "company source dependents changed during identity repair"
+                )
+            return CompanySourceRepairResult(
+                action="disable",
+                applied=True,
+                company_source_id=int(source["id"]),
+                provider=normalized_provider,
+                external_id=normalized_external_id,
+                before=before,
+                after=CompanySourceRepairState(
+                    company_id=expected_company_id,
+                    status="disabled",
+                    dependent_counts=counts_after,
+                ),
+            )
 
     def register_source_identity(
         self,
@@ -233,6 +497,178 @@ class CompanyRegistry:
                 f"to company_id={source['company_id']}"
             )
         return created
+
+
+def _repair_inputs(
+    *,
+    provider: str,
+    external_id: str,
+    expected_company_id: int,
+    reason: str,
+) -> tuple[str, str, str]:
+    normalized_provider = provider.strip().lower()
+    normalized_external_id = external_id.strip()
+    repair_reason = reason.strip()
+    if not normalized_provider or not normalized_external_id:
+        raise ValueError("provider and external_id are required")
+    if expected_company_id <= 0:
+        raise ValueError("expected_company_id must be greater than zero")
+    if not repair_reason:
+        raise ValueError("identity repair reason is required")
+    return normalized_provider, normalized_external_id, repair_reason
+
+
+def _locked_source_for_repair(
+    connection: Connection,
+    *,
+    provider: str,
+    external_id: str,
+    expected_company_id: int,
+) -> dict[str, Any]:
+    row = (
+        connection.execute(
+            select(company_sources_table)
+            .where(
+                company_sources_table.c.provider == provider,
+                company_sources_table.c.external_id == external_id,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise ValueError(
+            f"unknown company source: provider={provider!r} external_id={external_id!r}"
+        )
+    source = dict(row)
+    actual_company_id = int(source["company_id"])
+    if actual_company_id != expected_company_id:
+        raise CompanyIdentityConflict(
+            f"company source owner mismatch: expected company_id={expected_company_id}, "
+            f"actual company_id={actual_company_id}"
+        )
+    return source
+
+
+def _locked_companies(
+    connection: Connection,
+    company_ids: set[int],
+) -> dict[int, dict[str, Any]]:
+    rows = connection.execute(
+        select(companies_table)
+        .where(companies_table.c.id.in_(sorted(company_ids)))
+        .order_by(companies_table.c.id)
+        .with_for_update()
+    ).mappings()
+    return {int(row["id"]): dict(row) for row in rows}
+
+
+def _reject_running_source_syncs(connection: Connection, company_source_id: int) -> None:
+    running = int(
+        connection.scalar(
+            select(func.count())
+            .select_from(sync_runs_table)
+            .where(
+                sync_runs_table.c.company_source_id == company_source_id,
+                sync_runs_table.c.status == "running",
+            )
+        )
+        or 0
+    )
+    if running:
+        raise CompanyIdentityConflict(
+            f"company source has {running} running sync run(s); refusing identity repair"
+        )
+
+
+def _source_dependent_counts(
+    connection: Connection,
+    company_source_id: int,
+) -> CompanySourceDependentCounts:
+    jobs = int(
+        connection.scalar(
+            select(func.count())
+            .select_from(jobs_table)
+            .where(jobs_table.c.company_source_id == company_source_id)
+        )
+        or 0
+    )
+    sync_runs = int(
+        connection.scalar(
+            select(func.count())
+            .select_from(sync_runs_table)
+            .where(sync_runs_table.c.company_source_id == company_source_id)
+        )
+        or 0
+    )
+    return CompanySourceDependentCounts(jobs=jobs, sync_runs=sync_runs)
+
+
+def _insert_provisional_company(
+    connection: Connection,
+    *,
+    name: str,
+    requested_slug: str | None,
+    now: datetime,
+) -> tuple[int, str]:
+    slug = next_available_slug(
+        connection,
+        requested_slug=requested_slug,
+        company_name=name,
+        domain=None,
+    )
+    company_id = int(
+        connection.execute(
+            insert(companies_table)
+            .values(
+                name=name,
+                normalized_name=normalize_company_name(name),
+                slug=slug,
+                website=None,
+                primary_domain=None,
+                identity_state="provisional",
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(companies_table.c.id)
+        ).scalar_one()
+    )
+    return company_id, slug
+
+
+def _metadata_with_identity_repair(
+    existing_metadata: Any,
+    *,
+    action: Literal["reassign", "disable"],
+    reason: str,
+    repaired_at: datetime,
+    old_company_id: int,
+    new_company_id: int,
+    old_status: str,
+    new_status: str,
+) -> dict[str, Any]:
+    metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+    existing_history = metadata.get("identity_repair")
+    if isinstance(existing_history, list):
+        history = list(existing_history)
+    elif existing_history is None:
+        history = []
+    else:
+        history = [existing_history]
+    history.append(
+        {
+            "action": action,
+            "reason": reason,
+            "repaired_at": repaired_at.isoformat(),
+            "old_company_id": old_company_id,
+            "new_company_id": new_company_id,
+            "old_status": old_status,
+            "new_status": new_status,
+        }
+    )
+    metadata["identity_repair"] = history
+    return metadata
 
 
 def sync_yc_job_snapshots(
